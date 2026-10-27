@@ -571,6 +571,7 @@ export interface AppSettings {
   apiKey: string;
   model: string;
   opencodeUrl: string;
+  opencodeBin: string;
   ragflowBaseUrl: string;
   ragflowApiKey: string;
   ragflowEnabledKbs: string[];
@@ -592,6 +593,7 @@ export function getSettings(): AppSettings {
     apiKey: map.llm_api_key ?? process.env.LLM_API_KEY ?? '',
     model: map.llm_model ?? process.env.LLM_MODEL ?? 'deepseek-chat',
     opencodeUrl: map.opencode_url ?? DEFAULT_OPENCODE_URL,
+    opencodeBin: map.opencode_bin ?? '',
     ragflowBaseUrl: map.ragflow_base_url ?? DEFAULT_RAGFLOW_URL,
     ragflowApiKey: map.ragflow_api_key ?? process.env.RAGFLOW_API_KEY ?? '',
     ragflowEnabledKbs: enabled,
@@ -606,6 +608,7 @@ export function saveSettings(next: Partial<AppSettings>): void {
   if (next.apiKey !== undefined) stmt.run('llm_api_key', next.apiKey);
   if (next.model !== undefined) stmt.run('llm_model', next.model);
   if (next.opencodeUrl !== undefined) stmt.run('opencode_url', next.opencodeUrl);
+  if (next.opencodeBin !== undefined) stmt.run('opencode_bin', next.opencodeBin);
   if (next.ragflowBaseUrl !== undefined) stmt.run('ragflow_base_url', next.ragflowBaseUrl);
   if (next.ragflowApiKey !== undefined) stmt.run('ragflow_api_key', next.ragflowApiKey);
   if (next.ragflowEnabledKbs !== undefined) stmt.run('ragflow_enabled_kbs', JSON.stringify(next.ragflowEnabledKbs));

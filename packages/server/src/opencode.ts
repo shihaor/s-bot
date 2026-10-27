@@ -1,12 +1,12 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import AdmZip from 'adm-zip';
 import { dirname, join, resolve } from 'node:path';
 import { OpenCode } from '@opencode/client';
 import type { Agent, ModelInfo } from '@sbot/shared';
-import { getAgentSession, saveAgentSession } from './repo.js';
+import { getAgentSession, getSettings, saveAgentSession } from './repo.js';
 
 const isWin = process.platform === 'win32';
 const exeName = isWin ? 'opencode.exe' : 'opencode';
@@ -41,6 +41,7 @@ function pathCandidates(): string[] {
   const list: string[] = [];
   const add = (p?: string | null) => { if (p) list.push(p); };
   add(process.env.SBOT_OPENCODE_BIN);
+  add(getSettings().opencodeBin);
   add(join(sidecarDir, exeName));
   // 开发态：仓库根目录的 node_modules
   add(resolve(process.cwd(), 'node_modules/@opencode/cli/bin', exeName));
@@ -55,9 +56,31 @@ function pathCandidates(): string[] {
   }
 
   if (isWin) {
-    add(join(process.env.LOCALAPPDATA ?? '', 'Programs', 'opencode', 'opencode.exe'));
+    const local = process.env.LOCALAPPDATA ?? '';
+    const programDirs = [process.env.ProgramFiles, process.env['ProgramFiles(x86)'], local && join(local, 'Programs')]
+      .filter(Boolean) as string[];
+
+    // opencode 桌面版自带 CLI
+    add(join(local, 'Programs', '@opencodedesktop', 'resources', 'opencode-cli.exe'));
+    add(join(local, 'Programs', 'OpenCode', 'resources', 'opencode-cli.exe'));
+    add(join(local, 'Programs', 'opencode', 'resources', 'opencode-cli.exe'));
+    for (const dir of programDirs) {
+      add(join(dir, 'OpenCode', 'resources', 'opencode-cli.exe'));
+      add(join(dir, '@opencodedesktop', 'resources', 'opencode-cli.exe'));
+    }
+    // 扫描 %LOCALAPPDATA%\Programs\*（桌面版装在哪一层都能找到）
+    try {
+      for (const entry of readdirSync(join(local, 'Programs'), { withFileTypes: true })) {
+        if (entry.isDirectory()) add(join(local, 'Programs', entry.name, 'resources', 'opencode-cli.exe'));
+      }
+    } catch { /* ignore */ }
+
     add(join(process.env.USERPROFILE ?? '', '.opencode', 'bin', 'opencode.exe'));
+    add(join(local, 'Programs', 'opencode', 'opencode.exe'));
   } else {
+    add('/Applications/OpenCode.app/Contents/Resources/opencode-cli');
+    add(join(process.env.HOME ?? '', 'Applications/OpenCode.app/Contents/Resources/opencode-cli'));
+    add('/opt/OpenCode/resources/opencode-cli');
     add(join(process.env.HOME ?? '', '.opencode', 'bin', 'opencode'));
     add('/usr/local/bin/opencode');
   }
@@ -149,6 +172,10 @@ function writeConfig(model: ModelInfo) {  const dir = join(configHome, 'opencode
   if (json === lastConfig) return;
   lastConfig = json;
   writeFileSync(join(dir, 'opencode.json'), json, 'utf8');
+}
+
+export function resetBinaryCache(): void {
+  binCache = undefined;
 }
 
 async function waitHealthy(baseUrl: string, authorization: string, timeout = 30000): Promise<boolean> {  const at = Date.now();

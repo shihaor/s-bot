@@ -449,7 +449,7 @@ export default function App() {
         setConversations(c);
         setModels(ms);
         setTasks(ts);
-        setRuntime(r.mode === 'mock' ? 'mock 模拟' : r.label);
+        setRuntime(r.mode === 'mock' ? '本地模式' : r.label);
         setActiveId(c.find((x) => x.type === 'group')?.id ?? c[0]?.id ?? null);
         void loadKbs();
         // 首次启动探测 opencode：没有就提示装离线包
@@ -720,7 +720,7 @@ export default function App() {
   async function refreshRuntimeInfo() {
     try {
       const r = await fetchRuntime();
-      setRuntime(r.mode === 'mock' ? 'mock 模拟' : r.label);
+      setRuntime(r.mode === 'mock' ? '本地模式' : r.label);
     } catch {
       /* ignore */
     }
@@ -1067,7 +1067,14 @@ export default function App() {
         <div className="brand">
           <div className="logo"><span>S</span></div>
           <b>S-BOT</b>
-          <span className="mode">{runtime || '本地'}</span>
+          <span
+            className="mode"
+            title="点击去设置里配置模型"
+            style={{ cursor: 'pointer' }}
+            onClick={() => setView('settings')}
+          >
+            {runtime || '本地'}
+          </span>
         </div>
         {!isElectron && <div className="winbtns"><i>–</i><i>□</i><i>×</i></div>}
       </div>

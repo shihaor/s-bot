@@ -50,6 +50,7 @@ import {
   getStatus as getOpencodeStatus,
   importableModels,
   installFromZip,
+  resetBinaryCache,
   resolvePermission,
   runAgent,
   shutdown as shutdownOpencode,
@@ -73,7 +74,7 @@ app.get('/api/runtime', (c) => {
   if (ready && oc.available && mode !== 'llm' && mode !== 'mock') {
     return c.json({ mode: 'opencode', label: `opencode · ${d!.name}` });
   }
-  return c.json({ mode: ready ? 'llm' : 'mock', label: ready ? d!.name : 'mock 模拟' });
+  return c.json({ mode: ready ? 'llm' : 'unset', label: ready ? d!.name : '未配置模型' });
 });
 
 app.get('/api/opencode/status', (c) => c.json({ data: getOpencodeStatus() }));
@@ -102,10 +103,12 @@ app.patch('/api/settings', async (c) => {
     apiKey: typeof b?.apiKey === 'string' ? b.apiKey.trim() : undefined,
     model: typeof b?.model === 'string' ? b.model.trim() : undefined,
     opencodeUrl: typeof b?.opencodeUrl === 'string' ? b.opencodeUrl.trim() : undefined,
+    opencodeBin: typeof b?.opencodeBin === 'string' ? b.opencodeBin.trim() : undefined,
     ragflowBaseUrl: typeof b?.ragflowBaseUrl === 'string' ? b.ragflowBaseUrl.trim() : undefined,
     ragflowApiKey: typeof b?.ragflowApiKey === 'string' ? b.ragflowApiKey.trim() : undefined,
     ragflowEnabledKbs: Array.isArray(b?.ragflowEnabledKbs) ? b.ragflowEnabledKbs.map(String) : undefined,
   });
+  resetBinaryCache();
   return c.json({ data: getSettings() });
 });
 

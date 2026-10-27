@@ -1,52 +1,52 @@
 {
-    "name":  "@sbot/desktop",
-    "version":  "0.1.0",
-    "private":  true,
-    "type":  "module",
-    "main":  "dist/main.js",
-    "scripts":  {
-                    "dev":  "electron .",
-                    "build:main":  "tsc -p tsconfig.json",
-                    "prepare:app":  "node scripts/prepare.mjs",
-                    "dist":  "npm run build:main \u0026\u0026 npm run prepare:app \u0026\u0026 electron-builder --win nsis",
-                    "dist:dir":  "npm run build:main \u0026\u0026 npm run prepare:app \u0026\u0026 electron-builder --dir"
-                },
-    "devDependencies":  {
-                            "@types/node":  "^22.0.0",
-                            "electron":  "^45.0.0",
-                            "electron-builder":  "^26.0.0",
-                            "esbuild":  "^0.25.0",
-                            "typescript":  "^5.0.0"
-                        },
-    "build":  {
-                  "appId":  "com.sbot.desktop",
-                  "productName":  "S-BOT",
-                  "directories":  {
-                                      "output":  "release"
-                                  },
-                  "files":  [
-                                "dist/**/*",
-                                "server/**/*",
-                                "web/**/*",
-                                "assets/**/*",
-                                "package.json"
-                            ],
-                  "asar":  true,
-                  "win":  {
-                              "target":  [
-                                             "nsis"
-                                         ],
-                              "icon":  "assets/icon.png"
-                          },
-                  "linux":  {
-                                "target":  [
-                                               "AppImage"
-                                           ],
-                                "icon":  "assets/icon.png"
-                            },
-                  "nsis":  {
-                               "oneClick":  false,
-                               "allowToChangeInstallationDirectory":  true
-                           }
-              }
+  "name": "@sbot/desktop",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "build:main": "tsc -p tsconfig.json",
+    "prepare:app": "node scripts/prepare.mjs",
+    "dist": "npm run build:main && npm run prepare:app && electron-builder --win nsis",
+    "dist:dir": "npm run build:main && npm run prepare:app && electron-builder --dir"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.0.0"
+  },
+  "build": {
+    "appId": "com.sbot.desktop",
+    "productName": "S-BOT",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "server/**/*",
+      "web/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
 }

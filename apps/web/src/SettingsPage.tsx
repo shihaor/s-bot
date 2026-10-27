@@ -48,6 +48,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   const [settings, setSettings] = useState<AppSettingsData | null>(null);
   const [ocStatus, setOcStatus] = useState<{ available: boolean; running: boolean; version?: string; bin?: string; error?: string } | null>(null);
   const [ocUrl, setOcUrl] = useState('');
+  const [ocBin, setOcBin] = useState('');
   const [ocBusy, setOcBusy] = useState(false);
   const [kbStatus, setKbStatus] = useState<{ ok: boolean; configured: boolean; baseUrl: string; error?: string; datasets?: number } | null>(null);
   const [kbs, setKbs] = useState<KbDataset[]>([]);
@@ -72,6 +73,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
       const [s, oc] = await Promise.all([fetchSettings(), fetchOpencodeStatus()]);
       setSettings(s);
       setOcUrl(s.opencodeUrl);
+      setOcBin(s.opencodeBin ?? '');
       setRfUrl(s.ragflowBaseUrl);
       setRfKey(s.ragflowApiKey);
       setOcStatus(oc);
@@ -272,6 +274,15 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
             placeholder="http://10.201.1.19:80/artifactory/installer/opencode/OpenCode.zip"
           />
         </label>
+        <label className="field" style={{ marginTop: 8 }}>
+          <span>本机可执行文件（自动找不到时手动指定）</span>
+          <input
+            className="input"
+            value={ocBin}
+            onChange={(e) => setOcBin(e.target.value)}
+            placeholder="C:\Users\你\AppData\Local\Programs\@opencodedesktop\resources\opencode-cli.exe"
+          />
+        </label>
         <div className="settings-actions">
           <button
             className="btn primary"
@@ -304,6 +315,21 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
             }}
           >
             仅检测
+          </button>
+          <button
+            className="btn"
+            onClick={async () => {
+              try {
+                await patchSettings({ opencodeBin: ocBin.trim() });
+                const st = await fetchOpencodeStatus();
+                setOcStatus(st);
+                onToast(st.available ? `已识别 ${st.version ?? ''}` : '还是没找到，请检查路径');
+              } catch (e) {
+                onToast(String(e));
+              }
+            }}
+          >
+            保存路径并检测
           </button>
         </div>
         <p className="sub" style={{ margin: '10px 0 0' }}>
