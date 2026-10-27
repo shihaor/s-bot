@@ -268,6 +268,8 @@ event: run.end         {}
 邀请会记录到服务端内存并通过 `/api/mattermost/mock/posts` 查看，不会真的发出去。后续接真实 Mattermost
 只需要填配置，调用方和 UI 都不用改。
 
+> Mattermost 配置卡片只在**本地模式**显示。切到「连接服务器」后这张卡片会隐藏，Mattermost 由服务端统一配置。
+
 邀请消息默认带上当前群名，也可以自己改。
 
 ### 成员加入事件

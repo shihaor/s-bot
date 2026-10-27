@@ -50,7 +50,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [form, setForm] = useState<ModelForm | null>(null);
   const [busy, setBusy] = useState(false);
-  const [mode, setMode] = useState<'local' | 'remote'>('local');
+  const [mode, setMode] = useState<'local' | 'remote'>(() => (localStorage.getItem('sbot.server') ? 'remote' : 'local'));
   const [testMsg, setTestMsg] = useState<Record<string, string>>({});
 
   const [settings, setSettings] = useState<AppSettingsData | null>(null);
@@ -247,10 +247,12 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
     setTestMsg((s) => ({ ...s, [m.id]: r.ok ? `连接成功 · ${r.ms}ms` : `失败：${r.error ?? r.status}` }));
   }
 
+  const isRemote = mode === 'remote' || !!localStorage.getItem('sbot.server');
+
   return (
     <div className="page settings">
       <div className="page-head">
-        <div><h2>设置</h2><p>本地模式，配置存在本机数据库里。</p></div>
+        <div><h2>设置</h2><p>{isRemote ? '服务器模式，配置由服务端管理。' : '本地模式，配置存在本机数据库里。'}</p></div>
       </div>
 
       <div className="set-card">
@@ -571,6 +573,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
         </p>
       </div>
 
+      {!isRemote && (
       <div className="set-card">
         <div className="card-head">
           <div>
@@ -652,6 +655,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
           填好之后自动切到真实 Mattermost。Token 需要能读取用户、状态和发私信。
         </p>
       </div>
+      )}
 
       <div className="set-card">
         <div className="card-head">
