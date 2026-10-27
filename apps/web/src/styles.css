@@ -163,6 +163,14 @@ textarea { font-family: inherit; color: inherit; background: none; border: 0; ou
   padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: #161a21; border: 1px solid var(--border-soft);
   font-size: 14px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
 }
+.bubble.summary {
+  background: linear-gradient(180deg, rgba(91, 140, 255, 0.12), rgba(91, 140, 255, 0.04));
+  border-color: rgba(91, 140, 255, 0.32);
+  font-size: 13px;
+  line-height: 1.9;
+  padding: 12px 15px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+}
 .msg.user { flex-direction: row-reverse; }
 .msg.user .msg-body { max-width: min(620px, 70%); }
 .msg.user .bubble {
@@ -867,6 +875,7 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 [data-theme="light"] .me .badge { background: #fff4d6; color: #8a5c00; }
 [data-theme="light"] .sec span { color: #aab3c5; }
 [data-theme="light"] .bubble { background: #ffffff; border-color: #e2e8f2; }
+[data-theme="light"] .bubble.summary { background: linear-gradient(180deg, #f2f6ff, #ffffff); border-color: #c9d9ff; box-shadow: 0 6px 20px rgba(59, 110, 240, 0.08); }
 [data-theme="light"] .msg.user .bubble { background: linear-gradient(180deg, #3f74f5, #2f5fd8); border-color: #2f5fd8; color: #ffffff; }
 [data-theme="light"] .send:disabled,
 [data-theme="light"] .btn.primary:disabled { background: #e3e8f1; color: #9aa5b8; }

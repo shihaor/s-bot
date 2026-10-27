@@ -819,13 +819,14 @@ app.delete('/api/conversations/:id/members/:agentId', (c) => {
   if (!conv) return c.json({ error: 'conversation not found' }, 404);
 
   const agent = getAgent(agentId);
+  const human = getHuman(agentId);
   removeMember(id, agentId);
   addMessage({
     conversationId: id,
     authorType: 'system',
     authorId: null,
     role: 'system',
-    text: `${agent?.name ?? '成员'} 被移出群聊`,
+    text: `${agent?.name ?? human?.name ?? '成员'} 被移出群聊`,
   });
   return c.json({ data: getConversation(id) });
 });
@@ -1380,9 +1381,94 @@ async function buildJoinQuestion(
   return fallback;
 }
 
+/** 把模型输出整理成适合聊天气泡显示的纯文本排版 */
+function tidySummary(text: string): string {
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/^\s*[-*]\s+/gm, '• ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/** 给刚加入的真人做一段带排版的上下文摘要，并在末尾请他发表看法 */
+async function buildContextSummary(
+  conv: Conversation,
+  human: { name: string; role: string },
+  asker: { name: string; role: string },
+  context: Array<{ text: string; authorType: string; authorId: string | null; authorName?: string | null }>,
+): Promise<string> {
+  const names = conv.members.map((m) => `${m.name}${m.role ? `（${m.role}）` : ''}`).join('、');
+  const recent = context.slice(-8);
+  const contextText = recent
+    .map((m) => `${senderName(conv, m as any)}：${m.text}`)
+    .join('\n')
+    .slice(0, 2400);
+
+  const fallbackLines = [
+    '📋 群聊上下文摘要',
+    '',
+    `群聊：${conv.title}`,
+    `成员：${names}`,
+    '',
+  ];
+  if (recent.length) {
+    fallbackLines.push('最近在讨论');
+    for (const m of recent.slice(-4)) {
+      fallbackLines.push(`• ${senderName(conv, m as any)}：${m.text.replace(/\s+/g, ' ').slice(0, 90)}`);
+    }
+    fallbackLines.push('', '接下来');
+    fallbackLines.push(`• 上面这些点里，哪些和你的工作直接相关？`);
+  } else {
+    fallbackLines.push('群里还没有历史发言。');
+  }
+  fallbackLines.push('', `@${human.name} 你先看下上面的上下文，从${human.role || '你的角度'}看，有什么风险或补充？`);
+  const fallback = fallbackLines.join('\n');
+
+  const cfg = toConfig(getDefaultModel());
+  if (!cfg?.baseUrl || !cfg.apiKey) return fallback;
+
+  try {
+    const reply = await completeChat(
+      cfg,
+      [
+        {
+          role: 'system',
+          content: [
+            `你是${asker.name}，${asker.role}。群聊「${conv.title}」刚加入真人同事 ${human.name}${human.role ? `（${human.role}）` : ''}。`,
+            '请给 TA 写一段带排版的上下文摘要，让 TA 快速跟上，并在最后问 TA 的看法。',
+            '格式要求：',
+            '1. 第一行固定是：📋 群聊上下文摘要',
+            '2. 依次写「最近在讨论」「已经对齐」「还需要确认」三段，没有内容的段可以省略',
+            '3. 每段用 • 列 1~3 条，每条不超过 40 字',
+            '4. 不要用 Markdown 的 #、**、表格，用空行分段',
+            `5. 最后单独一行 @${human.name}，从 TA 的角色问一个具体问题`,
+            '6. 总字数控制在 260 字以内，只输出摘要正文',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: `最近发言：\n${contextText || '（还没有历史发言）'}\n\n群成员：${names}`,
+        },
+      ],
+      { temperature: 0.35, maxTokens: 520 },
+    );
+
+    let text = tidySummary(reply || fallback);
+    if (!text.includes('摘要')) text = `📋 群聊上下文摘要\n\n${text}`;
+    if (!text.includes(`@${human.name}`)) {
+      text += `\n\n@${human.name} 你先看下上面的上下文，从${human.role || '你的角度'}看，有什么风险或补充？`;
+    }
+    return text.slice(0, 1200);
+  } catch {
+    return fallback;
+  }
+}
+
 /**
  * 成员加入群聊后给智能体发一个「事件」：
- * - 真人：让一个现有智能体 @他，请他对当前上下文发表看法
+ * - 真人：让一个现有智能体给他发一段带排版的上下文摘要，并请他发表看法
  * - 智能体：现有智能体根据新成员的擅长方向提问，新智能体再回答一句
  */
 async function sendJoinEvent(conversationId: string, kind: 'human' | 'agent', memberId: string): Promise<void> {
@@ -1394,22 +1480,24 @@ async function sendJoinEvent(conversationId: string, kind: 'human' | 'agent', me
   const asker = askerMember ? getAgent(askerMember.memberId) : null;
   if (!asker) return;
 
-  const context = joinContext(conversationId);
   if (kind === 'human') {
     const human = getHuman(memberId);
     if (!human) return;
-    const question = await buildJoinQuestion(conv, 'human', human, asker, context);
+    const context = joinContext(conversationId, 10);
+    const summary = await buildContextSummary(conv, human, asker, context);
     addMessage({
       conversationId,
       authorType: 'agent',
       authorId: asker.id,
       role: 'assistant',
-      text: question,
+      text: summary,
+      parts: [{ type: 'context-summary' }],
     });
     if (human.simulated) void scheduleSimulatedReply(conversationId, human.id, Date.now());
     return;
   }
 
+  const context = joinContext(conversationId);
   const newAgent = getAgent(memberId);
   if (!newAgent) return;
   const question = await buildJoinQuestion(conv, 'agent', newAgent, asker, context);

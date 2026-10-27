@@ -217,7 +217,9 @@ function renderParts(
       });
     } else if (part.type === 'image' && part.dataUrl) {
       files.push(<img key={i} className="msg-img" src={part.dataUrl} alt="" onClick={() => window.open(part.dataUrl, '_blank')} />);
-    } else {
+    } else if (part.type === 'context-summary') {
+      /* 摘要气泡的标记，正文已经渲染在 bubble 里，这里不重复出附件卡片 */
+    } else if (part.type === 'file' || part.name) {
       files.push(<div key={i} className="msg-file">📄 {part.name} · {fmtSize(Number(part.size ?? 0))}</div>);
     }
   });
@@ -1686,6 +1688,8 @@ export default function App() {
                     const authorKey = m.authorId ?? m.authorName ?? 'unknown';
                     const prevKey = prev ? prev.authorId ?? prev.authorName ?? 'unknown' : null;
                     const same = prev && prev.authorType === 'agent' && prevKey === authorKey;
+                    const isSummary = Array.isArray(m.parts)
+                      && m.parts.some((p) => (p as { type?: string } | null)?.type === 'context-summary');
                     return (
                       <div key={m.id} id={`m-${m.id}`} className={`msg ${same ? '' : 'gap'}`}>
                         {!same && person ? (
@@ -1701,7 +1705,7 @@ export default function App() {
                               <span className="time">{fmtTime(m.createdAt)}</span>
                             </div>
                           )}
-                          <div className="bubble"><RichText text={m.text} /></div>
+                          <div className={`bubble ${isSummary ? 'summary' : ''}`}><RichText text={m.text} /></div>
                           {renderParts(m, (id, status) => void handleTaskStatus(id, status), decidedTasks, (c) => setSelectedCitation(c))}
                           {m.status === 'interrupted' && <div className="interrupted">■ 已中断</div>}
                         </div>
