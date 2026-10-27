@@ -1306,7 +1306,7 @@ export default function App() {
                     if (m.authorType === 'system') {
                       return <div key={m.id} id={`m-${m.id}`} className="sys-line">{m.text}</div>;
                     }
-                    if (m.authorType === 'user') {
+                    if (m.authorType === 'user' || (m.authorType === 'human' && m.authorId === user?.id)) {
                       return (
                         <div key={m.id} id={`m-${m.id}`} className="msg user">
                           <div className="msg-body">

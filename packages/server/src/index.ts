@@ -839,8 +839,20 @@ app.post('/api/conversations/:id/messages', async (c) => {
 
   const userMessage = addMessage({
     conversationId: id,
-    authorType: 'user',
-    authorId: null,
+    authorType: c.req.header('x-sbot-user') ? 'human' : 'user',
+    authorId: c.req.header('x-sbot-user') || null,
+    authorName: (() => {
+      const uid = c.req.header('x-sbot-user');
+      return uid ? getHuman(uid)?.name ?? null : null;
+    })(),
+    authorColor: (() => {
+      const uid = c.req.header('x-sbot-user');
+      return uid ? getHuman(uid)?.color ?? null : null;
+    })(),
+    authorInitial: (() => {
+      const uid = c.req.header('x-sbot-user');
+      return uid ? getHuman(uid)?.initial ?? null : null;
+    })(),
     role: 'user',
     text,
     parts,
