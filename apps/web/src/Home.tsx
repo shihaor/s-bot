@@ -328,7 +328,7 @@ export default function Home({
             </div>
           </div>
           <div className="f-meta">
-            <div>版本 <b>v0.1.2</b></div>
+            <div>版本 <b>v0.1.3</b></div>
             <div>发布于 <b>2026-10-27</b></div>
             <div>Electron 45 · Node 24 · node:sqlite</div>
           </div>
