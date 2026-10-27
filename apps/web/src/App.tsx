@@ -73,7 +73,15 @@ interface Streaming {
   tools: Array<{ toolId: string; name: string; detail: string; status: 'running' | 'ok' | 'failed' }>;
 }
 
-type Attachment = { type: 'image' | 'file'; name: string; size: number; dataUrl?: string };
+type Attachment = { type: 'image' | 'file'; name: string; size: number; mime?: string; dataUrl?: string; text?: string };
+
+const TEXT_FILE_EXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|xml|html?|css|js|jsx|ts|tsx|py|go|java|kt|rs|c|cpp|h|hpp|sh|bash|zsh|ps1|sql|log|toml|ini|conf|env)$/i;
+
+function isTextFile(file: File): boolean {
+  if (file.size > 512 * 1024) return false;
+  if (TEXT_FILE_EXT.test(file.name)) return true;
+  return /^text\//.test(file.type) || /application\/(json|xml|javascript|x-yaml|x-sh)/.test(file.type);
+}
 
 function fmtSize(n: number) {
   if (n < 1024) return `${n} B`;
@@ -1049,12 +1057,17 @@ export default function App() {
 
   function readFile(file: File): Promise<Attachment> {
     return new Promise((resolve) => {
-      const base: Attachment = { type: 'file', name: file.name, size: file.size };
+      const base: Attachment = { type: 'file', name: file.name, size: file.size, mime: file.type || undefined };
       if (file.type.startsWith('image/')) {
         base.type = 'image';
         const reader = new FileReader();
         reader.onload = () => resolve({ ...base, dataUrl: String(reader.result) });
         reader.readAsDataURL(file);
+      } else if (isTextFile(file)) {
+        const reader = new FileReader();
+        reader.onload = () => resolve({ ...base, text: String(reader.result ?? '').slice(0, 200_000) });
+        reader.onerror = () => resolve(base);
+        reader.readAsText(file, 'utf-8');
       } else {
         resolve(base);
       }

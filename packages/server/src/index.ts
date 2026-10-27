@@ -1510,6 +1510,51 @@ function buildOpencodePrompt(
   ].join('\n');
 }
 
+function formatBytes(size?: number): string {
+  const n = Number(size ?? 0);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** 把消息里上传的附件转成模型能读的上下文（文本文件读正文，图片只报文件名） */
+function attachmentText(parts: unknown, totalLimit = 12_000): string {
+  if (!Array.isArray(parts) || parts.length === 0) return '';
+  const blocks: string[] = [];
+  let budget = totalLimit;
+
+  for (const raw of parts) {
+    if (!raw || typeof raw !== 'object') continue;
+    const p = raw as { type?: string; name?: string; size?: number; mime?: string; text?: string };
+    const name = p.name?.trim() || '附件';
+    const meta = [p.mime, formatBytes(p.size)].filter(Boolean).join('，');
+
+    if (p.type === 'image') {
+      blocks.push(`[图片] ${name}${meta ? `（${meta}）` : ''}：当前模型读不到图片内容，只能看到文件名。`);
+      continue;
+    }
+
+    const content = typeof p.text === 'string' ? p.text.trim() : '';
+    if (content && budget > 0) {
+      const clipped = content.slice(0, Math.min(6000, budget));
+      budget -= clipped.length;
+      blocks.push(
+        `[文件] ${name}${meta ? `（${meta}）` : ''}\n\`\`\`\n${clipped}${content.length > clipped.length ? '\n…（内容已截断）' : ''}\n\`\`\``,
+      );
+    } else {
+      blocks.push(`[文件] ${name}${meta ? `（${meta}）` : ''}：没有可读取的文本内容`);
+    }
+  }
+
+  return blocks.length ? `用户上传了附件：\n\n${blocks.join('\n\n')}` : '';
+}
+
+function textWithAttachments(text: string, parts: unknown, limit = 12_000): string {
+  const attachment = attachmentText(parts, limit);
+  return [text.trim(), attachment].filter(Boolean).join('\n\n');
+}
+
 app.post('/api/conversations/:id/messages', async (c) => {
   const id = c.req.param('id');
   const conv = getConversation(id);
@@ -1522,7 +1567,13 @@ app.post('/api/conversations/:id/messages', async (c) => {
 
   const history = listMessages(id, 20)
     .filter((m) => m.status === 'done' && (m.role === 'user' || m.role === 'assistant'))
-    .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.text }));
+    .map((m) => {
+      const extra = m.authorType === 'user' ? attachmentText(m.parts, 2500) : '';
+      return {
+        role: m.role as 'user' | 'assistant',
+        content: [m.text, extra].filter(Boolean).join('\n\n').slice(0, 12_000),
+      };
+    });
 
   const uid = c.req.header('x-sbot-user') || null;
   const author = uid ? getHuman(uid) : null;
@@ -1559,6 +1610,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
 
   const targets = suppressRun ? [] : pickTargets(conv, text);
   const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  const promptText = textWithAttachments(text, parts);
   const defaultModel = getDefaultModel();
   const fallback = toConfig(defaultModel);
   const runtimeMode = (process.env.SBOT_RUNTIME ?? 'auto').toLowerCase();
@@ -1638,7 +1690,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
         try {
           const sess = await ensureSession(id, agent);
           usedOpencode = true;
-          const prompt = buildOpencodePrompt(conv, agent, text, userMessage.createdAt, citations);
+          const prompt = buildOpencodePrompt(conv, agent, promptText, userMessage.createdAt, citations);
 
           for await (const ev of runAgent({ sessionId: sess.sessionId, prompt, signal: abortCtl.signal })) {
             if (aborted) break;
@@ -1717,7 +1769,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
               systemPrompt: agent.systemPrompt,
               skills: agent.skills,
               history,
-              userText: text,
+              userText: promptText,
               modelConfig: picked && picked.id !== defaultModel?.id ? toConfig(picked) : fallback,
               references: citations.length
                 ? citations.map((c) => `[${c.n}] ${c.doc}：${c.text}`).join('\n')
