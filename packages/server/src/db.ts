@@ -254,6 +254,7 @@ function seedSimulatedHumans() {
   const rows: Array<{ id: string; name: string; role: string; color: string; initial: string }> = [
     { id: 'hu_sim_lina', name: '李娜', role: '增长运营', color: '#FF7A9C', initial: '李' },
     { id: 'hu_sim_wang', name: '王强', role: '后端工程师', color: '#37C3D6', initial: '王' },
+    { id: 'hu_sim_chen', name: '陈晨', role: 'UI 设计师', color: '#A0E85C', initial: '陈' },
   ];
   for (const h of rows) {
     const byId = db.prepare('SELECT id FROM humans WHERE id = ?').get(h.id);
