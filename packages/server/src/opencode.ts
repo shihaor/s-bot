@@ -6,7 +6,7 @@ import AdmZip from 'adm-zip';
 import { dirname, join, resolve } from 'node:path';
 import { OpenCode } from '@opencode/client';
 import type { Agent, ModelInfo } from '@sbot/shared';
-import { getAgentSession, getSettings, saveAgentSession } from './repo.js';
+import { getAgentSession, getDefaultModel, getSettings, listModels, saveAgentSession } from './repo.js';
 
 const isWin = process.platform === 'win32';
 const exeName = isWin ? 'opencode.exe' : 'opencode';
@@ -36,6 +36,8 @@ let client: Client | null = null;
 let started: OpencodeStatus = { available: false, running: false };
 let binCache: { bin: string; version: string } | null | undefined;
 let starting: Promise<boolean> | null = null;
+/** 只用来让 opencode 加载 skill 的作用域，第一次列技能时创建 */
+let inventorySessionId: string | null = null;
 
 function pathCandidates(): string[] {
   const list: string[] = [];
@@ -148,30 +150,141 @@ function freePort(): Promise<number> {  return new Promise((res, rej) => {
 
 let lastConfig = '';
 
-function writeConfig(model: ModelInfo) {  const dir = join(configHome, 'opencode');
-  mkdirSync(dir, { recursive: true });
-  const config = {
-    $schema: 'https://opencode.ai/config.json',
-    model: `sbot/${model.model}`,
-    providers: {
-      sbot: {
-        name: 'S-BOT',
-        package: '@opencode/ai/providers/openai-compatible',
-        settings: { baseURL: model.baseUrl, apiKey: model.apiKey },
-        models: { [model.model]: { name: model.name } },
-      },
-    },
-    // 读自动放行；写文件和跑命令走审批
-    permissions: [
-      { action: 'edit', resource: '*', effect: 'ask' },
-      { action: 'shell', resource: '*', effect: 'ask' },
-      { action: 'external_directory', resource: '*', effect: 'ask' },
-    ],
-  };
+/** 仓库/项目根目录：优先找 .git / workspace 根，避免落到 packages/server */
+function projectRoot(): string {
+  let cur = process.cwd();
+  let firstPkg: string | null = null;
+  for (let i = 0; i < 10; i++) {
+    if (existsSync(join(cur, '.git'))) return cur;
+    const pkgFile = join(cur, 'package.json');
+    if (existsSync(pkgFile)) {
+      if (!firstPkg) firstPkg = cur;
+      try {
+        const pkg = JSON.parse(readFileSync(pkgFile, 'utf8')) as { workspaces?: unknown };
+        if (pkg.workspaces) return cur;
+      } catch { /* 继续往上找 */ }
+    }
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return firstPkg ?? process.cwd();
+}
+
+/** 本机 opencode 会去找的技能目录（sidecar 用独立 XDG，得显式挂进来） */
+function localSkillDirs(): string[] {
+  const root = projectRoot();
+  const dirs = [
+    join(homedir(), '.config', 'opencode', 'skills'),
+    join(homedir(), '.claude', 'skills'),
+    join(homedir(), '.agents', 'skills'),
+    join(root, '.opencode', 'skills'),
+    join(root, '.claude', 'skills'),
+    join(root, '.agents', 'skills'),
+  ];
+  return [...new Set(dirs)].filter((d) => existsSync(d));
+}
+
+/** 把 S-BOT 里的模型全部写进 sidecar 的 opencode 配置：同一个 baseUrl 一个 provider */
+function providerConfigFor(models: ModelInfo[], preferred: ModelInfo | null) {
+  const buckets = new Map<string, { baseUrl: string; apiKey: string; models: Record<string, { name: string }> }>();
+  for (const m of models) {
+    const baseUrl = m.baseUrl.trim();
+    if (!baseUrl) continue;
+    const key = baseUrl.replace(/\/+$/, '');
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = { baseUrl, apiKey: m.apiKey, models: {} };
+      buckets.set(key, bucket);
+    }
+    if (!bucket.apiKey && m.apiKey) bucket.apiKey = m.apiKey;
+    bucket.models[m.model] = { name: m.name };
+  }
+
+  const preferredKey = preferred?.baseUrl.trim().replace(/\/+$/, '');
+  const entries = [...buckets.entries()].sort((a, b) => {
+    if (a[0] === preferredKey) return -1;
+    if (b[0] === preferredKey) return 1;
+    return a[0].localeCompare(b[0]);
+  });
+
+  const providers: Record<string, any> = {};
+  const providerIdByUrl = new Map<string, string>();
+  entries.forEach(([key, bucket], i) => {
+    const id = i === 0 ? 'sbot' : `sbot-${i + 1}`;
+    providerIdByUrl.set(key, id);
+    providers[id] = {
+      name: i === 0 ? 'S-BOT' : `S-BOT ${i + 1}`,
+      package: '@opencode/ai/providers/openai-compatible',
+      settings: { baseURL: bucket.baseUrl, apiKey: bucket.apiKey },
+      models: bucket.models,
+    };
+  });
+
+  return { providers, providerIdByUrl };
+}
+
+export function configFilePath(): string {
+  return join(configHome, 'opencode', 'opencode.json');
+}
+
+function writeConfig(preferred?: ModelInfo | null) {
+  const file = configFilePath();
+  mkdirSync(dirname(file), { recursive: true });
+
+  // 保留已有配置：只列技能时不能把正在用的模型抹掉
+  let config: Record<string, any> = {};
+  if (existsSync(file)) {
+    try { config = JSON.parse(readFileSync(file, 'utf8')); } catch { config = {}; }
+  }
+
+  config.$schema = 'https://opencode.ai/config.json';
+
+  const allModels = listModels();
+  const def = preferred
+    ?? allModels.find((m) => m.isDefault)
+    ?? getDefaultModel()
+    ?? allModels[0]
+    ?? null;
+  const { providers, providerIdByUrl } = providerConfigFor(allModels, def);
+
+  if (Object.keys(providers).length) {
+    config.providers = providers;
+    if (def) {
+      const key = def.baseUrl.trim().replace(/\/+$/, '');
+      const pid = providerIdByUrl.get(key);
+      if (pid) config.model = `${pid}/${def.model}`;
+    }
+  } else {
+    delete config.providers;
+    delete config.model;
+  }
+
+  // 读自动放行；写文件和跑命令走审批
+  config.permissions = [
+    { action: 'edit', resource: '*', effect: 'ask' },
+    { action: 'shell', resource: '*', effect: 'ask' },
+    { action: 'external_directory', resource: '*', effect: 'ask' },
+  ];
+
+  const skills = localSkillDirs();
+  if (skills.length) config.skills = skills;
+  else delete config.skills;
+
   const json = JSON.stringify(config, null, 2);
   if (json === lastConfig) return;
   lastConfig = json;
-  writeFileSync(join(dir, 'opencode.json'), json, 'utf8');
+  writeFileSync(file, json, 'utf8');
+  // 配置一变，opencode 会重建 location，旧的作用域会话不再能列出技能
+  inventorySessionId = null;
+}
+
+/** 模型增删改后调用：强制重写 sidecar 配置，让 opencode 立刻看到全部模型 */
+export function syncModelConfig(): { count: number; path: string } {
+  lastConfig = '';
+  writeConfig();
+  const count = listModels().filter((m) => m.baseUrl.trim()).length;
+  return { count, path: configFilePath() };
 }
 
 export function resetBinaryCache(): void {
@@ -321,7 +434,7 @@ export function importableModels(): ImportableModel[] {
 }
 
 /** 确保 sidecar 起来；每次都会刷新配置（运行中热加载） */
-export async function ensureStarted(model: ModelInfo): Promise<boolean> {
+export async function ensureStarted(model?: ModelInfo | null): Promise<boolean> {
   writeConfig(model);
   if (proc && client) return true;
   if (starting) return starting;
@@ -392,6 +505,7 @@ export async function ensureStarted(model: ModelInfo): Promise<boolean> {
       proc = null;
       client = null;
       pumpStarted = false;
+      inventorySessionId = null;
       forgetSidecar();
     });
 
@@ -501,6 +615,139 @@ export async function resetSession(conversationId: string, agentId: string): Pro
     sessionId: `pending_${Date.now()}`,
     workspace: existing?.workspace ?? join(workspaceRoot, conversationId),
   });
+}
+
+/* ---------- 技能 ---------- */
+
+export interface OpencodeSkill {
+  id: string;
+  name: string;
+  description?: string;
+  autoinvoke?: boolean;
+  path: string;
+  content: string;
+}
+
+/**
+ * 列出 opencode 当前能看到的技能。
+ * opencode 只有在某个目录建过 session 后才会加载这个 location 的技能，
+ * 所以复用一个「技能清单」session 触发加载，而不是每次建新的。
+ */
+export async function listSkills(): Promise<OpencodeSkill[]> {
+  const oc = client;
+  if (!oc) throw new Error('opencode 还没启动');
+  const directory = workspaceRoot;
+
+  const fetchList = async () => {
+    const res = await oc.skill.list({ location: { directory } });
+    return res.data as OpencodeSkill[];
+  };
+
+  const warm = async () => {
+    const session = await oc.session.create({
+      location: { directory },
+      title: 'S-BOT · 技能清单',
+    });
+    inventorySessionId = session.id;
+  };
+
+  // 建完 session 后 location 是异步加载的，第一次通常拿不到，轮询一下
+  const waitForSkills = async () => {
+    for (let i = 0; i < 12; i++) {
+      const data = await fetchList();
+      if (data.length) return data;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return fetchList();
+  };
+
+  if (!inventorySessionId) {
+    await warm();
+    return waitForSkills();
+  }
+
+  const data = await fetchList();
+  if (data.length) return data;
+
+  // location 被卸载过（比如配置热更新），重建一次作用域
+  await warm();
+  return waitForSkills();
+}
+
+export interface SkillDraftInput {
+  id?: string;
+  name: string;
+  description: string;
+  content: string;
+  scope?: 'global' | 'project';
+  overwrite?: boolean;
+}
+
+function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function stripFrontmatter(text: string): string {
+  return text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trimStart();
+}
+
+function yamlString(value: string): string {
+  return JSON.stringify(value.replace(/\r?\n/g, ' ').trim());
+}
+
+/**
+ * 把确认过的草案写成 SKILL.md。
+ * 默认写到 ~/.config/opencode/skills/<id>/，也可以写到项目的 .opencode/skills/。
+ */
+export function createSkill(input: SkillDraftInput): { id: string; path: string; scope: 'global' | 'project'; reloaded: boolean } {
+  const name = input.name.trim();
+  const description = input.description.trim();
+  if (!name) throw new Error('技能名称不能为空');
+  if (!description) throw new Error('技能描述不能为空，模型靠它判断什么时候加载');
+
+  const scope: 'global' | 'project' = input.scope === 'project' ? 'project' : 'global';
+  const root = scope === 'project'
+    ? join(projectRoot(), '.opencode', 'skills')
+    : join(homedir(), '.config', 'opencode', 'skills');
+
+  let id = slugify(input.id?.trim() || name);
+  if (!id) id = `skill-${Date.now().toString(36)}`;
+  if (!/^[a-z0-9][a-z0-9_-]*$/.test(id)) throw new Error('技能 ID 只能用小写字母、数字、- 和 _');
+
+  const dir = join(root, id);
+  const file = join(dir, 'SKILL.md');
+  if (existsSync(file) && !input.overwrite) {
+    throw new Error(`技能「${id}」已存在，换个 ID 或确认覆盖`);
+  }
+
+  const body = stripFrontmatter(input.content ?? '');
+  const content = [
+    '---',
+    `name: ${yamlString(name)}`,
+    `description: ${yamlString(description)}`,
+    '---',
+    '',
+    body || '## 说明\n\n待补充。',
+    '',
+  ].join('\n');
+
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(file, content, 'utf8');
+
+  // 新目录要挂进 sidecar 配置，下一次列技能时重建作用域
+  writeConfig();
+  inventorySessionId = null;
+  return { id, path: file, scope, reloaded: true };
+}
+
+/** 技能落盘后强制让下一次列表重新加载，避免 opencode 缓存 */
+export function resetSkillInventory(): void {
+  inventorySessionId = null;
 }
 
 /* ---------- 审批 ---------- */

@@ -26,18 +26,21 @@ AI 同事和真人一起工作的桌面工作台。
 | 群设置里关联待分配任务 | ✅ |
 | 取消执行 → 任务回到待分配 | ✅ 其他群可接手 |
 | 导出 / 导入聊天记录（交接） | ✅ JSON 交接包，带任务 |
-| 拖拽智能体进群 | ✅ 拖单聊 / 工作台卡片到左侧群聊 |
+| 拖拽成员进群 | ✅ 智能体/真人拖到左侧群聊行或群聊详情页 |
 | 首次进入的开场白 + 推荐问题 | ✅ 模型生成，mock 有兜底 |
 | **opencode 执行引擎** | ✅ sidecar + 每群每智能体一个 session |
 | 工具调用 / 写入审批 | ✅ 工具卡片 + 允许一次 / 总是允许 / 拒绝 |
 | opencode 离线包装载 | ✅ 设置/首次启动探测，默认内网地址 |
-| 从 opencode 导入模型 | ✅ 读 ~/.config/opencode 的 providers |
+| opencode 模型双向同步 | ✅ 读本机 providers 反显导入 + 一键写回 sidecar |
+| opencode 技能浏览 | ✅ 技能页展示内置 / 本机 / 项目 SKILL.md |
+| 对话式新建技能 | ✅ 多轮追问 + TCP 连通性验证 + 确认后写入 |
 | 知识库（RAGFlow） | ✅ 数据集启停、智能体绑定、检索引用角标 |
 | 真人成员 / 群内邀请 | ✅ 登录后把人拉进群 |
 | 服务端消息推送 | ✅ `/api/events` SSE，其他客户端实时刷新 |
 | 智能体归属 | ✅ 私有智能体只有创建者能拉进群 |
 | 智能体库 | ✅ 卡片、增删改复制 |
 | 设置（多模型） | ✅ |
+| 主题 | ✅ 亮色 / 暗色 / 跟随系统，本地记忆 |
 | **Windows 安装包** | ✅ `S-BOT Setup 0.1.0.exe`（NSIS，115 MB） |
 
 还没接：RAGFlow 知识库、附件、真人成员、XABP 登录。
@@ -99,6 +102,12 @@ s-bot/
 | POST | `/api/conversations/:id/import` | 导入交接包到本群 |
 | GET | `/api/conversations/:id/intro` | 首次进入的开场白 + 推荐问题（模型生成，缓存 30 分钟） |
 | GET | `/api/opencode/status` | sidecar 是否可用 / 正在运行 |
+| GET | `/api/opencode/importable` | 本机 opencode 配置里的自定义模型（用于反显/导入） |
+| POST | `/api/models/sync` | 把 S-BOT 的全部模型写进 sidecar 的 opencode 配置 |
+| GET | `/api/skills` | opencode 可用技能（内置 + 本机 + 项目） |
+| POST | `/api/skills` | 确认草案后写入 SKILL.md 并挂载给 opencode |
+| POST | `/api/skills/coach` | 技能教练：多轮对话 + 自动 TCP 连通性验证 |
+| POST | `/api/skills/verify` | 单独做一次 TCP 连通性测试 |
 | POST | `/api/permissions/:requestID` | 审批工具调用（once / always / reject） |
 | GET | `/api/tasks` | 任务列表（未完成在前） |
 | POST | `/api/tasks` | 新建任务 |
@@ -150,10 +159,40 @@ event: run.end         {}
 
 ### 拖拽入群
 
-- 把左侧的单聊行、或工作台里的智能体卡片，拖到左侧任意群聊行
-- 拖过去时会高亮并显示「松开加入」，底部有提示条
+- 拖拽源：左侧单聊行、工作台里的智能体卡片、工作台「同事」里的真人卡片
+- 落点：左侧任意群聊行，或当前群聊详情页（拖到主区域会显示「松开加入」遮罩）
 - 已在群里 / 群满 6 个智能体会提示，不会重复加入
-- 加入后插一条「XX 加入了群聊」的系统消息
+- 真人按名字去重，加入后插一条「XX 加入了群聊」的系统消息
+
+### 对话式新建技能
+
+技能页右上角「+ 新增技能」不会让你手写 YAML，而是先和技能教练聊：
+
+1. 描述需求（比如「通过堡垒机 10.1.2.3:22 巡检内网服务器」）
+2. 教练每次追问 2~3 个关键问题：触发场景、前置条件、步骤、成功标准、失败处理
+3. 需要验证连通性时，模型输出一个 `verify` 代码块，服务端代跑 TCP 测试并把结果回传给模型
+4. 信息够了，模型输出 `skill` 代码块；前端解析成可编辑草案（ID / 名称 / 描述 / 正文）
+5. 你确认后才 `POST /api/skills` 落盘，并重写 sidecar 配置让 opencode 重新加载
+
+安全约定：**明文密码、密钥、token 不写进技能文档**。教练会要求用 `${BASTION_PASSWORD}` 这类环境变量占位符，
+并在「前置条件」里写清楚怎么配置。落盘位置二选一：
+
+- 全局：`~/.config/opencode/skills/<id>/SKILL.md`
+- 项目：仓库根目录 `.opencode/skills/<id>/SKILL.md`
+
+> 技能目录是在 opencode sidecar 启动时挂载的。写入后如果列表没立刻出现，重启一次 sidecar 即可。
+
+### 主题
+
+设置 → 外观里有「暗色 / 亮色 / 跟随系统」。选择存在 `localStorage`，跟随系统时监听
+`prefers-color-scheme`，系统切换后界面立即跟着变。
+
+### 模型双向同步
+
+- **opencode → S-BOT**：设置页「opencode 配置里的模型」读取本机 `~/.config/opencode/opencode.json(c)` 的
+  `providers`，可以单个或全部导入。导入只带模型名和 Base URL，API Key 需要自己补。
+- **S-BOT → opencode**：每次增删改模型、设默认模型都会自动同步；也可以点「同步到 opencode」手动触发。
+  同步目标是 S-BOT 自己 sidecar 的配置（同一 Base URL 归到一个 provider），不会改写你本机的 opencode 配置。
 
 ---
 

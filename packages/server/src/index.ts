@@ -1,5 +1,6 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
+import { createConnection } from 'node:net';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
@@ -43,17 +44,21 @@ import {
   updateModel,
   updateTask,
 } from './repo.js';
-import { generateReply, type ModelConfig } from './runtime.js';
+import { generateReply, completeChat, type ChatTurn, type ModelConfig } from './runtime.js';
 import {
+  createSkill,
   ensureSession,
   ensureStarted as ensureOpencode,
   getStatus as getOpencodeStatus,
   importableModels,
   installFromZip,
+  listSkills,
   resetBinaryCache,
+  resetSkillInventory,
   resolvePermission,
   runAgent,
   shutdown as shutdownOpencode,
+  syncModelConfig,
 } from './opencode.js';
 import { listDatasets, ragflowStatus, retrieve } from './ragflow.js';
 import { broadcast, bus } from './events.js';
@@ -80,6 +85,178 @@ app.get('/api/runtime', (c) => {
 app.get('/api/opencode/status', (c) => c.json({ data: getOpencodeStatus() }));
 
 app.get('/api/opencode/importable', (c) => c.json({ data: importableModels() }));
+
+/* ---------- 技能 ---------- */
+
+const SKILL_COACH_PROMPT = `你是 S-BOT 的技能教练，负责帮用户把一段可重复的操作流程整理成 opencode 技能（SKILL.md）。
+
+工作方式：
+1. 用中文多轮对话。先弄清目标、触发场景、前置条件、具体步骤、验证成功的方法、失败处理。
+2. 每次最多问 2~3 个关键问题，不要一次列一长串清单，也不要编造用户没提供的信息。
+3. 用户给出堡垒机 / 内网地址时，你可以请求做连通性验证。请求格式必须单独放在一个代码块里：
+\`\`\`verify
+{"host":"10.1.2.3","port":22}
+\`\`\`
+服务端会做 TCP 连接测试，并把结果返回给你。端口不确定时先问用户，默认 SSH 是 22。
+4. 安全红线：绝对不要在技能文档里写明文密码、密钥或 token。需要凭据时，写成环境变量或占位符（例如 \${BASTION_PASSWORD}），并在「前置条件」里说明怎么配置。
+5. 只有信息足够时才输出完整草案。草案必须放在一个 \`\`\`skill 代码块里，内容就是最终要写入磁盘的 SKILL.md：
+\`\`\`skill
+---
+name: 技能名称
+description: 一句话说明什么时候该用这个技能
+---
+
+## 适用场景
+...
+## 前置条件
+...
+## 操作步骤
+1. ...
+## 验证
+...
+## 常见问题
+...
+\`\`\`
+6. 输出草案后，用一句话请用户确认；用户确认前不要声称已经保存或已经生效。
+7. 普通回复保持简洁，不要重复整份草案，除非用户要求修改。
+
+当前环境：${process.platform}，日期 ${new Date().toISOString().slice(0, 10)}。
+全局技能会写入 ~/.config/opencode/skills/<id>/SKILL.md，项目技能会写入仓库的 .opencode/skills/<id>/SKILL.md。`;
+
+function probeTcp(host: string, port: number, timeoutMs = 5000): Promise<{
+  ok: boolean;
+  host: string;
+  port: number;
+  ms: number;
+  error?: string;
+}> {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    let settled = false;
+    const socket = createConnection({ host, port });
+    const finish = (ok: boolean, error?: string) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve({ ok, host, port, ms: Date.now() - started, error });
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false, `连接超时（${timeoutMs}ms）`));
+    socket.once('error', (e) => finish(false, String((e as Error).message ?? e)));
+  });
+}
+
+function parseEndpoint(input: any): { host: string; port: number } | null {
+  let host = String(input?.host ?? '').trim();
+  let port = Number(input?.port ?? 0);
+  const raw = String(input?.address ?? input?.url ?? '').trim();
+
+  if (!host && raw) {
+    const withoutScheme = raw.replace(/^[a-z]+:\/\//i, '');
+    const v6 = withoutScheme.match(/^\[([^\]]+)\](?::(\d+))?/);
+    if (v6) {
+      host = v6[1] ?? '';
+      port = Number(v6[2] ?? port);
+    } else {
+      const m = withoutScheme.match(/^([^/:]+)(?::(\d+))?/);
+      host = m?.[1] ?? '';
+      port = Number(m?.[2] ?? port);
+    }
+  }
+
+  if (!host) return null;
+  if (!port) port = 22;
+  if (!Number.isFinite(port) || port < 1 || port > 65535) return null;
+  return { host, port };
+}
+
+/** 对话式创建技能：多轮追问 + 自动做 TCP 连通性验证 */
+app.post('/api/skills/coach', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const raw = Array.isArray(b?.messages) ? b.messages : [];
+  const turns: ChatTurn[] = raw
+    .filter((m: any) => (m?.role === 'user' || m?.role === 'assistant') && typeof m.content === 'string')
+    .slice(-40)
+    .map((m: any) => ({ role: m.role, content: m.content.slice(0, 12000) }));
+
+  if (!turns.length || turns[turns.length - 1]!.role !== 'user') {
+    return c.json({ error: '需要一条用户消息' }, 400);
+  }
+
+  const picked = b?.modelId ? getModel(String(b.modelId)) : null;
+  const cfg = toConfig(picked ?? getDefaultModel());
+  if (!cfg || !cfg.baseUrl.trim() || !cfg.apiKey.trim()) {
+    return c.json({ error: '还没有可用的模型，请先在设置里添加模型并填写 API Key' }, 400);
+  }
+
+  let reply = '';
+  try {
+    reply = await completeChat(cfg, [
+      { role: 'system', content: SKILL_COACH_PROMPT },
+      ...turns,
+    ], { temperature: 0.35, maxTokens: 2600 });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 502);
+  }
+
+  // 模型想看某个地址通不通，服务端代跑一次 TCP 测试
+  let verification: Awaited<ReturnType<typeof probeTcp>> | null = null;
+  const verifyBlock = reply.match(/```(?:verify|json:verify)\s*\r?\n([\s\S]*?)```/i);
+  if (verifyBlock && b?.autoVerify !== false) {
+    try {
+      const endpoint = parseEndpoint(JSON.parse(verifyBlock[1]!));
+      if (endpoint) verification = await probeTcp(endpoint.host, endpoint.port);
+    } catch {
+      /* 模型给的验证块不是合法 JSON，忽略即可 */
+    }
+  }
+
+  return c.json({ data: { reply, verification } });
+});
+
+app.post('/api/skills/verify', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const endpoint = parseEndpoint(b);
+  if (!endpoint) return c.json({ ok: false, error: '地址或端口不合法' }, 400);
+  const timeoutMs = Math.min(Math.max(Number(b?.timeoutMs ?? 5000), 1000), 15000);
+  return c.json(await probeTcp(endpoint.host, endpoint.port, timeoutMs));
+});
+
+/** 用户确认草案后写入磁盘，并同步到 opencode 的技能目录 */
+app.post('/api/skills', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  try {
+    const data = createSkill({
+      id: typeof b?.id === 'string' ? b.id : undefined,
+      name: String(b?.name ?? ''),
+      description: String(b?.description ?? ''),
+      content: String(b?.content ?? ''),
+      scope: b?.scope === 'project' ? 'project' : 'global',
+      overwrite: b?.overwrite === true,
+    });
+    resetSkillInventory();
+    return c.json({ data }, 201);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 400);
+  }
+});
+
+/** opencode 当前可用的技能：内置 + 本机 ~/.config/opencode/skills + 项目 .opencode/skills */
+app.get('/api/skills', async (c) => {
+  const model = getDefaultModel();
+  const ok = await ensureOpencode(model ?? null).catch(() => false);
+  if (!ok) {
+    const status = getOpencodeStatus();
+    return c.json({ data: [], error: status.error ?? 'opencode 不可用', status }, 503);
+  }
+  try {
+    const data = await listSkills();
+    return c.json({ data, status: getOpencodeStatus() });
+  } catch (e) {
+    return c.json({ data: [], error: String((e as Error).message ?? e), status: getOpencodeStatus() }, 500);
+  }
+});
 
 /** 前端在审批卡片上点「允许一次 / 总是允许 / 拒绝」 */
 app.post('/api/permissions/:requestID', async (c) => {
@@ -191,6 +368,7 @@ app.post('/api/models', async (c) => {
     tools: b?.tools !== false,
     stream: b?.stream !== false,
   });
+  try { syncModelConfig(); } catch { /* 配置同步失败不影响模型本身 */ }
   return c.json({ data: created }, 201);
 });
 
@@ -206,6 +384,7 @@ app.patch('/api/models/:id', async (c) => {
     tools: typeof b?.tools === 'boolean' ? b.tools : undefined,
     stream: typeof b?.stream === 'boolean' ? b.stream : undefined,
   });
+  try { syncModelConfig(); } catch { /* ignore */ }
   return c.json({ data: getModel(id) });
 });
 
@@ -213,6 +392,7 @@ app.delete('/api/models/:id', (c) => {
   const id = c.req.param('id');
   if (!getModel(id)) return c.json({ error: 'model not found' }, 404);
   deleteModel(id);
+  try { syncModelConfig(); } catch { /* ignore */ }
   return c.json({ ok: true });
 });
 
@@ -220,7 +400,18 @@ app.post('/api/models/:id/default', (c) => {
   const id = c.req.param('id');
   if (!getModel(id)) return c.json({ error: 'model not found' }, 404);
   setDefaultModel(id);
+  try { syncModelConfig(); } catch { /* ignore */ }
   return c.json({ ok: true });
+});
+
+/** 把 S-BOT 里的所有模型同步给 opencode sidecar */
+app.post('/api/models/sync', (c) => {
+  try {
+    const r = syncModelConfig();
+    return c.json({ ok: true, ...r });
+  } catch (e) {
+    return c.json({ ok: false, error: String((e as Error).message ?? e) }, 500);
+  }
 });
 
 app.post('/api/models/:id/test', async (c) => {

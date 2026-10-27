@@ -340,6 +340,96 @@ export async function fetchOpencodeStatus(): Promise<{
   return r.data;
 }
 
+export interface OpencodeSkill {
+  id: string;
+  name: string;
+  description?: string;
+  autoinvoke?: boolean;
+  path: string;
+  content: string;
+}
+
+export async function fetchOpencodeSkills(): Promise<OpencodeSkill[]> {
+  const res = await apiFetch('/api/skills');
+  const body = (await res.json().catch(() => ({}))) as { data?: OpencodeSkill[]; error?: string };
+  if (!res.ok) throw new Error(body.error ?? `读取技能失败（${res.status}）`);
+  return body.data ?? [];
+}
+
+export interface SkillDraft {
+  id: string;
+  name: string;
+  description: string;
+  content: string;
+  scope: 'global' | 'project';
+}
+
+export interface SkillCoachReply {
+  reply: string;
+  verification: {
+    ok: boolean;
+    host: string;
+    port: number;
+    ms: number;
+    error?: string;
+  } | null;
+}
+
+export async function coachSkill(messages: { role: 'user' | 'assistant'; content: string }[]): Promise<SkillCoachReply> {
+  const res = await apiFetch('/api/skills/coach', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { data?: SkillCoachReply; error?: string };
+  if (!res.ok || !body.data) throw new Error(body.error ?? `技能教练不可用（${res.status}）`);
+  return body.data;
+}
+
+export async function verifySkillEndpoint(input: { host?: string; port?: number; address?: string }): Promise<{
+  ok: boolean;
+  host: string;
+  port: number;
+  ms: number;
+  error?: string;
+}> {
+  const res = await apiFetch('/api/skills/verify', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  return (await res.json().catch(() => ({ ok: false, host: input.host ?? '', port: input.port ?? 0, ms: 0, error: '返回解析失败' }))) as {
+    ok: boolean;
+    host: string;
+    port: number;
+    ms: number;
+    error?: string;
+  };
+}
+
+export async function createSkill(input: SkillDraft & { overwrite?: boolean }): Promise<{ id: string; path: string; scope: 'global' | 'project' }> {
+  const res = await apiFetch('/api/skills', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const body = (await res.json().catch(() => ({}))) as { data?: { id: string; path: string; scope: 'global' | 'project' }; error?: string };
+  if (!res.ok || !body.data) throw new Error(body.error ?? '保存技能失败');
+  return body.data;
+}
+
+export async function syncModelsToOpencode(): Promise<{ count: number; path: string }> {
+  const res = await apiFetch('/api/models/sync', { method: 'POST' });
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; count?: number; path?: string; error?: string };
+  if (!res.ok || !body.ok) throw new Error(body.error ?? '同步失败');
+  return { count: body.count ?? 0, path: body.path ?? '' };
+}
+
+export async function fetchHumans(): Promise<HumanInfo[]> {
+  const r = await getJson<{ data: HumanInfo[] }>('/api/humans');
+  return r.data;
+}
+
 /* ---------- 设置 / 运行时 / 知识库 ---------- */
 
 export interface AppSettingsData {

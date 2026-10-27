@@ -1,8 +1,11 @@
 import { useState } from 'react';
 import type { Agent, Conversation, Task } from '@sbot/shared';
+import type { HumanInfo } from './api';
+import { setMemberDrag, type MemberPayload } from './drag';
 
 interface Props {
   agents: Agent[];
+  humans: HumanInfo[];
   conversations: Conversation[];
   tasks: Task[];
   userName: string | null;
@@ -17,7 +20,7 @@ interface Props {
   onEditTask: (task: Task) => void;
   onToggleTask: (task: Task) => void;
   onDeleteTask: (id: string) => void;
-  onDragAgent?: (agentId: string | null) => void;
+  onDragMember?: (member: MemberPayload | null) => void;
 }
 
 function fmtTime(ts: number) {
@@ -36,6 +39,7 @@ function taskDate(ts: number) {
 
 export default function Home({
   agents,
+  humans,
   conversations,
   tasks,
   userName,
@@ -50,7 +54,7 @@ export default function Home({
   onEditTask,
   onToggleTask,
   onDeleteTask,
-  onDragAgent,
+  onDragMember,
 }: Props) {
   const [taskTab, setTaskTab] = useState<'todo' | 'done'>('todo');
   const now = new Date();
@@ -177,11 +181,11 @@ export default function Home({
               className="acard"
               draggable
               onDragStart={(e) => {
-                e.dataTransfer.setData('text/plain', a.id);
-                e.dataTransfer.effectAllowed = 'copy';
-                onDragAgent?.(a.id);
+                const payload: MemberPayload = { kind: 'agent', id: a.id, name: a.name };
+                setMemberDrag(e, payload);
+                onDragMember?.(payload);
               }}
-              onDragEnd={() => onDragAgent?.(null)}
+              onDragEnd={() => onDragMember?.(null)}
               onClick={() => onOpenAgent(a.id)}
             >
               <div
@@ -198,6 +202,44 @@ export default function Home({
             </div>
           ))}
         </div>
+
+        {humans.length > 0 && (
+          <>
+            <div className="home-sec">
+              <h2>同事</h2>
+              <span className="more" onClick={onInvite}>邀请更多</span>
+            </div>
+            <div className="agent-strip">
+              {humans.map((h) => (
+                <div
+                  key={h.id}
+                  className="acard human"
+                  draggable
+                  title="拖到群聊详情页，直接拉进群"
+                  onDragStart={(e) => {
+                    const payload: MemberPayload = { kind: 'human', id: h.id, name: h.name };
+                    setMemberDrag(e, payload);
+                    onDragMember?.(payload);
+                  }}
+                  onDragEnd={() => onDragMember?.(null)}
+                  onClick={onInvite}
+                >
+                  <div
+                    className="av"
+                    style={{ width: 30, height: 30, flexBasis: 30, fontSize: 11.5, background: `${h.color}22`, border: `2px solid ${h.color}`, color: h.color }}
+                  >
+                    {h.initial}
+                  </div>
+                  <div style={{ minWidth: 0 }}>
+                    <div className="nm" style={{ color: h.color }}>{h.name}</div>
+                    <div className="rl">{h.role || '同事'}</div>
+                    <div className="sk human-tag">真人</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
 
         <div className="home-sec"><h2>最近会话</h2></div>
         <div className="recent">

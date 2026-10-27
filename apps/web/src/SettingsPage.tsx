@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ModelInfo } from '@sbot/shared';
+import { getThemeMode, setThemeMode, type ThemeMode } from './theme';
 import {
   createModel,
   deleteModel,
@@ -13,6 +14,7 @@ import {
   patchSettings,
   saveEnabledKbs,
   setDefaultModel,
+  syncModelsToOpencode,
   testModel,
   updateModel,
   type AppSettingsData,
@@ -59,6 +61,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   const [importOpen, setImportOpen] = useState(false);
   const [importPicked, setImportPicked] = useState<Set<string>>(new Set());
   const [serverUrl, setServerUrl] = useState(localStorage.getItem('sbot.server') ?? '');
+  const [theme, setTheme] = useState<ThemeMode>(getThemeMode());
 
   async function refresh() {
     try {
@@ -66,6 +69,32 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
     } catch (e) {
       onToast(String(e));
     }
+  }
+
+  async function loadImportables(showToast = false) {
+    try {
+      setImportables(await fetchImportableModels());
+    } catch (e) {
+      if (showToast) onToast(String(e));
+    }
+  }
+
+  /** 把 opencode 配置里的模型导入 S-BOT；所有智能体共用这份模型列表 */
+  async function importModels(list: ImportableModel[]) {
+    let n = 0;
+    for (const m of list) {
+      if (!m.baseUrl) {
+        onToast(`${m.name} 没有 Base URL，跳过`);
+        continue;
+      }
+      if (models.some((x) => x.model === m.model && x.baseUrl === m.baseUrl)) continue;
+      await createModel({ name: m.name, model: m.model, baseUrl: m.baseUrl, apiKey: '', tools: true, stream: true });
+      n++;
+    }
+    await refresh();
+    onSaved();
+    onToast(n ? `已导入 ${n} 个模型，记得补 API Key` : '没有新模型可导入');
+    return n;
   }
 
   async function loadRuntime() {
@@ -110,6 +139,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
     void refresh();
     void loadRuntime();
     void loadKb();
+    void loadImportables();
   }, []);
 
   async function saveModel() {
@@ -205,12 +235,52 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
       </div>
 
       <div className="set-card">
+        <h3>外观</h3>
+        <p className="sub">选择界面配色，跟随系统会随操作系统的亮/暗模式自动切换。</p>
+        <div className="theme-options">
+          {([
+            ['dark', '暗色', '深色界面，默认'],
+            ['light', '亮色', '浅色界面，适合白天'],
+            ['system', '跟随系统', '随操作系统切换'],
+          ] as const).map(([key, label, hint]) => (
+            <button
+              key={key}
+              className={`theme-opt ${theme === key ? 'on' : ''}`}
+              onClick={() => {
+                setThemeMode(key);
+                setTheme(key);
+                onToast(`已切换为${label}`);
+              }}
+            >
+              <span className={`theme-swatch ${key}`} />
+              <span className="theme-meta"><b>{label}</b><em>{hint}</em></span>
+              {theme === key && <span className="theme-tick">✓</span>}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="set-card">
         <div className="card-head">
           <div>
             <h3>模型服务</h3>
             <p className="sub" style={{ marginBottom: 0 }}>只有这里添加的模型，才会出现在智能体和聊天的选择里。</p>
           </div>
           <div style={{ display: 'flex', gap: 8, flex: '0 0 auto' }}>
+            <button
+              className="btn"
+              title="把所有 S-BOT 模型写进 opencode 运行时配置"
+              onClick={async () => {
+                try {
+                  const r = await syncModelsToOpencode();
+                  onToast(`已同步 ${r.count} 个模型到 opencode 运行时`);
+                } catch (e) {
+                  onToast(String(e));
+                }
+              }}
+            >
+              同步到 opencode
+            </button>
             <button
               className="btn"
               onClick={async () => {
@@ -252,6 +322,47 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
               <button className="mini danger" title="删除" onClick={async () => { if (!window.confirm(`删除模型「${m.name}」？`)) return; await deleteModel(m.id); await refresh(); onSaved(); onToast('模型已删除'); }}>×</button>
             </div>
           ))}
+        </div>
+
+        <div className="oc-models">
+          <div className="oc-models-head">
+            <div>
+              <b>opencode 配置里的模型</b>
+              <span>读自本机 opencode 配置；导入后所有智能体都能复用。</span>
+            </div>
+            <div className="oc-models-actions">
+              <button className="mini" title="重新读取" onClick={() => void loadImportables(true)}>刷新</button>
+              <button
+                className="mini"
+                disabled={!importables.some((m) => m.baseUrl)}
+                onClick={() => void importModels(importables.filter((m) => m.baseUrl))}
+              >
+                全部导入
+              </button>
+            </div>
+          </div>
+          {importables.length === 0 ? (
+            <div className="oc-models-empty">没读到本机 opencode 的自定义模型。你可以直接在上面添加，再点「同步到 opencode」。</div>
+          ) : (
+            importables.map((m) => {
+              const imported = models.some((x) => x.model === m.model && x.baseUrl === m.baseUrl);
+              return (
+                <div key={`${m.provider}/${m.model}`} className="oc-model-row">
+                  <div className="oc-model-meta">
+                    <div className="oc-model-name">{m.name}{m.isDefault ? <span className="def">默认</span> : null}</div>
+                    <div className="model-sub">{m.providerName} · {m.model} · {m.baseUrl || '未填 Base URL'}</div>
+                  </div>
+                  {imported
+                    ? <span className="oc-model-ok">已在用</span>
+                    : (
+                      <button className="mini" disabled={!m.baseUrl} onClick={() => void importModels([m])}>
+                        导入
+                      </button>
+                    )}
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
 
@@ -480,18 +591,9 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
                 className="btn primary"
                 disabled={importPicked.size === 0}
                 onClick={async () => {
-                  let n = 0;
-                  for (const m of importables) {
-                    if (!importPicked.has(`${m.provider}/${m.model}`)) continue;
-                    if (!m.baseUrl) { onToast(`${m.name} 没有 Base URL，跳过`); continue; }
-                    if (models.some((x) => x.model === m.model && x.baseUrl === m.baseUrl)) continue;
-                    await createModel({ name: m.name, model: m.model, baseUrl: m.baseUrl, apiKey: '', tools: true, stream: true });
-                    n++;
-                  }
                   setImportOpen(false);
-                  await refresh();
-                  onSaved();
-                  onToast(n ? `已导入 ${n} 个模型，记得补 API Key` : '没有新模型可导入');
+                  const picked = importables.filter((m) => importPicked.has(`${m.provider}/${m.model}`));
+                  await importModels(picked);
                 }}
               >
                 导入 {importPicked.size} 个

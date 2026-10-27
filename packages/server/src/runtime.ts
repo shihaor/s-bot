@@ -124,3 +124,44 @@ export async function* generateReply(ctx: StreamContext, fallback: ModelConfig |
   }
   yield* mockStream(ctx);
 }
+
+export interface ChatTurn {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+/** 非流式对话，用于技能教练这类需要拿到完整结构化输出的场景 */
+export async function completeChat(
+  cfg: ModelConfig,
+  messages: ChatTurn[],
+  options: { temperature?: number; maxTokens?: number } = {},
+): Promise<string> {
+  const res = await fetch(`${cfg.baseUrl.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${cfg.apiKey}` },
+    body: JSON.stringify({
+      model: cfg.model,
+      messages,
+      stream: false,
+      temperature: options.temperature ?? 0.4,
+      max_tokens: options.maxTokens ?? 2400,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`模型请求失败 ${res.status} ${body.slice(0, 300)}`);
+  }
+
+  const json = (await res.json()) as {
+    choices?: { message?: { content?: unknown } }[];
+  };
+  const content = json?.choices?.[0]?.message?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part: any) => (typeof part === 'string' ? part : String(part?.text ?? '')))
+      .join('');
+  }
+  return '';
+}

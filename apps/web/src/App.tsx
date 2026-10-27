@@ -14,6 +14,7 @@ import {
   exportConversation as exportConversationApi,
   fetchAgents,
   fetchConversations,
+  fetchHumans,
   fetchMessages,
   fetchModels,
   fetchKbDatasets,
@@ -34,10 +35,13 @@ import {
   updateMember as updateMemberApi,
   updateTask as updateTaskApi,
   type KbDataset,
+  type HumanInfo,
 } from './api';
+import { hasMemberDrag, readMemberDrag, setMemberDrag, type MemberPayload } from './drag';
 import Home from './Home';
 import Intro from './Intro';
 import AgentsPage from './AgentsPage';
+import SkillsPage from './SkillsPage';
 import SettingsPage from './SettingsPage';
 import { animateDrawer, animateIntro, animateOverlay, animatePanel, animateToast } from './anim';
 import {
@@ -253,6 +257,7 @@ function memberOf(conv: Conversation | null, id: string | null, agents: Agent[])
 
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [humans, setHumans] = useState<HumanInfo[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -262,7 +267,7 @@ export default function App() {
   const [runtime, setRuntime] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'chat' | 'home' | 'agents' | 'settings'>('chat');
+  const [view, setView] = useState<'chat' | 'home' | 'agents' | 'skills' | 'settings'>('chat');
   const [toast, setToast] = useState('');
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; conv: Conversation } | null>(null);
   const [renameTarget, setRenameTarget] = useState<Conversation | null>(null);
@@ -289,8 +294,9 @@ export default function App() {
   const [unread, setUnread] = useState<Record<string, number>>({});
   const activeIdRef = useRef<string | null>(null);
   const runningRef = useRef(false);
-  const [draggingAgent, setDraggingAgent] = useState<string | null>(null);
+  const [draggingMember, setDraggingMember] = useState<MemberPayload | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+  const [chatDrop, setChatDrop] = useState(false);
   const [user, setUser] = useState<{ id?: string; name: string; role: string; initial: string } | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [mention, setMention] = useState<string | null>(null);
@@ -438,17 +444,19 @@ export default function App() {
     } catch { /* ignore */ }
     (async () => {
       try {
-        const [a, c, r, ms, ts] = await Promise.all([
+        const [a, c, r, ms, ts, hs] = await Promise.all([
           fetchAgents(),
           fetchConversations(),
           fetchRuntime(),
           fetchModels(),
           fetchTasks(),
+          fetchHumans(),
         ]);
         setAgents(a);
         setConversations(c);
         setModels(ms);
         setTasks(ts);
+        setHumans(hs);
         setRuntime(r.mode === 'mock' ? '本地模式' : r.label);
         setActiveId(c.find((x) => x.type === 'group')?.id ?? c[0]?.id ?? null);
         void loadKbs();
@@ -798,27 +806,49 @@ export default function App() {
     }
   }
 
-  /** 把左侧智能体（或工作台卡片）拖到群聊上 */
-  async function dropAgentIntoGroup(convId: string, agentId: string) {
+  /** 把智能体或真人拖到群聊上（左侧列表 / 聊天详情页都走这里） */
+  async function dropMemberIntoGroup(convId: string, payload: MemberPayload) {
     const conv = conversations.find((c) => c.id === convId);
-    const agent = agents.find((a) => a.id === agentId);
-    if (!conv || conv.type !== 'group' || !agent) return;
-    if (conv.members.some((m) => m.memberId === agentId)) {
-      showToast(`「${agent.name}」已经在「${conv.title}」里了`);
-      return;
+    if (!conv || conv.type !== 'group') return;
+
+    if (payload.kind === 'agent') {
+      const agent = agents.find((a) => a.id === payload.id);
+      if (!agent) return;
+      if (conv.members.some((m) => m.memberId === agent.id)) {
+        showToast(`「${agent.name}」已经在「${conv.title}」里了`);
+        return;
+      }
+      if (conv.members.filter((m) => m.memberType === 'agent').length >= 6) {
+        showToast('群聊最多 6 个智能体');
+        return;
+      }
+      try {
+        await addMemberApi(convId, agent.id);
+        showToast(`「${agent.name}」已加入「${conv.title}」`);
+      } catch (e) {
+        showToast(String(e));
+        return;
+      }
+    } else {
+      const human = humans.find((h) => h.id === payload.id);
+      const name = human?.name ?? payload.name;
+      if (!name) return;
+      if (conv.members.some((m) => m.memberType === 'human' && (m.memberId === payload.id || m.name === name))) {
+        showToast(`「${name}」已经在「${conv.title}」里了`);
+        return;
+      }
+      try {
+        await addHumanMember(convId, name, human?.role ?? '');
+        setHumans(await fetchHumans());
+        showToast(`「${name}」已加入「${conv.title}」`);
+      } catch (e) {
+        showToast(String(e));
+        return;
+      }
     }
-    if (conv.members.filter((m) => m.memberType === 'agent').length >= 6) {
-      showToast('群聊最多 6 个智能体');
-      return;
-    }
-    try {
-      await addMemberApi(convId, agentId);
-      await refreshConversations();
-      if (activeId === convId) setMessages(await fetchMessages(convId));
-      showToast(`「${agent.name}」已加入「${conv.title}」`);
-    } catch (e) {
-      showToast(String(e));
-    }
+
+    await refreshConversations();
+    if (activeId === convId) setMessages(await fetchMessages(convId));
   }
 
   async function removeMemberFromActive(agentId: string) {
@@ -1088,6 +1118,9 @@ export default function App() {
           <button className={`rail-btn ${view === 'agents' ? 'active' : ''}`} title="智能体" onClick={() => setView('agents')}>
             <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="8" r="3.2" /><path d="M2.8 20a6.2 6.2 0 0 1 12.4 0" /><path d="M16.5 5.5a3 3 0 0 1 0 5.6" /><path d="M18 20a5.4 5.4 0 0 0-2.2-4.3" /></svg>
           </button>
+          <button className={`rail-btn ${view === 'skills' ? 'active' : ''}`} title="技能" onClick={() => setView('skills')}>
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z" /></svg>
+          </button>
           <div className="spacer" />
           <button className={`rail-btn ${view === 'settings' ? 'active' : ''}`} title="设置" onClick={() => setView('settings')}>
             <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" /></svg>
@@ -1100,7 +1133,7 @@ export default function App() {
 
         <aside
           className="sidebar"
-          style={{ display: view === 'agents' || view === 'settings' ? 'none' : 'flex' }}
+          style={{ display: view === 'agents' || view === 'skills' || view === 'settings' ? 'none' : 'flex' }}
         >
           <div className="side-head"><h1>消息</h1></div>
           <div className="search">
@@ -1121,7 +1154,7 @@ export default function App() {
                 onClick={() => { setActiveId(c.id); setView('chat'); setDrawerOpen(false); setSearchOpen(false); }}
                 onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, conv: c }); }}
                 onDragOver={(e) => {
-                  if (!Array.from(e.dataTransfer.types || []).includes('text/plain')) return;
+                  if (!hasMemberDrag(e)) return;
                   e.preventDefault();
                   e.dataTransfer.dropEffect = 'copy';
                   setDropTargetId(c.id);
@@ -1132,11 +1165,12 @@ export default function App() {
                   }
                 }}
                 onDrop={(e) => {
+                  if (!hasMemberDrag(e)) return;
                   e.preventDefault();
-                  const agentId = e.dataTransfer.getData('text/plain');
+                  const payload = readMemberDrag(e);
                   setDropTargetId(null);
-                  setDraggingAgent(null);
-                  if (agentId) void dropAgentIntoGroup(c.id, agentId);
+                  setDraggingMember(null);
+                  if (payload) void dropMemberIntoGroup(c.id, payload);
                 }}
               >
                 <div className="stack">
@@ -1168,15 +1202,15 @@ export default function App() {
               return (
                 <div
                   key={c.id}
-                  className={`conv ${activeId === c.id ? 'active' : ''} ${draggingAgent === m?.memberId ? 'dragging' : ''}`}
+                  className={`conv ${activeId === c.id ? 'active' : ''} ${draggingMember?.id === m?.memberId ? 'dragging' : ''}`}
                   draggable={!!m}
                   onDragStart={(e) => {
                     if (!m) return;
-                    e.dataTransfer.setData('text/plain', m.memberId);
-                    e.dataTransfer.effectAllowed = 'copy';
-                    setDraggingAgent(m.memberId);
+                    const payload: MemberPayload = { kind: 'agent', id: m.memberId, name: m.name };
+                    setMemberDrag(e, payload);
+                    setDraggingMember(payload);
                   }}
-                  onDragEnd={() => { setDraggingAgent(null); setDropTargetId(null); }}
+                  onDragEnd={() => { setDraggingMember(null); setDropTargetId(null); }}
                   onClick={() => { setActiveId(c.id); setView('chat'); setDrawerOpen(false); setSearchOpen(false); }}
                   onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, conv: c }); }}
                 >
@@ -1219,10 +1253,38 @@ export default function App() {
           </div>
         </aside>
 
-        <main className="main">
+        <main
+          className={`main ${chatDrop ? 'drop-member' : ''}`}
+          onDragOver={(e) => {
+            if (view !== 'chat' || !active || active.type !== 'group' || !hasMemberDrag(e)) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+            setChatDrop(true);
+          }}
+          onDragLeave={(e) => {
+            if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node | null)) setChatDrop(false);
+          }}
+          onDrop={(e) => {
+            if (view !== 'chat' || !active || active.type !== 'group' || !hasMemberDrag(e)) return;
+            e.preventDefault();
+            const payload = readMemberDrag(e);
+            setChatDrop(false);
+            setDraggingMember(null);
+            if (payload) void dropMemberIntoGroup(active.id, payload);
+          }}
+        >
+          {chatDrop && active?.type === 'group' && (
+            <div className="chat-drop">
+              <div className="chat-drop-card">
+                <span>松开加入「{active.title}」</span>
+                <b>{draggingMember?.name ?? '这位成员'}</b>
+              </div>
+            </div>
+          )}
           {view === 'home' ? (
             <Home
               agents={agents}
+              humans={humans}
               conversations={conversations}
               tasks={tasks}
               userName={user?.name ?? null}
@@ -1237,7 +1299,7 @@ export default function App() {
               onEditTask={(t) => setTaskDialog({ task: t })}
               onToggleTask={(t) => void toggleTaskDone(t)}
               onDeleteTask={(id) => void handleDeleteTask(id)}
-              onDragAgent={setDraggingAgent}
+              onDragMember={setDraggingMember}
             />
           ) : view === 'agents' ? (
             <AgentsPage
@@ -1251,8 +1313,17 @@ export default function App() {
               onDelete={handleDeleteAgent}
               onDuplicate={handleDuplicateAgent}
             />
+          ) : view === 'skills' ? (
+            <SkillsPage />
           ) : view === 'settings' ? (
-            <SettingsPage onToast={showToast} onSaved={() => void refreshRuntimeInfo()} onKbChanged={() => void loadKbs()} />
+            <SettingsPage
+              onToast={showToast}
+              onSaved={() => {
+                void refreshRuntimeInfo();
+                void fetchModels().then(setModels).catch(() => { /* ignore */ });
+              }}
+              onKbChanged={() => void loadKbs()}
+            />
           ) : !active ? (
             <div className="empty">选一个会话开始</div>
           ) : (
@@ -1420,9 +1491,18 @@ export default function App() {
 
                 <div
                   className={`composer-box ${dragOver ? 'drag' : ''}`}
-                  onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                  onDragOver={(e) => {
+                    if (hasMemberDrag(e)) return;
+                    e.preventDefault();
+                    setDragOver(true);
+                  }}
                   onDragLeave={() => setDragOver(false)}
-                  onDrop={(e) => { e.preventDefault(); setDragOver(false); void handleFiles(e.dataTransfer.files); }}
+                  onDrop={(e) => {
+                    if (hasMemberDrag(e)) return;
+                    e.preventDefault();
+                    setDragOver(false);
+                    void handleFiles(e.dataTransfer.files);
+                  }}
                 >
                   {attachments.length > 0 && (
                     <div className="attach-row">
@@ -1538,6 +1618,7 @@ export default function App() {
               // 重新拉一次智能体（私有智能体按身份过滤）
               setAgents(await fetchAgents());
               setConversations(await fetchConversations());
+              setHumans(await fetchHumans());
             } catch (e) {
               showToast(String(e));
             }
@@ -1641,7 +1722,11 @@ export default function App() {
         </div>
       )}
       {toast && <div className="toast">{toast}</div>}
-      {draggingAgent && <div className="drop-hint show">拖到左侧群聊上，松开即可加入</div>}
+      {draggingMember && (
+        <div className="drop-hint show">
+          {draggingMember.name ? `把「${draggingMember.name}」` : '把成员'}拖到左侧群聊或群聊详情页，松开即可加入
+        </div>
+      )}
     </div>
   );
 }
