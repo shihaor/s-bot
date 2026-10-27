@@ -57,17 +57,31 @@ export default function Home({
   onDragMember,
 }: Props) {
   const [taskTab, setTaskTab] = useState<'todo' | 'done'>('todo');
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
+  const switchTaskTab = (tab: 'todo' | 'done') => {
+    setTaskTab(tab);
+    setExpanded((prev) => ({ ...prev, tasks: false }));
+  };
+  const TASK_LIMIT = 5;
+  const AGENT_LIMIT = 6;
+  const HUMAN_LIMIT = 6;
+  const RECENT_LIMIT = 4;
   const now = new Date();
   const hh = now.getHours();
   const greet = hh < 6 ? '凌晨好' : hh < 12 ? '早上好' : hh < 14 ? '中午好' : hh < 18 ? '下午好' : '晚上好';
   const groups = conversations.filter((c) => c.type === 'group');
   const dms = conversations.filter((c) => c.type === 'dm');
-  const recent = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 4);
+  const recentAll = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+  const shownRecent = expanded.recent ? recentAll : recentAll.slice(0, RECENT_LIMIT);
+  const shownAgents = expanded.agents ? agents : agents.slice(0, AGENT_LIMIT);
+  const shownHumans = expanded.humans ? humans : humans.slice(0, HUMAN_LIMIT);
   const date = now.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
 
   const todoCount = tasks.filter((t) => t.status !== 'done').length;
   const doneCount = tasks.filter((t) => t.status === 'done').length;
   const shownTasks = tasks.filter((t) => (taskTab === 'done' ? t.status === 'done' : t.status !== 'done'));
+  const visibleTasks = expanded.tasks ? shownTasks : shownTasks.slice(0, TASK_LIMIT);
   const convTitle = (id: string | null) => conversations.find((c) => c.id === id)?.title ?? null;
 
   return (
@@ -113,10 +127,10 @@ export default function Home({
           <h2>任务</h2>
           <div className="sec-right">
             <div className="task-tabs">
-              <button className={`ttab ${taskTab === 'todo' ? 'on' : ''}`} onClick={() => setTaskTab('todo')}>
+              <button className={`ttab ${taskTab === 'todo' ? 'on' : ''}`} onClick={() => switchTaskTab('todo')}>
                 进行中<i>{todoCount}</i>
               </button>
-              <button className={`ttab ${taskTab === 'done' ? 'on' : ''}`} onClick={() => setTaskTab('done')}>
+              <button className={`ttab ${taskTab === 'done' ? 'on' : ''}`} onClick={() => switchTaskTab('done')}>
                 已完成<i>{doneCount}</i>
               </button>
             </div>
@@ -131,7 +145,7 @@ export default function Home({
                 : '还没有已完成的任务'}
             </div>
           ) : (
-            shownTasks.map((t) => {
+            visibleTasks.map((t) => {
               const groupName = convTitle(t.conversationId);
               return (
                 <div key={t.id} className={`task ${t.status === 'done' ? 'done' : ''}`} onClick={() => onEditTask(t)}>
@@ -168,6 +182,12 @@ export default function Home({
               );
             })
           )}
+          {shownTasks.length > TASK_LIMIT && (
+            <button className={`list-more ${expanded.tasks ? 'on' : ''}`} onClick={() => toggle('tasks')}>
+              {expanded.tasks ? '收起' : `展开剩余 ${shownTasks.length - TASK_LIMIT} 个任务`}
+              <span className="chev">⌄</span>
+            </button>
+          )}
         </div>
 
         <div className="home-sec">
@@ -175,7 +195,7 @@ export default function Home({
           <span className="more" onClick={onGoAgents}>管理</span>
         </div>
         <div className="agent-strip">
-          {agents.map((a) => (
+          {shownAgents.map((a) => (
             <div
               key={a.id}
               className="acard"
@@ -202,6 +222,12 @@ export default function Home({
             </div>
           ))}
         </div>
+        {agents.length > AGENT_LIMIT && (
+          <button className={`list-more ${expanded.agents ? 'on' : ''}`} onClick={() => toggle('agents')}>
+            {expanded.agents ? '收起' : `展开剩余 ${agents.length - AGENT_LIMIT} 个智能体`}
+            <span className="chev">⌄</span>
+          </button>
+        )}
 
         {humans.length > 0 && (
           <>
@@ -210,7 +236,7 @@ export default function Home({
               <span className="more" onClick={onInvite}>邀请更多</span>
             </div>
             <div className="agent-strip">
-              {humans.map((h) => (
+              {shownHumans.map((h) => (
                 <div
                   key={h.id}
                   className="acard human"
@@ -242,13 +268,19 @@ export default function Home({
                 </div>
               ))}
             </div>
+            {humans.length > HUMAN_LIMIT && (
+              <button className={`list-more ${expanded.humans ? 'on' : ''}`} onClick={() => toggle('humans')}>
+                {expanded.humans ? '收起' : `展开剩余 ${humans.length - HUMAN_LIMIT} 位同事`}
+                <span className="chev">⌄</span>
+              </button>
+            )}
           </>
         )}
 
         <div className="home-sec"><h2>最近会话</h2></div>
         <div className="recent">
-          {recent.length === 0 && <div className="home-empty">还没有会话</div>}
-          {recent.map((c) => (
+          {recentAll.length === 0 && <div className="home-empty">还没有会话</div>}
+          {shownRecent.map((c) => (
             <div key={c.id} className="rrow" onClick={() => onOpenConv(c.id)}>
               <div className="stack">
                 {c.members.slice(0, 2).map((m) => (
@@ -268,6 +300,12 @@ export default function Home({
               <div className="time">{c.lastMessage ? fmtTime(c.lastMessage.at) : ''}</div>
             </div>
           ))}
+          {recentAll.length > RECENT_LIMIT && (
+            <button className={`list-more ${expanded.recent ? 'on' : ''}`} onClick={() => toggle('recent')}>
+              {expanded.recent ? '收起' : `展开剩余 ${recentAll.length - RECENT_LIMIT} 个会话`}
+              <span className="chev">⌄</span>
+            </button>
+          )}
         </div>
 
         <div className="stats">
@@ -286,7 +324,7 @@ export default function Home({
             </div>
           </div>
           <div className="f-meta">
-            <div>版本 <b>v0.1.0</b></div>
+            <div>版本 <b>v0.1.2</b></div>
             <div>发布于 <b>2026-10-27</b></div>
             <div>Electron 45 · Node 24 · node:sqlite</div>
           </div>

@@ -1321,7 +1321,14 @@ export default function App() {
           className="sidebar"
           style={{ display: view === 'agents' || view === 'skills' || view === 'settings' ? 'none' : 'flex' }}
         >
-          <div className="side-head"><h1>消息</h1></div>
+          <div className="side-head">
+            <h1>消息</h1>
+            <button className="side-add" title="发起群聊" aria-label="发起群聊" onClick={() => setNewGroupOpen(true)}>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+          </div>
           <div className="search">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
             <input

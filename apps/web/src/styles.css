@@ -110,8 +110,10 @@ textarea { font-family: inherit; color: inherit; background: none; border: 0; ou
 }
 
 .sidebar { width: 300px; flex: 0 0 300px; background: var(--bg-elev); border-right: 1px solid var(--border-soft); display: flex; flex-direction: column; }
-.side-head { height: 56px; display: flex; align-items: center; padding: 0 18px; }
+.side-head { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; }
 .side-head h1 { font-size: 15px; font-weight: 600; }
+.side-add { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; color: var(--text-faint); border: 1px solid transparent; }
+.side-add:hover { background: var(--bg-hover); color: var(--text); border-color: var(--border-soft); }
 .side-scroll { flex: 1; overflow-y: auto; padding-bottom: 16px; }
 .sec {
   display: flex; justify-content: space-between; padding: 14px 18px 6px;
@@ -498,6 +500,13 @@ kbd { font-family: var(--font); font-size: 10px; background: #181d26; border: 1p
 .ttab.on { background: var(--bg-active); color: var(--text); }
 .ttab i { font-style: normal; opacity: 0.6; margin-left: 3px; }
 .task-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 26px; }
+.list-more { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 9px 0; border-radius: 9px; border: 1px dashed var(--border-soft); color: var(--text-faint); font-size: 11.5px; background: transparent; transition: color 0.15s, border-color 0.15s, background 0.15s; }
+.list-more:hover { color: var(--text); border-color: var(--border); background: var(--bg-hover); }
+.list-more .chev { font-size: 12px; line-height: 1; transition: transform 0.15s; }
+.list-more.on .chev { transform: rotate(180deg); }
+.task-list .list-more { margin-top: 6px; }
+.agent-strip + .list-more { margin-top: -16px; margin-bottom: 26px; }
+.recent .list-more { margin-top: 6px; }
 .task { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 9px; cursor: pointer; transition: background 0.12s; }
 .task:hover { background: var(--bg-hover); }
 .task .cb { width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid #3a4356; flex: 0 0 16px; display: grid; place-items: center; color: transparent; font-size: 9px; }
