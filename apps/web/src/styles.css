@@ -763,6 +763,10 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 .acard.human { border-style: dashed; }
 .acard.human .sk { color: #7fb0ff; }
 .human-online { position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; border-radius: 50%; background: var(--success); border: 2px solid var(--bg-elev); }
+.av-online-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+.av-online-wrap .human-online { border-color: var(--bg-soft); }
+.conv-time.online-text { color: var(--success); }
+.conv.human .conv-name { color: var(--text); }
 .presence-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #5b6477; margin-right: 5px; vertical-align: middle; }
 .presence-dot.on { background: var(--success); box-shadow: 0 0 6px rgba(61, 220, 151, 0.5); }
 

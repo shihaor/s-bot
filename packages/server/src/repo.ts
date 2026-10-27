@@ -84,6 +84,7 @@ function lastMessageOf(conversationId: string) {
   let authorName = '我';
   if (r.author_type === 'agent' && r.author_id) authorName = getAgent(r.author_id)?.name ?? '智能体';
   else if (r.author_type === 'human') authorName = r.author_name ?? getHuman(r.author_id ?? '')?.name ?? '同事';
+  else if (r.author_type === 'system') authorName = '系统';
   return { text: r.text, authorName, at: r.created_at };
 }
 
@@ -566,6 +567,28 @@ export function ensureDm(agentId: string): Conversation {
   db.prepare(
     "INSERT INTO conversation_members (conversation_id, member_type, member_id, muted, talk) VALUES (?, 'agent', ?, 0, 'normal')",
   ).run(id, agentId);
+
+  return getConversation(id)!;
+}
+
+/** 和真人的单聊（模拟真人也能聊） */
+export function ensureHumanDm(humanId: string): Conversation {
+  const existing = listConversations().find(
+    (c) => c.type === 'dm' && c.members.some((m) => m.memberId === humanId),
+  );
+  if (existing) return existing;
+
+  const human = getHuman(humanId);
+  if (!human) throw new Error('human not found');
+
+  const id = `cv_dm_${humanId}`;
+  const at = Date.now();
+  db.prepare(
+    'INSERT INTO conversations (id, type, title, model_id, pinned, muted, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, ?, ?)',
+  ).run(id, 'dm', human.name, at, at);
+  db.prepare(
+    "INSERT INTO conversation_members (conversation_id, member_type, member_id, muted, talk) VALUES (?, 'human', ?, 0, 'normal')",
+  ).run(id, humanId);
 
   return getConversation(id)!;
 }

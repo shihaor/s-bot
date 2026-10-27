@@ -118,6 +118,18 @@ export async function ensureDm(agentId: string): Promise<Conversation> {  const 
   return r.data;
 }
 
+/** 和真人的单聊，没有就新建 */
+export async function ensureHumanDm(humanId: string): Promise<Conversation> {
+  const res = await apiFetch('/api/conversations/dm', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ humanId }),
+  });
+  if (!res.ok) throw new Error('打开真人单聊失败');
+  const r = (await res.json()) as { data: Conversation };
+  return r.data;
+}
+
 export async function createGroup(title: string, memberIds: string[]): Promise<Conversation> {
   const res = await apiFetch('/api/conversations', {
     method: 'POST',

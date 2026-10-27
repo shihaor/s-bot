@@ -18,6 +18,7 @@ import {
   deleteModel,
   deleteTask,
   ensureDm,
+  ensureHumanDm,
   getAgent,
   getConversation,
   getDefaultModel,
@@ -615,6 +616,11 @@ app.post('/api/conversations', async (c) => {
 
 app.post('/api/conversations/dm', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
+  const humanId = String(b?.humanId ?? '');
+  if (humanId) {
+    if (!getHuman(humanId)) return c.json({ error: 'human not found' }, 404);
+    return c.json({ data: ensureHumanDm(humanId) });
+  }
   const agentId = String(b?.agentId ?? '');
   if (!getAgent(agentId)) return c.json({ error: 'agent not found' }, 404);
   return c.json({ data: ensureDm(agentId) });
@@ -745,6 +751,9 @@ function fallbackQuestions(conv: Conversation): string[] {
   if (conv.type === 'dm') {
     const m = conv.members[0];
     const a = m ? getAgent(m.memberId) : null;
+    if (m && !a) {
+      return [`${m.name}，在吗？`, '这周有空一起过一下方案吗？', '有个事想听听你的意见'];
+    }
     const skill = a?.skills?.[0] ?? a?.role ?? '这件事';
     return [
       `${a?.name ?? '你'}，帮我${skill}这件事`,
@@ -759,6 +768,9 @@ function buildGreeting(conv: Conversation): string {
   if (conv.type === 'dm') {
     const m = conv.members[0];
     const a = m ? getAgent(m.memberId) : null;
+    if (m && !a) {
+      return `这是你和${m.name}${m.role ? `（${m.role}）` : ''}的私聊。直接说事就行。`;
+    }
     const name = a?.name ?? m?.name ?? '我';
     const role = a?.role ?? m?.role ?? '';
     const skills = (a?.skills ?? []).slice(0, 3);
@@ -781,13 +793,16 @@ async function generateIntroQuestions(
   const fallback = fallbackQuestions(conv);
   if (!model?.baseUrl || !model.apiKey) return fallback;
 
+  const dmHuman = conv.type === 'dm' && !!conv.members[0] && !getAgent(conv.members[0]!.memberId);
   const who =
     conv.type === 'dm'
       ? (() => {
           const m = conv.members[0];
           const a = m ? getAgent(m.memberId) : null;
           const skills = (a?.skills ?? []).slice(0, 3).map((s) => `，擅长${s}`).join('');
-          return `${a?.name ?? m?.name ?? '智能体'}（${a?.role ?? m?.role ?? ''}${skills}）`;
+          return a
+            ? `${a.name}（${a.role}${skills}）`
+            : `${m?.name ?? '同事'}（${m?.role ?? '同事'}，真人同事）`;
         })()
       : `群聊「${conv.title}」，成员：${conv.members.map((m) => `${m.name}（${m.role}）`).join('、')}`;
 
@@ -807,7 +822,7 @@ async function generateIntroQuestions(
           },
           {
             role: 'user',
-            content: `用户第一次${conv.type === 'dm' ? '和这个智能体单聊' : '进入这个群聊'}：${who}。生成 3 条用户最可能发的问题或任务。`,
+            content: `用户第一次${conv.type === 'dm' ? (dmHuman ? '和这个真人同事单聊' : '和这个智能体单聊') : '进入这个群聊'}：${who}。生成 3 条用户最可能发的问题或任务。`,
           },
         ],
       }),
@@ -1305,6 +1320,13 @@ app.post('/api/conversations/:id/messages', async (c) => {
   // 用户直接 @ 模拟真人：稍后自动回一句
   for (const m of humansMentioned(text, conv)) {
     const h = getHuman(m.memberId);
+    if (h?.simulated) void scheduleSimulatedReply(id, h.id, Date.now());
+  }
+
+  // 和模拟真人的单聊：不用 @，发消息就回
+  if (conv.type === 'dm') {
+    const hm = conv.members.find((m) => m.memberType === 'human');
+    const h = hm ? getHuman(hm.memberId) : null;
     if (h?.simulated) void scheduleSimulatedReply(id, h.id, Date.now());
   }
 

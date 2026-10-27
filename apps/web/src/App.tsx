@@ -11,6 +11,7 @@ import {
   deleteConversation as deleteConversationApi,
   deleteTask as deleteTaskApi,
   ensureDm as ensureDmApi,
+  ensureHumanDm,
   exportConversation as exportConversationApi,
   fetchAgents,
   fetchConversations,
@@ -602,7 +603,22 @@ export default function App() {
   }, [messages, streaming?.text]);
 
   const groups = conversations.filter((c) => c.type === 'group' && matchQuery(c, searchQuery));
-  const dms = conversations.filter((c) => c.type === 'dm' && matchQuery(c, searchQuery));
+  const dms = conversations.filter(
+    (c) => c.type === 'dm' && c.members[0]?.memberType === 'agent' && matchQuery(c, searchQuery),
+  );
+
+  /** 消息列里的同事：排除自己，在线优先；已经开过单聊的带上最近一条消息 */
+  const humanColleagues = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return humans
+      .filter((h) => h.id !== user?.id)
+      .filter((h) => !q || h.name.toLowerCase().includes(q) || h.role.toLowerCase().includes(q))
+      .map((human) => ({
+        human,
+        conv: conversations.find((c) => c.type === 'dm' && c.members.some((m) => m.memberId === human.id)),
+      }))
+      .sort((a, b) => Number(!!b.human.online) - Number(!!a.human.online));
+  }, [humans, conversations, user?.id, searchQuery]);
 
   async function refreshConversations() {
     try {
@@ -610,6 +626,26 @@ export default function App() {
       setConversations(c);
     } catch {
       /* ignore */
+    }
+  }
+
+  /** 从消息列打开和同事的单聊，没有就建一个 */
+  async function openHumanDm(human: HumanInfo) {
+    const existing = conversations.find(
+      (c) => c.type === 'dm' && c.members.some((m) => m.memberId === human.id),
+    );
+    if (existing) {
+      setActiveId(existing.id);
+      setView('chat');
+      return;
+    }
+    try {
+      const conv = await ensureHumanDm(human.id);
+      await refreshConversations();
+      setActiveId(conv.id);
+      setView('chat');
+    } catch (e) {
+      showToast(String(e));
     }
   }
 
@@ -1382,7 +1418,46 @@ export default function App() {
               );
             })}
 
-            {searchQuery && groups.length === 0 && dms.length === 0 && (
+            {user && humanColleagues.length > 0 && (
+              <>
+                <div className="sec">同事 <span>{humanColleagues.filter(({ human }) => human.online).length} 在线</span></div>
+                {humanColleagues.map(({ human: h, conv }) => (
+                  <div
+                    key={h.id}
+                    className={`conv human ${conv && activeId === conv.id ? 'active' : ''}`}
+                    draggable
+                    title="点击单聊，拖到群聊可拉进群"
+                    onDragStart={(e) => {
+                      const payload: MemberPayload = { kind: 'human', id: h.id, name: h.name };
+                      setMemberDrag(e, payload);
+                      setDraggingMember(payload);
+                    }}
+                    onDragEnd={() => { setDraggingMember(null); setDropTargetId(null); }}
+                    onClick={() => void openHumanDm(h)}
+                  >
+                    <span className="av-online-wrap">
+                      <Avatar name={h.name} initial={h.initial} color={h.color} />
+                      {h.online && <span className="human-online" />}
+                    </span>
+                    <div className="conv-main">
+                      <div className="conv-top">
+                        <span className="conv-name">{h.name}</span>
+                        <span className="conv-right">
+                          <span className={`conv-time ${h.online ? 'online-text' : ''}`}>{h.online ? '在线' : '离线'}</span>
+                        </span>
+                      </div>
+                      <div className="conv-sub">
+                        {conv?.lastMessage
+                          ? `${conv.lastMessage.authorName}：${conv.lastMessage.text}`
+                          : (h.role || '同事')}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+
+            {searchQuery && groups.length === 0 && dms.length === 0 && humanColleagues.length === 0 && (
               <div className="side-empty">没有匹配的会话</div>
             )}
 
@@ -1484,7 +1559,11 @@ export default function App() {
                   <p>
                     {active.type === 'group'
                       ? `${aiCount} 个 AI · ${humanCount} 个真人${active.pinned ? ' · 已置顶' : ''}`
-                      : active.members[0]?.role}
+                      : (() => {
+                          const m = active.members[0];
+                          const h = m ? humans.find((x) => x.id === m.memberId) : null;
+                          return h ? `${h.online ? '在线' : '离线'} · ${h.role || '同事'}` : m?.role;
+                        })()}
                   </p>
                 </div>
                 <div className="spacer" />
