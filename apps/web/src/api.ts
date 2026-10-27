@@ -494,6 +494,66 @@ export async function heartbeatPresence(): Promise<void> {
   await apiFetch('/api/presence', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
 }
 
+export interface Colleague {
+  source: 'local' | 'mattermost';
+  id: string;
+  name: string;
+  role: string;
+  online: boolean;
+  status: string;
+  simulated?: boolean;
+  username?: string | null;
+  color?: string | null;
+  initial?: string;
+}
+
+export interface MattermostMeta {
+  configured: boolean;
+  ok: boolean;
+  url?: string;
+  bot?: { id: string; username: string; name: string };
+  error?: string;
+}
+
+/** 服务端找同事：S-BOT 本地真人 + Mattermost 用户 */
+export async function fetchColleagues(query: string): Promise<{ data: Colleague[]; mattermost: MattermostMeta }> {
+  const res = await apiFetch(`/api/colleagues?q=${encodeURIComponent(query)}`);
+  const body = (await res.json().catch(() => ({}))) as {
+    data?: Colleague[];
+    meta?: { mattermost?: MattermostMeta };
+    error?: string;
+  };
+  if (!res.ok) throw new Error(body.error ?? `搜索失败（${res.status}）`);
+  return {
+    data: body.data ?? [],
+    mattermost: body.meta?.mattermost ?? { configured: false, ok: false },
+  };
+}
+
+export async function fetchMattermostStatus(): Promise<MattermostMeta> {
+  const r = await getJson<{ data: MattermostMeta }>('/api/mattermost/status');
+  return r.data;
+}
+
+export async function inviteMattermostUser(username: string, message: string): Promise<{
+  ok: boolean;
+  postId?: string;
+  user?: { id: string; username: string; name: string; online: boolean };
+  error?: string;
+}> {
+  const res = await apiFetch('/api/mattermost/invite', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username, message }),
+  });
+  return (await res.json().catch(() => ({ ok: false, error: '返回解析失败' }))) as {
+    ok: boolean;
+    postId?: string;
+    user?: { id: string; username: string; name: string; online: boolean };
+    error?: string;
+  };
+}
+
 export async function resumeHumanWait(runId: string, action: 'continue' | 'skip'): Promise<void> {
   const res = await apiFetch(`/api/runs/${runId}/resume`, {
     method: 'POST',
@@ -526,6 +586,8 @@ export interface AppSettingsData {
   ragflowBaseUrl: string;
   ragflowApiKey: string;
   ragflowEnabledKbs: string[];
+  mattermostUrl: string;
+  mattermostToken: string;
 }
 
 export async function fetchSettings(): Promise<AppSettingsData> {

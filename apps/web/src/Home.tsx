@@ -15,6 +15,8 @@ interface Props {
   onNewGroup: () => void;
   onNewAgent: () => void;
   onInvite: () => void;
+  onFindColleagues: () => void;
+  onInviteExternal: () => void;
   onToast: (msg: string) => void;
   onNewTask: () => void;
   onEditTask: (task: Task) => void;
@@ -49,6 +51,8 @@ export default function Home({
   onNewGroup,
   onNewAgent,
   onInvite,
+  onFindColleagues,
+  onInviteExternal,
   onToast,
   onNewTask,
   onEditTask,
@@ -116,10 +120,10 @@ export default function Home({
             <div className="qt">新建智能体</div>
             <div className="qd">人设 + 模型 + 擅长</div>
           </button>
-          <button className="quick" onClick={onInvite}>
+          <button className="quick" onClick={userName ? onFindColleagues : onInvite}>
             <div className="qi">👥</div>
             <div className="qt">{userName ? '找同事' : '邀请同事'}</div>
-            <div className="qd">{userName ? '和真人单聊' : '登录后可用'}</div>
+            <div className="qd">{userName ? '搜索在线 / 离线同事' : '登录后可用'}</div>
           </button>
         </div>
 
@@ -233,7 +237,7 @@ export default function Home({
           <>
             <div className="home-sec">
               <h2>同事</h2>
-              <span className="more" onClick={onInvite}>邀请更多</span>
+              <span className="more" onClick={onInviteExternal}>邀请更多</span>
             </div>
             <div className="agent-strip">
               {shownHumans.map((h) => (

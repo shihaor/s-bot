@@ -604,6 +604,8 @@ export interface AppSettings {
   ragflowBaseUrl: string;
   ragflowApiKey: string;
   ragflowEnabledKbs: string[];
+  mattermostUrl: string;
+  mattermostToken: string;
 }
 
 export const DEFAULT_OPENCODE_URL = 'http://10.201.1.19:80/artifactory/installer/opencode/OpenCode.zip';
@@ -626,6 +628,8 @@ export function getSettings(): AppSettings {
     ragflowBaseUrl: map.ragflow_base_url ?? DEFAULT_RAGFLOW_URL,
     ragflowApiKey: map.ragflow_api_key ?? process.env.RAGFLOW_API_KEY ?? '',
     ragflowEnabledKbs: enabled,
+    mattermostUrl: map.mattermost_url ?? process.env.MATTERMOST_URL ?? '',
+    mattermostToken: map.mattermost_token ?? process.env.MATTERMOST_TOKEN ?? '',
   };
 }
 
@@ -641,6 +645,8 @@ export function saveSettings(next: Partial<AppSettings>): void {
   if (next.ragflowBaseUrl !== undefined) stmt.run('ragflow_base_url', next.ragflowBaseUrl);
   if (next.ragflowApiKey !== undefined) stmt.run('ragflow_api_key', next.ragflowApiKey);
   if (next.ragflowEnabledKbs !== undefined) stmt.run('ragflow_enabled_kbs', JSON.stringify(next.ragflowEnabledKbs));
+  if (next.mattermostUrl !== undefined) stmt.run('mattermost_url', next.mattermostUrl);
+  if (next.mattermostToken !== undefined) stmt.run('mattermost_token', next.mattermostToken);
 }
 
 /* ---------- 会话维护 ---------- */

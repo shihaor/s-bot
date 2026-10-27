@@ -65,6 +65,12 @@ import {
   syncModelConfig,
 } from './opencode.js';
 import { listDatasets, ragflowStatus, retrieve } from './ragflow.js';
+import {
+  getMattermostStatus,
+  isMattermostConfigured,
+  searchMattermostUsers,
+  sendMattermostDm,
+} from './mattermost.js';
 import { broadcast, bus } from './events.js';
 
 const app = new Hono();
@@ -311,6 +317,8 @@ app.patch('/api/settings', async (c) => {
     ragflowBaseUrl: typeof b?.ragflowBaseUrl === 'string' ? b.ragflowBaseUrl.trim() : undefined,
     ragflowApiKey: typeof b?.ragflowApiKey === 'string' ? b.ragflowApiKey.trim() : undefined,
     ragflowEnabledKbs: Array.isArray(b?.ragflowEnabledKbs) ? b.ragflowEnabledKbs.map(String) : undefined,
+    mattermostUrl: typeof b?.mattermostUrl === 'string' ? b.mattermostUrl.trim() : undefined,
+    mattermostToken: typeof b?.mattermostToken === 'string' ? b.mattermostToken.trim() : undefined,
   });
   resetBinaryCache();
   return c.json({ data: getSettings() });
@@ -389,6 +397,86 @@ app.post('/api/presence', async (c) => {
   if (!h) return c.json({ ok: false, error: 'human not found' }, 404);
   markHumanOnline(id);
   return c.json({ ok: true, data: { id, online: true } });
+});
+
+/** 找同事：服务端合并 S-BOT 本地真人和 Mattermost 用户，按关键字搜索 */
+app.get('/api/colleagues', async (c) => {
+  const q = String(c.req.query('q') ?? '').trim();
+  const lower = q.toLowerCase();
+  const self = c.req.header('x-sbot-user') ?? '';
+
+  const local = humansWithPresence()
+    .filter((h) => h.id !== self)
+    .filter((h) => !lower || h.name.toLowerCase().includes(lower) || h.role.toLowerCase().includes(lower))
+    .map((h) => ({
+      source: 'local' as const,
+      id: h.id,
+      name: h.name,
+      role: h.role,
+      online: h.online,
+      status: h.online ? 'online' : 'offline',
+      simulated: !!h.simulated,
+      username: null as string | null,
+      color: h.color,
+      initial: h.initial,
+    }))
+    .sort((a, b) => Number(b.online) - Number(a.online));
+
+  const mm = await getMattermostStatus();
+  let external: Array<{
+    source: 'mattermost';
+    id: string;
+    name: string;
+    role: string;
+    online: boolean;
+    status: string;
+    simulated: boolean;
+    username: string;
+    color: string | null;
+    initial: string;
+  }> = [];
+  let mmError = mm.error;
+
+  if (mm.ok && q) {
+    try {
+      external = (await searchMattermostUsers(q)).map((u) => ({
+        source: 'mattermost' as const,
+        id: u.id,
+        name: u.name,
+        role: u.role,
+        online: u.online,
+        status: u.status,
+        simulated: false,
+        username: u.username,
+        color: null,
+        initial: u.name.slice(0, 1),
+      }));
+    } catch (e) {
+      mmError = String((e as Error).message ?? e);
+    }
+  }
+
+  return c.json({
+    data: [...local, ...external],
+    meta: { mattermost: { ...mm, error: mmError }, query: q },
+  });
+});
+
+app.get('/api/mattermost/status', async (c) => c.json({ data: await getMattermostStatus() }));
+
+/** 邀请更多：通过 Mattermost 给指定账号发一条私信 */
+app.post('/api/mattermost/invite', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const username = String(b?.username ?? '').trim().replace(/^@/, '');
+  if (!username) return c.json({ ok: false, error: '请填写 Mattermost 账号' }, 400);
+
+  const uid = c.req.header('x-sbot-user') ?? '';
+  const inviter = uid ? getHuman(uid)?.name : null;
+  const message = String(b?.message ?? '').trim()
+    || `${inviter ? `${inviter}邀请` : '邀请'}你来 S-BOT 一起协作，打开 S-BOT 就能看到会话。`;
+
+  const result = await sendMattermostDm(username, message);
+  return c.json(result, result.ok ? 200 : 400);
 });
 
 /** 所有客户端共享的事件流：新消息、任务、成员变化 */
@@ -682,6 +770,7 @@ app.post('/api/conversations/:id/members', async (c) => {
     role: 'system',
     text: `${agent.name} 加入了群聊`,
   });
+  void sendJoinEvent(id, 'agent', agentId);
   return c.json({ data: getConversation(id) });
 });
 
@@ -704,6 +793,7 @@ app.post('/api/conversations/:id/humans', async (c) => {
     role: 'system',
     text: `${human.name} 加入了群聊`,
   });
+  void sendJoinEvent(id, 'human', human.id);
   return c.json({ data: getConversation(id) });
 });
 
@@ -1227,6 +1317,140 @@ async function maybeWaitForHuman(
   }
   if (remaining <= 0) return null;
   return waitForHuman(runId, conv.id, first, remaining);
+}
+
+/** 群聊最近几条真实发言，用来生成“刚加入”的提问 */
+function joinContext(conversationId: string, limit = 6) {
+  return listMessages(conversationId, 30)
+    .filter((m) => m.status === 'done' && m.authorType !== 'system' && (m.role === 'user' || m.role === 'assistant'))
+    .slice(-limit);
+}
+
+async function buildJoinQuestion(
+  conv: Conversation,
+  kind: 'human' | 'agent',
+  member: { name: string; role: string; skills?: string[] },
+  asker: { name: string; role: string },
+  context: { text: string }[],
+): Promise<string> {
+  const contextText = context.map((m) => m.text).join('\n').slice(0, 1200);
+  const skills = (member.skills ?? []).slice(0, 3).join('、');
+
+  const fallback = kind === 'human'
+    ? context.length
+      ? `@${member.name} 刚加入群聊。你先看下最近的讨论，从${member.role || '你的角度'}看，最大的风险或补充是什么？`
+      : `@${member.name} 刚加入群聊，先说说你能帮上什么？`
+    : context.length
+      ? `@${member.name} 你擅长${skills || member.role}。结合刚才的讨论，从${member.skills?.[0] ?? member.role}角度给一个判断？`
+      : `@${member.name} 你擅长${skills || member.role}，先介绍一下你能接手哪部分？`;
+
+  const cfg = toConfig(getDefaultModel());
+  if (!cfg?.baseUrl || !cfg.apiKey) return fallback;
+
+  try {
+    const reply = await completeChat(
+      cfg,
+      [
+        {
+          role: 'system',
+          content: [
+            `你是${asker.name}，${asker.role}。`,
+            `群聊里刚加入${kind === 'human' ? '一位真人同事' : '一位新智能体'}。`,
+            kind === 'human'
+              ? '结合最近讨论，用一句中文 @对方，问他对当前讨论的看法。'
+              : '结合最近讨论，用一句中文 @对方，围绕他擅长的方向问一个具体问题。',
+            '只输出这一句群聊消息，不超过 80 字，不要加引号和解释。',
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: `最近讨论：\n${contextText || '（还没有历史发言）'}\n\n新成员：${member.name}（${member.role}${skills ? `，擅长${skills}` : ''}）。`,
+        },
+      ],
+      { temperature: 0.5, maxTokens: 160 },
+    );
+    const text = reply.trim().slice(0, 300);
+    if (text) return text.includes(`@${member.name}`) ? text : `@${member.name} ${text}`;
+  } catch {
+    /* 模型失败就用模板 */
+  }
+  return fallback;
+}
+
+/**
+ * 成员加入群聊后给智能体发一个「事件」：
+ * - 真人：让一个现有智能体 @他，请他对当前上下文发表看法
+ * - 智能体：现有智能体根据新成员的擅长方向提问，新智能体再回答一句
+ */
+async function sendJoinEvent(conversationId: string, kind: 'human' | 'agent', memberId: string): Promise<void> {
+  const conv = getConversation(conversationId);
+  if (!conv || conv.type !== 'group') return;
+
+  const existingAgents = conv.members.filter((m) => m.memberType === 'agent' && m.memberId !== memberId && !m.muted);
+  const askerMember = existingAgents[0];
+  const asker = askerMember ? getAgent(askerMember.memberId) : null;
+  if (!asker) return;
+
+  const context = joinContext(conversationId);
+  if (kind === 'human') {
+    const human = getHuman(memberId);
+    if (!human) return;
+    const question = await buildJoinQuestion(conv, 'human', human, asker, context);
+    addMessage({
+      conversationId,
+      authorType: 'agent',
+      authorId: asker.id,
+      role: 'assistant',
+      text: question,
+    });
+    if (human.simulated) void scheduleSimulatedReply(conversationId, human.id, Date.now());
+    return;
+  }
+
+  const newAgent = getAgent(memberId);
+  if (!newAgent) return;
+  const question = await buildJoinQuestion(conv, 'agent', newAgent, asker, context);
+  addMessage({
+    conversationId,
+    authorType: 'agent',
+    authorId: asker.id,
+    role: 'assistant',
+    text: question,
+  });
+
+  const history = context.map((m) => ({
+    role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
+    content: m.text,
+  }));
+  let answer = '';
+  try {
+    for await (const delta of generateReply(
+      {
+        agentName: newAgent.name,
+        agentRole: newAgent.role,
+        systemPrompt: newAgent.systemPrompt,
+        skills: newAgent.skills,
+        history,
+        userText: question,
+        modelConfig: toConfig(getDefaultModel()),
+      },
+      toConfig(getDefaultModel()),
+    )) {
+      answer += delta;
+    }
+  } catch {
+    answer = '';
+  }
+  if (!answer.trim()) {
+    answer = `收到，我擅长${(newAgent.skills ?? []).slice(0, 2).join('、') || newAgent.role}，这块我先接。`;
+  }
+  addMessage({
+    conversationId,
+    authorType: 'agent',
+    authorId: newAgent.id,
+    role: 'assistant',
+    text: answer.trim(),
+  });
 }
 
 

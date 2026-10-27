@@ -47,6 +47,7 @@ import Intro from './Intro';
 import AgentsPage from './AgentsPage';
 import SkillsPage from './SkillsPage';
 import SettingsPage from './SettingsPage';
+import { ColleagueSearchDialog, MattermostInviteDialog } from './Colleagues';
 import { animateDrawer, animateIntro, animateOverlay, animatePanel, animateToast } from './anim';
 import {
   ContextMenu,
@@ -284,6 +285,9 @@ export default function App() {
   const [taskDecisions, setTaskDecisions] = useState<Record<string, 'done' | 'todo'>>({});
   const [newGroupOpen, setNewGroupOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
+  const [findColleaguesOpen, setFindColleaguesOpen] = useState(false);
+  const [inviteExternalOpen, setInviteExternalOpen] = useState(false);
+  const [inviteExternalUser, setInviteExternalUser] = useState('');
   const [intro, setIntro] = useState<ChatIntro | null>(null);
   const [introLoading, setIntroLoading] = useState(false);
   const [permissionReq, setPermissionReq] = useState<{
@@ -519,7 +523,7 @@ export default function App() {
   }, []);
 
   // GSAP：弹窗渐显、抽屉滑入、开场白、toast
-  const dialogKey = `${loginOpen}|${newGroupOpen}|${!!taskDialog}|${!!permissionReq}|${!!renameTarget}|${!!selectedCitation}|${!!ocSetup}`;
+  const dialogKey = `${loginOpen}|${newGroupOpen}|${findColleaguesOpen}|${inviteExternalOpen}|${!!taskDialog}|${!!permissionReq}|${!!renameTarget}|${!!selectedCitation}|${!!ocSetup}`;
   useEffect(() => {
     const overlays = document.querySelectorAll('.overlay');
     animateOverlay((overlays[overlays.length - 1] as HTMLElement) ?? null);
@@ -641,6 +645,22 @@ export default function App() {
     }
     try {
       const conv = await ensureHumanDm(human.id);
+      await refreshConversations();
+      setActiveId(conv.id);
+      setView('chat');
+    } catch (e) {
+      showToast(String(e));
+    }
+  }
+
+  async function openHumanDmById(id: string) {
+    const human = humans.find((h) => h.id === id);
+    if (human) {
+      await openHumanDm(human);
+      return;
+    }
+    try {
+      const conv = await ensureHumanDm(id);
       await refreshConversations();
       setActiveId(conv.id);
       setView('chat');
@@ -1526,6 +1546,8 @@ export default function App() {
               onNewGroup={() => setNewGroupOpen(true)}
               onNewAgent={() => setView('agents')}
               onInvite={() => setLoginOpen(true)}
+              onFindColleagues={() => setFindColleaguesOpen(true)}
+              onInviteExternal={() => { setInviteExternalUser(''); setInviteExternalOpen(true); }}
               onToast={showToast}
               onNewTask={() => setTaskDialog({ task: null })}
               onEditTask={(t) => setTaskDialog({ task: t })}
@@ -1910,6 +1932,33 @@ export default function App() {
             setLoginOpen(false);
             showToast('已退出登录，回到本地模式');
           }}
+        />
+      )}
+      {findColleaguesOpen && (
+        <ColleagueSearchDialog
+          onClose={() => setFindColleaguesOpen(false)}
+          onOpenLocal={(id) => {
+            setFindColleaguesOpen(false);
+            void openHumanDmById(id);
+          }}
+          onInviteMattermost={(username) => {
+            setFindColleaguesOpen(false);
+            setInviteExternalUser(username);
+            setInviteExternalOpen(true);
+          }}
+          onToast={showToast}
+        />
+      )}
+      {inviteExternalOpen && (
+        <MattermostInviteDialog
+          username={inviteExternalUser}
+          message={active?.type === 'group' ? `来 S-BOT 一起协作吧，「${active.title}」的讨论需要你。` : ''}
+          onClose={() => setInviteExternalOpen(false)}
+          onOpenSettings={() => {
+            setInviteExternalOpen(false);
+            setView('settings');
+          }}
+          onToast={showToast}
         />
       )}
       {newGroupOpen && (

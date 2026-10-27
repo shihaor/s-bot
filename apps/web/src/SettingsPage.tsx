@@ -8,6 +8,7 @@ import {
   fetchKbDatasets,
   fetchKbStatus,
   fetchImportableModels,
+  fetchMattermostStatus,
   fetchModels,
   fetchOpencodeStatus,
   fetchSettings,
@@ -22,6 +23,7 @@ import {
   type AppSettingsData,
   type ImportableModel,
   type KbDataset,
+  type MattermostMeta,
   type OpencodeCandidate,
   type OpencodeStatusData,
 } from './api';
@@ -68,6 +70,10 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   const [importPicked, setImportPicked] = useState<Set<string>>(new Set());
   const [serverUrl, setServerUrl] = useState(localStorage.getItem('sbot.server') ?? '');
   const [theme, setTheme] = useState<ThemeMode>(getThemeMode());
+  const [mmUrl, setMmUrl] = useState('');
+  const [mmToken, setMmToken] = useState('');
+  const [mmStatus, setMmStatus] = useState<MattermostMeta | null>(null);
+  const [mmBusy, setMmBusy] = useState(false);
 
   async function refresh() {
     try {
@@ -111,6 +117,8 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
       setOcBin(s.opencodeBin ?? '');
       setRfUrl(s.ragflowBaseUrl);
       setRfKey(s.ragflowApiKey);
+      setMmUrl(s.mattermostUrl ?? '');
+      setMmToken(s.mattermostToken ?? '');
       setOcStatus(oc);
     } catch (e) {
       onToast(String(e));
@@ -192,6 +200,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
     void loadRuntime();
     void loadKb();
     void loadImportables();
+    void fetchMattermostStatus().then(setMmStatus).catch(() => setMmStatus({ configured: false, ok: false }));
   }, []);
 
   async function saveModel() {
@@ -559,6 +568,79 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
         <p className="sub" style={{ margin: '10px 0 0' }}>
           没检测到？先装一次 opencode 桌面版，S-BOT 会自动找它自带的 CLI；已经装了但没识别，就把安装目录填到上面
           （例如 <code>C:\Users\你\AppData\Local\Programs\ai.opencode.desktop</code>），点「使用这个位置」。
+        </p>
+      </div>
+
+      <div className="set-card">
+        <div className="card-head">
+          <div>
+            <h3>Mattermost</h3>
+            <p className="sub" style={{ marginBottom: 0 }}>
+              用于「找同事」搜索通讯录，以及「邀请更多」给指定账号发私信。
+            </p>
+          </div>
+          <b className={mmStatus?.ok ? 'ok-text' : 'warn-text'}>
+            {mmStatus?.ok ? `● 已连接${mmStatus.bot ? ` @${mmStatus.bot.username}` : ''}` : mmStatus?.configured ? '● 连接失败' : '● 未配置'}
+          </b>
+        </div>
+
+        <div className="two" style={{ marginTop: 12 }}>
+          <label className="field"><span>Mattermost 地址</span>
+            <input
+              className="input"
+              value={mmUrl}
+              onChange={(e) => setMmUrl(e.target.value)}
+              placeholder="https://mattermost.example.com"
+            />
+          </label>
+          <label className="field"><span>Bot / 系统 Token</span>
+            <input
+              className="input"
+              type="password"
+              value={mmToken}
+              onChange={(e) => setMmToken(e.target.value)}
+              placeholder="在 Mattermost 里生成"
+            />
+          </label>
+        </div>
+
+        {mmStatus?.configured && !mmStatus.ok && (
+          <div className="colleague-note warn" style={{ marginBottom: 10 }}>{mmStatus.error ?? '连接失败，请检查地址和 Token'}</div>
+        )}
+
+        <div className="settings-actions">
+          <button
+            className="btn primary"
+            disabled={mmBusy}
+            onClick={async () => {
+              setMmBusy(true);
+              try {
+                await patchSettings({ mattermostUrl: mmUrl.trim(), mattermostToken: mmToken.trim() });
+                const st = await fetchMattermostStatus();
+                setMmStatus(st);
+                onToast(st.ok ? `Mattermost 已连接${st.bot ? `：@${st.bot.username}` : ''}` : st.error ?? 'Mattermost 连接失败');
+              } catch (e) {
+                onToast(String(e));
+              } finally {
+                setMmBusy(false);
+              }
+            }}
+          >
+            {mmBusy ? '连接中…' : '保存并测试'}
+          </button>
+          <button
+            className="btn"
+            onClick={async () => {
+              const st = await fetchMattermostStatus();
+              setMmStatus(st);
+              onToast(st.ok ? 'Mattermost 正常' : st.error ?? 'Mattermost 未配置');
+            }}
+          >
+            仅检测
+          </button>
+        </div>
+        <p className="sub" style={{ margin: '10px 0 0' }}>
+          需要能读取用户、状态和发私信的 Token。保存后「找同事」会合并 Mattermost 通讯录，「邀请更多」会用它给指定账号发消息。
         </p>
       </div>
 
