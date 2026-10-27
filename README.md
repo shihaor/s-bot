@@ -41,7 +41,7 @@ AI 同事和真人一起工作的桌面工作台。
 | 智能体库 | ✅ 卡片、增删改复制 |
 | 设置（多模型） | ✅ |
 | 主题 | ✅ 亮色 / 暗色 / 跟随系统，本地记忆 |
-| **Windows 安装包** | ✅ `S-BOT Setup 0.1.0.exe`（NSIS，115 MB） |
+| **Windows 安装包** | ✅ `S-BOT-Setup-0.1.2.exe`（NSIS） |
 
 还没接：RAGFlow 知识库、附件、真人成员、XABP 登录。
 
@@ -204,7 +204,7 @@ event: run.end         {}
 cd apps/desktop
 npm install          # 首次会下载 Electron，走 npmmirror 镜像更快
 npm run build:main   # 编译主进程
-npm run dist         # 出 Windows 安装包 -> release/S-BOT Setup 0.1.0.exe
+npm run dist         # 出 Windows 安装包 -> release/S-BOT-Setup-0.1.2.exe
 ```
 
 ### 已打通的生产链路
