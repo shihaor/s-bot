@@ -580,7 +580,13 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
             </p>
           </div>
           <b className={mmStatus?.ok ? 'ok-text' : 'warn-text'}>
-            {mmStatus?.ok ? `● 已连接${mmStatus.bot ? ` @${mmStatus.bot.username}` : ''}` : mmStatus?.configured ? '● 连接失败' : '● 未配置'}
+            {mmStatus?.mock
+              ? '● 模拟模式'
+              : mmStatus?.ok
+                ? `● 已连接${mmStatus.bot ? ` @${mmStatus.bot.username}` : ''}`
+                : mmStatus?.configured
+                  ? '● 连接失败'
+                  : '● 未配置'}
           </b>
         </div>
 
@@ -618,7 +624,9 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
                 await patchSettings({ mattermostUrl: mmUrl.trim(), mattermostToken: mmToken.trim() });
                 const st = await fetchMattermostStatus();
                 setMmStatus(st);
-                onToast(st.ok ? `Mattermost 已连接${st.bot ? `：@${st.bot.username}` : ''}` : st.error ?? 'Mattermost 连接失败');
+                onToast(st.mock
+                  ? '当前使用服务端模拟 Mattermost（不填地址/Token 时可用）'
+                  : st.ok ? `Mattermost 已连接${st.bot ? `：@${st.bot.username}` : ''}` : st.error ?? 'Mattermost 连接失败');
               } catch (e) {
                 onToast(String(e));
               } finally {
@@ -633,14 +641,15 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
             onClick={async () => {
               const st = await fetchMattermostStatus();
               setMmStatus(st);
-              onToast(st.ok ? 'Mattermost 正常' : st.error ?? 'Mattermost 未配置');
+              onToast(st.mock ? '当前是服务端模拟 Mattermost' : st.ok ? 'Mattermost 正常' : st.error ?? 'Mattermost 未配置');
             }}
           >
             仅检测
           </button>
         </div>
         <p className="sub" style={{ margin: '10px 0 0' }}>
-          需要能读取用户、状态和发私信的 Token。保存后「找同事」会合并 Mattermost 通讯录，「邀请更多」会用它给指定账号发消息。
+          不填地址 / Token 时使用服务端模拟接口：找同事会返回模拟通讯录，邀请只记录在服务端、不会真的发出。
+          填好之后自动切到真实 Mattermost。Token 需要能读取用户、状态和发私信。
         </p>
       </div>
 

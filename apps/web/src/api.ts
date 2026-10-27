@@ -510,6 +510,7 @@ export interface Colleague {
 export interface MattermostMeta {
   configured: boolean;
   ok: boolean;
+  mock?: boolean;
   url?: string;
   bot?: { id: string; username: string; name: string };
   error?: string;
@@ -537,6 +538,7 @@ export async function fetchMattermostStatus(): Promise<MattermostMeta> {
 
 export async function inviteMattermostUser(username: string, message: string): Promise<{
   ok: boolean;
+  mock?: boolean;
   postId?: string;
   user?: { id: string; username: string; name: string; online: boolean };
   error?: string;
@@ -548,6 +550,7 @@ export async function inviteMattermostUser(username: string, message: string): P
   });
   return (await res.json().catch(() => ({ ok: false, error: '返回解析失败' }))) as {
     ok: boolean;
+    mock?: boolean;
     postId?: string;
     user?: { id: string; username: string; name: string; online: boolean };
     error?: string;

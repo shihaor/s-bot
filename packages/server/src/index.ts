@@ -67,7 +67,7 @@ import {
 import { listDatasets, ragflowStatus, retrieve } from './ragflow.js';
 import {
   getMattermostStatus,
-  isMattermostConfigured,
+  getMockMattermostPosts,
   searchMattermostUsers,
   sendMattermostDm,
 } from './mattermost.js';
@@ -437,7 +437,7 @@ app.get('/api/colleagues', async (c) => {
   }> = [];
   let mmError = mm.error;
 
-  if (mm.ok && q) {
+  if (mm.ok && (q || mm.mock)) {
     try {
       external = (await searchMattermostUsers(q)).map((u) => ({
         source: 'mattermost' as const,
@@ -463,6 +463,9 @@ app.get('/api/colleagues', async (c) => {
 });
 
 app.get('/api/mattermost/status', async (c) => c.json({ data: await getMattermostStatus() }));
+
+/** 查看模拟 Mattermost 发出的私信（联调用） */
+app.get('/api/mattermost/mock/posts', (c) => c.json({ data: getMockMattermostPosts() }));
 
 /** 邀请更多：通过 Mattermost 给指定账号发一条私信 */
 app.post('/api/mattermost/invite', async (c) => {

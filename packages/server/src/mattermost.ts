@@ -12,6 +12,7 @@ export interface MattermostUser {
 export interface MattermostStatus {
   configured: boolean;
   ok: boolean;
+  mock?: boolean;
   url?: string;
   bot?: { id: string; username: string; name: string };
   error?: string;
@@ -26,6 +27,28 @@ function config(): { url: string; token: string; configured: boolean } {
 
 export function isMattermostConfigured(): boolean {
   return config().configured;
+}
+
+/**
+ * 没有配置真实 Mattermost 时使用的服务端模拟数据。
+ * 后续接真实 Mattermost 只需要在设置里填地址和 Token，调用方不用改。
+ */
+const MOCK_USERS: MattermostUser[] = [
+  { id: 'mock_u_zhoumin', username: 'zhoumin', name: '周敏', role: '产品经理', status: 'online', online: true },
+  { id: 'mock_u_liqiang', username: 'liqiang', name: '李强', role: '后端工程师', status: 'offline', online: false },
+  { id: 'mock_u_wanglu', username: 'wanglu', name: '王璐', role: 'UI 设计师', status: 'away', online: true },
+];
+
+let mockSeq = 0;
+const mockPosts: Array<{ id: string; username: string; message: string; at: number }> = [];
+
+export function getMockMattermostPosts() {
+  return mockPosts.slice(-50);
+}
+
+function findMockUser(username: string): MattermostUser | null {
+  const name = username.trim().replace(/^@/, '').toLowerCase();
+  return MOCK_USERS.find((u) => u.username.toLowerCase() === name || u.name === username.trim()) ?? null;
 }
 
 async function mmFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -91,7 +114,15 @@ function toMattermostUser(user: RawUser, status?: string): MattermostUser {
 
 export async function getMattermostStatus(): Promise<MattermostStatus> {
   const { configured, url } = config();
-  if (!configured) return { configured: false, ok: false, url, error: '还没配置 Mattermost 地址或 Token' };
+  if (!configured) {
+    return {
+      configured: false,
+      mock: true,
+      ok: true,
+      url: 'mock://mattermost',
+      bot: { id: 'mock_bot', username: 'sbot-mock', name: 'S-BOT 模拟' },
+    };
+  }
   try {
     const me = await mmFetch<RawUser>('/users/me');
     return {
@@ -107,7 +138,10 @@ export async function getMattermostStatus(): Promise<MattermostStatus> {
 
 /** 按关键字搜索 Mattermost 用户，并带上在线状态 */
 export async function searchMattermostUsers(term: string, limit = 20): Promise<MattermostUser[]> {
-  if (!config().configured) return [];
+  if (!config().configured) {
+    const q = term.trim().toLowerCase();
+    return MOCK_USERS.filter((u) => !q || `${u.username} ${u.name} ${u.role}`.toLowerCase().includes(q)).slice(0, limit);
+  }
   const me = await mmFetch<RawUser>('/users/me');
   const users = await mmFetch<RawUser[]>('/users/search', {
     method: 'POST',
@@ -135,6 +169,11 @@ export async function searchMattermostUsers(term: string, limit = 20): Promise<M
 export async function findMattermostUser(username: string): Promise<MattermostUser> {
   const name = username.trim().replace(/^@/, '');
   if (!name) throw new Error('Mattermost 账号不能为空');
+  if (!config().configured) {
+    const user = findMockUser(name);
+    if (!user) throw new Error(`模拟 Mattermost 里没有账号 @${name}`);
+    return user;
+  }
   const user = await mmFetch<RawUser>(`/users/username/${encodeURIComponent(name)}`);
   let status = 'offline';
   try {
@@ -144,14 +183,22 @@ export async function findMattermostUser(username: string): Promise<MattermostUs
   return toMattermostUser(user, status);
 }
 
-/** 给指定 Mattermost 账号发私信 */
+/** 给指定 Mattermost 账号发私信；未配置真实服务时走服务端模拟接口 */
 export async function sendMattermostDm(username: string, message: string): Promise<{
   ok: boolean;
+  mock?: boolean;
   user?: MattermostUser;
   postId?: string;
   error?: string;
 }> {
-  if (!config().configured) return { ok: false, error: '还没配置 Mattermost，请先在设置里填写地址和 Token' };
+  if (!config().configured) {
+    const user = findMockUser(username);
+    if (!user) return { ok: false, error: `模拟 Mattermost 里没有账号 @${username.replace(/^@/, '')}` };
+    const postId = `mock_post_${++mockSeq}`;
+    mockPosts.push({ id: postId, username: user.username, message, at: Date.now() });
+    console.log(`[s-bot] mock mattermost → @${user.username}: ${message}`);
+    return { ok: true, mock: true, user, postId };
+  }
   try {
     const me = await mmFetch<RawUser>('/users/me');
     const target = await findMattermostUser(username);

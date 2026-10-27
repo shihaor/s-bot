@@ -37,7 +37,7 @@ AI 同事和真人一起工作的桌面工作台。
 | 知识库（RAGFlow） | ✅ 数据集启停、智能体绑定、检索引用角标 |
 | 真人成员 / 群内邀请 | ✅ 登录后把人拉进群 |
 | 找同事 | ✅ 服务端搜索 S-BOT 同事 + Mattermost 通讯录（在线/离线） |
-| Mattermost 邀请 | ✅ 服务端给指定账号发私信 |
+| Mattermost 邀请 | ✅ 服务端模拟接口；填地址/Token 后切真实发送 |
 | 成员加入事件 | ✅ 真人加入问上下文看法，智能体加入按擅长方向提问 |
 | 真人在线状态 | ✅ 30 秒心跳，模拟真人常驻在线 |
 | 智能体 @ 真人软等待 | ✅ 暂停剩余发言，60 秒倒计时，可回复 / 继续 / 跳过 |
@@ -122,6 +122,7 @@ s-bot/
 | GET | `/api/colleagues?q=` | 找同事：合并 S-BOT 真人和 Mattermost 用户 |
 | GET | `/api/mattermost/status` | Mattermost 配置与连接状态 |
 | POST | `/api/mattermost/invite` | 给指定 Mattermost 账号发私信邀请 |
+| GET | `/api/mattermost/mock/posts` | 查看模拟 Mattermost 发出的私信（没配置真实服务时） |
 | POST | `/api/login` | 原型级登录 |
 | POST | `/api/presence` | 真人在线心跳 |
 | POST | `/api/conversations/:id/humans` | 把真人拉进群 |
@@ -262,6 +263,10 @@ event: run.end         {}
 1. `GET /users/username/:name` 找到账号
 2. `POST /channels/direct` 建私聊
 3. `POST /posts` 发送邀请消息
+
+**没填地址 / Token 时走服务端模拟接口**：找同事会返回周敏（在线）、李强（离线）、王璐（离开）三个模拟账号，
+邀请会记录到服务端内存并通过 `/api/mattermost/mock/posts` 查看，不会真的发出去。后续接真实 Mattermost
+只需要填配置，调用方和 UI 都不用改。
 
 邀请消息默认带上当前群名，也可以自己改。
 

@@ -70,7 +70,7 @@ export function ColleagueSearchDialog({
           <h3>找同事</h3>
           <p>
             服务端搜索 S-BOT 同事和 Mattermost 账号，在线 / 离线都会列出来。
-            {mm?.configured ? ` Mattermost 已连接${mm.bot ? ` · ${mm.bot.name}` : ''}。` : ''}
+            {mm?.mock ? ' 当前使用服务端模拟 Mattermost。' : mm?.configured ? ` Mattermost 已连接${mm.bot ? ` · ${mm.bot.name}` : ''}。` : ''}
           </p>
         </div>
 
@@ -88,7 +88,12 @@ export function ColleagueSearchDialog({
             {loading && <span className="colleague-loading">搜索中…</span>}
           </div>
 
-          {mm && !mm.configured && (
+          {mm?.mock && (
+            <div className="colleague-note">
+              Mattermost 还没接真实服务，当前用服务端模拟数据（周敏/李强/王璐）。填了地址和 Token 后自动切换。
+            </div>
+          )}
+          {mm && !mm.mock && !mm.configured && (
             <div className="colleague-note">
               还没配置 Mattermost，现在只能搜到 S-BOT 里的同事。配置地址和 Token 后，这里会同时搜索公司通讯录。
             </div>
@@ -193,7 +198,9 @@ export function MattermostInviteDialog({
         onToast(r.error ?? '发送失败');
         return;
       }
-      onToast(`已通过 Mattermost 发给 @${r.user?.username ?? name}`);
+      onToast(r.mock
+        ? `模拟发送成功：@${r.user?.username ?? name}（服务端已记录）`
+        : `已通过 Mattermost 发给 @${r.user?.username ?? name}`);
       onClose();
     } catch (e) {
       setError(String(e));
@@ -210,7 +217,12 @@ export function MattermostInviteDialog({
           <p>服务端会通过 Mattermost 给指定账号发一条私信。</p>
         </div>
         <div className="sheet-body">
-          {status && !status.configured && (
+          {status?.mock && (
+            <div className="colleague-note">
+              当前使用服务端模拟 Mattermost：邀请会记录在服务端，不会真的发到 Mattermost。填了地址和 Token 后自动切到真实发送。
+            </div>
+          )}
+          {status && !status.mock && !status.configured && (
             <div className="colleague-note warn">
               还没配置 Mattermost。先在设置里填地址和 Token，才能给账号发消息。
             </div>
@@ -218,7 +230,7 @@ export function MattermostInviteDialog({
           {status?.configured && !status.ok && (
             <div className="colleague-note warn">Mattermost 连接失败：{status.error ?? '请检查配置'}</div>
           )}
-          {status?.ok && status.bot && (
+          {status?.ok && !status.mock && status.bot && (
             <div className="colleague-note">Mattermost 已连接 · 发送身份 {status.bot.name}</div>
           )}
 
