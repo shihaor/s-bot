@@ -1,0 +1,13 @@
+node_modules/
+dist/
+data/
+.env
+*.log
+.DS_Store
+apps/desktop/release/
+.opencode-probe/
+apps/desktop/server/
+apps/desktop/web/
+apps/desktop/.test/
+node_modules/
+

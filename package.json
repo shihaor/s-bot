@@ -1,0 +1,21 @@
+{
+  "name": "s-bot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:server": "npm run dev -w @sbot/server",
+    "dev:web": "npm run dev -w @sbot/web",
+    "probe:opencode": "node scripts/opencode-probe.mjs",
+    "build": "npm run build -w @sbot/server && npm run build -w @sbot/web",
+    "typecheck": "npm run typecheck -w @sbot/server && npm run typecheck -w @sbot/web"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

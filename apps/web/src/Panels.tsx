@@ -1,0 +1,579 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { Agent, Conversation, Message, ModelInfo, Task } from '@sbot/shared';
+
+export interface MenuItem {
+  label: string;
+  danger?: boolean;
+  onClick: () => void;
+}
+
+export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
+  useEffect(() => {
+    const close = () => onClose();
+    window.addEventListener('mousedown', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('mousedown', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      className="ctx-menu"
+      style={{ left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 280) }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      {items.map((it, i) => (
+        <button
+          key={i}
+          className={`ctx-item ${it.danger ? 'danger' : ''}`}
+          onClick={() => {
+            onClose();
+            it.onClick();
+          }}
+        >
+          {it.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function RenameDialog({
+  current,
+  onCancel,
+  onSave,
+}: {
+  current: string;
+  onCancel: () => void;
+  onSave: (value: string) => void;
+}) {
+  const [value, setValue] = useState(current);
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="sheet narrow">
+        <div className="sheet-head"><h3>重命名</h3><p>名称会同步到所有成员。</p></div>
+        <div className="sheet-body">
+          <label className="field"><span>名称</span>
+            <input className="input" autoFocus value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && value.trim()) onSave(value.trim()); }} />
+          </label>
+        </div>
+        <div className="sheet-foot">
+          <button className="btn" onClick={onCancel}>取消</button>
+          <button className="btn primary" disabled={!value.trim()} onClick={() => onSave(value.trim())}>保存</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function SearchPanel({
+  messages,
+  members,
+  onJump,
+  onClose,
+}: {
+  messages: Message[];
+  members: Conversation['members'];
+  onJump: (id: string) => void;
+  onClose: () => void;
+}) {
+  const [q, setQ] = useState('');
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const results = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return messages.slice(-12).reverse();
+    return messages.filter((m) => m.text.toLowerCase().includes(needle)).slice(-60).reverse();
+  }, [q, messages]);
+
+  function personOf(id: string | null) {
+    return members.find((m) => m.memberId === id);
+  }
+
+  return (
+    <div className="overlay top" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="search-panel">
+        <div className="search-head">
+          <span className="ico">⌕</span>
+          <input autoFocus placeholder="搜索聊天记录…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <kbd>Esc</kbd>
+        </div>
+        <div className="search-results">
+          {results.length === 0 && <div className="search-empty">没有找到匹配的消息</div>}
+          {results.map((m) => {
+            const p = personOf(m.authorId);
+            const name = m.authorType === 'user' ? '我' : p?.name ?? '系统';
+            return (
+              <button key={m.id} className="search-row" onClick={() => { onJump(m.id); onClose(); }}>
+                <span className="who" style={{ color: p?.color }}>{name}</span>
+                <span className="text">{m.text}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="search-foot">{q ? `${results.length} 条结果` : '最近消息'} · ↑ 点击跳转</div>
+      </div>
+    </div>
+  );
+}
+
+export function LoginDialog({
+  user,
+  onClose,
+  onLogin,
+  onLogout,
+}: {
+  user: { name: string; role: string; initial: string } | null;
+  onClose: () => void;
+  onLogin: () => void;
+  onLogout: () => void;
+}) {
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      {user ? (
+        <div className="sheet">
+          <div className="sheet-head"><h3>{user.name}</h3><p>{user.role} · 已通过 XABP 登录</p></div>
+          <div className="sheet-body">
+            <div className="kv"><span>当前模式</span><b className="ok-text">在线</b></div>
+            <div className="kv"><span>数据同步</span><b>本地 + 服务器</b></div>
+          </div>
+          <div className="sheet-foot">
+            <button className="btn" onClick={onClose}>关闭</button>
+            <button className="btn danger" style={{ width: 'auto' }} onClick={onLogout}>退出登录</button>
+          </div>
+        </div>
+      ) : (
+        <div className="sheet">
+          <div className="sheet-head"><h3>登录</h3><p>登录后可以和人一起协作，不登录也能继续用 AI。</p></div>
+          <div className="sheet-body">
+            <div className="login-hero">
+              <div className="lg">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="8" r="3.6" />
+                  <path d="M4.5 20a7.5 7.5 0 0 1 15 0" />
+                </svg>
+              </div>
+              <h3>和同事一起用 AI</h3>
+              <p>用 XABP 账号登录，就能发现同事、把真人拉进群。</p>
+            </div>
+            <div className="perks">
+              <div className="perk"><span className="ic">1</span><span>发现同事，直接单聊</span></div>
+              <div className="perk"><span className="ic">2</span><span>把真人拉进群，和 AI 一起协作</span></div>
+              <div className="perk"><span className="ic">3</span><span>聊天记录多端同步</span></div>
+            </div>
+          </div>
+          <div className="sheet-foot">
+            <span className="foot-note">本地模式的数据不会上传</span>
+            <button className="btn" onClick={onClose}>暂不登录</button>
+            <button className="btn primary" onClick={onLogin}>使用 XABP 登录</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function NewGroupDialog({
+  agents,
+  onCancel,
+  onCreate,
+}: {
+  agents: Agent[];
+  onCancel: () => void;
+  onCreate: (title: string, memberIds: string[]) => void;
+}) {
+  const [title, setTitle] = useState('');
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+
+  function toggle(id: string) {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else if (next.size < 6) next.add(id);
+      return next;
+    });
+  }
+
+  const name = title.trim() || (picked.size === 2 ? '新的评审组' : '新建群聊');
+
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="sheet">
+        <div className="sheet-head"><h3>新建群聊</h3><p>选 2~6 个智能体，它们会像同事一样在一个群里协作。</p></div>
+        <div className="sheet-body">
+          <label className="field"><span>群名称</span>
+            <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="留空自动生成，比如「首页改版评审」" />
+          </label>
+          <div className="field"><span>选择智能体（{picked.size}/6）</span>
+            <div className="pick-grid">
+              {agents.map((a) => (
+                <button key={a.id} className={`pick-item ${picked.has(a.id) ? 'sel' : ''}`} onClick={() => toggle(a.id)}>
+                  <div className="av" style={{ width: 26, height: 26, flexBasis: 26, fontSize: 10.5, background: `${a.color}22`, border: `2px solid ${a.color}`, color: a.color }}>{a.initial}</div>
+                  <div><div className="pick-name">{a.name}</div><div className="pick-role">{a.role}</div></div>
+                  <span className="tick">{picked.has(a.id) ? '✓' : ''}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="sheet-foot">
+          <button className="btn" onClick={onCancel}>取消</button>
+          <button className="btn primary" disabled={picked.size < 2} onClick={() => onCreate(name, [...picked])}>创建群聊</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function TaskDialog({
+  task,
+  conversations,
+  defaultConversationId,
+  onCancel,
+  onSave,
+}: {
+  task: Task | null;
+  conversations: Conversation[];
+  defaultConversationId: string | null;
+  onCancel: () => void;
+  onSave: (input: { title: string; description: string; conversationId: string | null; priority: 'high' | 'mid' | 'low' }) => void;
+}) {
+  const groups = conversations.filter((c) => c.type === 'group');
+  const [title, setTitle] = useState(task?.title ?? '');
+  const [description, setDescription] = useState(task?.description ?? '');
+  const [conversationId, setConversationId] = useState<string>(task?.conversationId ?? defaultConversationId ?? '');
+  const [priority, setPriority] = useState<'high' | 'mid' | 'low'>(task?.priority ?? 'mid');
+  const [error, setError] = useState('');
+
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="sheet">
+        <div className="sheet-head">
+          <h3>{task ? '编辑任务' : '新建任务'}</h3>
+          <p>把任务分给一个群聊，智能体和同事都能在群里看到它。</p>
+        </div>
+        <div className="sheet-body">
+          <label className="field"><span>任务标题 <i className="req">*</i></span>
+            <input
+              className="input"
+              value={title}
+              onChange={(e) => { setTitle(e.target.value); setError(''); }}
+              placeholder="比如 整理首页改版的评审结论"
+            />
+          </label>
+          <label className="field"><span>描述</span>
+            <textarea
+              className="input"
+              rows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="补充背景、验收标准"
+            />
+          </label>
+          <label className="field"><span>分配给群聊</span>
+            <select className="input" value={conversationId} onChange={(e) => setConversationId(e.target.value)}>
+              <option value="">不分配</option>
+              {groups.map((g) => <option key={g.id} value={g.id}>{g.title}</option>)}
+            </select>
+          </label>
+          <div className="field" style={{ marginBottom: 4 }}><span>优先级</span>
+            <div className="seg" style={{ width: 'fit-content' }}>
+              {([['high', '高'], ['mid', '中'], ['low', '低']] as const).map(([k, n]) => (
+                <button key={k} type="button" className={priority === k ? 'on' : ''} onClick={() => setPriority(k)}>{n}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="sheet-foot">
+          {error && <span className="foot-error">{error}</span>}
+          <button className="btn" onClick={onCancel}>取消</button>
+          <button
+            className="btn primary"
+            onClick={() => {
+              const t = title.trim();
+              if (!t) { setError('任务标题不能为空'); return; }
+              onSave({ title: t, description: description.trim(), conversationId: conversationId || null, priority });
+            }}
+          >
+            {task ? '保存' : '创建'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function GroupDrawer({
+  conv,
+  agents,
+  models,
+  tasks,
+  onClose,
+  onPatch,
+  onMemberPatch,
+  onAdd,
+  onRemove,
+  onDissolve,
+  onLinkTask,
+  onUnassignTask,
+  onExport,
+  onImport,
+  onToast,
+  user,
+  onInviteHuman,
+}: {
+  conv: Conversation;
+  agents: Agent[];
+  models: ModelInfo[];
+  tasks: Task[];
+  onClose: () => void;
+  onPatch: (patch: { title?: string; autoReply?: boolean; supModel?: string | null; maxTurns?: number; modelId?: string | null }) => void;
+  onMemberPatch: (agentId: string, patch: { muted?: boolean; talk?: 'low' | 'normal' | 'high' }) => void;
+  onAdd: (agentId: string) => void;
+  onRemove: (agentId: string) => void;
+  onDissolve: () => void;
+  onLinkTask: (taskId: string) => void;
+  onUnassignTask: (taskId: string) => void;
+  onExport: () => void;
+  onImport: (pkg: unknown) => void;
+  onToast: (msg: string) => void;
+  user: { id?: string; name: string; role: string; initial: string } | null;
+  onInviteHuman: (name: string, role: string) => void;
+}) {
+  const [title, setTitle] = useState(conv.title);
+  const [picking, setPicking] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const memberIds = new Set(conv.members.map((m) => m.memberId));
+  const available = agents.filter((a) => !memberIds.has(a.id));
+
+  const convTasks = tasks.filter((t) => t.conversationId === conv.id);
+  const activeTasks = convTasks.filter((t) => t.status !== 'done');
+  const doneTasks = convTasks.filter((t) => t.status === 'done');
+  const unassigned = tasks.filter((t) => t.status !== 'done' && !t.conversationId);
+
+  async function readHandoff(file: File | undefined | null) {
+    if (!file) return;
+    try {
+      const pkg = JSON.parse(await file.text());
+      if (pkg?.kind !== 's-bot-handoff') {
+        onToast('这不是 S-BOT 的交接文件');
+        return;
+      }
+      onImport(pkg);
+    } catch {
+      onToast('文件解析失败，请选择导出的 .json');
+    }
+  }
+
+  return (
+    <aside className="drawer">
+      <div className="drawer-head">
+        <div><h3>群聊设置</h3><p>{conv.members.length} 个智能体</p></div>
+        <button className="icon-btn" onClick={onClose}>✕</button>
+      </div>
+      <div className="drawer-body">
+        <div className="dsec">
+          <div className="dsec-title">群名称</div>
+          <input
+            className="input"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            onBlur={() => { if (title.trim() && title.trim() !== conv.title) onPatch({ title: title.trim() }); }}
+          />
+        </div>
+
+        <div className="dsec">
+          <div className="dsec-title">发言规则</div>
+          <div className="drow">
+            <div><div className="k">主持人决定谁说话</div><div className="d">关闭后只有被 @ 才会触发</div></div>
+            <div className={`sw ${conv.autoReply ? 'on' : ''}`} onClick={() => onPatch({ autoReply: !conv.autoReply })} />
+          </div>
+          <div className="drow">
+            <div><div className="k">主持人模型</div><div className="d">每轮多一次调用</div></div>
+            <select className="dselect" value={conv.supModel ?? ''} onChange={(e) => onPatch({ supModel: e.target.value || null })}>
+              <option value="">跟随默认</option>
+              {models.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+          </div>
+          <div className="drow">
+            <div><div className="k">会话模型</div><div className="d">覆盖所有智能体</div></div>
+            <select className="dselect" value={conv.modelId ?? ''} onChange={(e) => onPatch({ modelId: e.target.value || null })}>
+              <option value="">跟随默认</option>
+              {models.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+          </div>
+          <div className="drow">
+            <div><div className="k">单条消息最多发言</div><div className="d">防止一次刷屏</div></div>
+            <select className="dselect" value={conv.maxTurns} onChange={(e) => onPatch({ maxTurns: Number(e.target.value) })}>
+              {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n} 个</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="dsec">
+          <div className="dsec-title">成员</div>
+          {conv.members.map((m) => (
+            <div key={m.memberId} className="mem">
+              <div className="mem-top">
+                <div className="av" style={{ width: 28, height: 28, flexBasis: 28, fontSize: 11, background: `${m.color}22`, border: `2px solid ${m.color}`, color: m.color }}>{m.initial}</div>
+                <div><div className="mem-name" style={{ color: m.color }}>{m.name}</div><div className="mem-role">{m.role}</div></div>
+                <button className="mini danger" title="移出群聊" onClick={() => { if (conv.members.length <= 1) return; onRemove(m.memberId); }}>−</button>
+              </div>
+              <div className="mem-bot">
+                <span className="lbl">发言</span>
+                <div className="seg">
+                  {([['low', '少'], ['normal', '正常'], ['high', '多']] as const).map(([k, n]) => (
+                    <button key={k} className={m.talk === k ? 'on' : ''} onClick={() => onMemberPatch(m.memberId, { talk: k })}>{n}</button>
+                  ))}
+                </div>
+                <span className="lbl" style={{ marginLeft: 'auto' }}>静音</span>
+                <div className={`sw ${m.muted ? 'on' : ''}`} onClick={() => onMemberPatch(m.memberId, { muted: !m.muted })} />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="dsec">
+          <div className="dsec-title">添加智能体</div>
+          {available.length === 0 && <div className="dsec-empty">所有智能体都在群里了</div>}
+          {available.map((a) => (
+            <button key={a.id} className="add-row" onClick={() => onAdd(a.id)}>
+              <div className="av" style={{ width: 22, height: 22, flexBasis: 22, fontSize: 9.5, background: `${a.color}22`, border: `2px solid ${a.color}`, color: a.color }}>{a.initial}</div>
+              <div><div className="add-name">{a.name}</div><div className="add-role">{a.role}</div></div>
+              <span className="plus">+</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="dsec">
+          <div className="dsec-title">邀请同事</div>
+          {!user && <div className="dsec-empty">登录后可以拉真人进群</div>}
+          {user && conv.members.some((m) => m.memberId === user.id) && (
+            <div className="dsec-empty">{user.name} 已经在群里了</div>
+          )}
+          {user && !conv.members.some((m) => m.memberId === user.id) && (
+            <button className="add-row" onClick={() => onInviteHuman(user.name, user.role)}>
+              <div className="av" style={{ width: 22, height: 22, flexBasis: 22, fontSize: 9.5, background: '#5B8CFF22', border: '2px solid #5B8CFF', color: '#5B8CFF' }}>{user.initial}</div>
+              <div><div className="add-name">{user.name}</div><div className="add-role">{user.role} · 真人</div></div>
+              <span className="plus">+</span>
+            </button>
+          )}
+        </div>
+
+        <div className="dsec">
+          <div className="dsec-title">任务</div>
+          {activeTasks.length === 0 && <div className="dsec-empty">这个群还没有进行中的任务</div>}
+          {activeTasks.map((t) => (
+            <div key={t.id} className="dtask">
+              <span className={`dpri ${t.priority}`} />
+              <div className="dtask-t">{t.title}</div>
+              {t.status === 'awaiting' && <span className="dchip">待确认</span>}
+              <button
+                className="dlink"
+                title="取消执行，回到待分配，让其他群接手"
+                onClick={() => onUnassignTask(t.id)}
+              >
+                取消执行
+              </button>
+            </div>
+          ))}
+          {doneTasks.length > 0 && (
+            <div className="dsec-hint">已完成 {doneTasks.length} 个（工作台可查看）</div>
+          )}
+
+          <button className="task-link-toggle" onClick={() => setPicking((v) => !v)}>
+            {picking ? '收起待分配任务' : `+ 关联待分配任务${unassigned.length ? `（${unassigned.length}）` : ''}`}
+          </button>
+          {picking && (
+            <div className="task-pick">
+              {unassigned.length === 0 && <div className="dsec-empty">没有待分配的任务</div>}
+              {unassigned.map((t) => (
+                <div key={t.id} className="task-pick-row">
+                  <span className={`dpri ${t.priority}`} />
+                  <div className="dtask-t">{t.title}</div>
+                  <button className="dlink" onClick={() => { onLinkTask(t.id); setPicking(false); }}>关联</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="dsec">
+          <div className="dsec-title">交接</div>
+          <div className="dsec-hint" style={{ marginTop: 0 }}>
+            导出后到另一个群导入，聊天记录和任务会一起带过去，那个群可以直接接着做。
+          </div>
+          <div className="handoff-row">
+            <button className="btn" onClick={onExport}>导出聊天记录</button>
+            <button className="btn" onClick={() => fileRef.current?.click()}>导入到本群</button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/json,.json"
+              hidden
+              onChange={(e) => { void readHandoff(e.target.files?.[0]); e.target.value = ''; }}
+            />
+          </div>
+        </div>
+
+        <div className="dsec danger-zone">
+          <button className="btn danger" onClick={onDissolve}>解散群聊</button>
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+/* ---------- opencode 审批 ---------- */
+
+const ACTION_TEXT: Record<string, string> = {
+  edit: '写入文件',
+  shell: '执行命令',
+  external_directory: '访问外部目录',
+  read: '读取文件',
+  webfetch: '访问网页',
+  websearch: '联网搜索',
+};
+
+export function PermissionDialog({
+  request,
+  agentName,
+  onDecide,
+}: {
+  request: { action: string; resources: string[] };
+  agentName: string;
+  onDecide: (decision: 'once' | 'always' | 'reject') => void;
+}) {
+  const action = ACTION_TEXT[request.action] ?? request.action;
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onDecide('reject'); }}>
+      <div className="sheet perm-sheet">
+        <div className="sheet-head">
+          <h3>需要你确认</h3>
+          <p>{agentName} 想 {action}，需要你拍板。</p>
+        </div>
+        <div className="sheet-body">
+          <div className="perm-action">{action}</div>
+          <div className="perm-list">
+            {request.resources.map((r) => <code key={r}>{r}</code>)}
+          </div>
+          <div className="perm-hint">允许后它才会继续；60 秒不处理会按拒绝处理。</div>
+        </div>
+        <div className="sheet-foot perm-foot">
+          <button className="btn" onClick={() => onDecide('reject')}>拒绝</button>
+          <button className="btn" onClick={() => onDecide('always')}>总是允许</button>
+          <button className="btn primary" onClick={() => onDecide('once')}>允许一次</button>
+        </div>
+      </div>
+    </div>
+  );
+}

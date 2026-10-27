@@ -1,0 +1,26 @@
+{
+  "name": "@sbot/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --experimental-sqlite --import tsx --env-file-if-exists=../../.env src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node --experimental-sqlite dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.0.0",
+    "@opencode/client": "^2.1.4",
+    "@sbot/shared": "*",
+    "adm-zip": "^0.6.1",
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "@opencode/cli": "^2.1.4",
+    "@types/adm-zip": "^0.5.8",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
