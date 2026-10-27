@@ -412,9 +412,10 @@ export function GroupDrawer({
             </select>
           </div>
           <div className="drow">
-            <div><div className="k">单条消息最多发言</div><div className="d">防止一次刷屏</div></div>
+            <div><div className="k">单条消息最多发言</div><div className="d">无限制 = 所有智能体都发言，冲突时 @ 所有真人</div></div>
             <select className="dselect" value={conv.maxTurns} onChange={(e) => onPatch({ maxTurns: Number(e.target.value) })}>
               {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n} 个</option>)}
+              <option value={0}>无限制</option>
             </select>
           </div>
         </div>

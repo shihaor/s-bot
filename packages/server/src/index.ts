@@ -1138,7 +1138,99 @@ function pickTargets(conv: Conversation, text: string): string[] {
     if (hit.length) return hit.slice(0, 3).map((a) => a.memberId);
   }
   if (!conv.autoReply) return [];
-  return agents.slice(0, Math.min(conv.maxTurns || 3, agents.length)).map((a) => a.memberId);
+  const limit = conv.maxTurns === 0 ? agents.length : Math.min(conv.maxTurns || 3, agents.length);
+  return agents.slice(0, limit).map((a) => a.memberId);
+}
+
+/** 判断这一轮智能体发言里是否存在明确意见冲突 */
+async function detectDisagreement(
+  conv: Conversation,
+  messages: Array<{ text: string; authorType: string; authorId: string | null; authorName?: string | null }>,
+  model: ReturnType<typeof getDefaultModel>,
+): Promise<boolean> {
+  const joined = messages.map((m) => m.text).join('\n').slice(0, 3000);
+  if (!joined.trim()) return false;
+
+  const cfg = toConfig(model);
+  if (!cfg?.apiKey) {
+    return /(不同意|反对|不建议|不行|来不及|有冲突|我保留)/.test(joined);
+  }
+  try {
+    const reply = await completeChat(
+      cfg,
+      [
+        {
+          role: 'system',
+          content: '判断下面多个智能体的发言是否存在明确意见冲突（方案、优先级或判断互相矛盾），只是补充细节不算。只回答 CONFLICT 或 CONSISTENT。',
+        },
+        { role: 'user', content: joined },
+      ],
+      { temperature: 0, maxTokens: 8 },
+    );
+    return /CONFLICT/i.test(reply);
+  } catch {
+    return false;
+  }
+}
+
+async function summarizeDisagreement(
+  conv: Conversation,
+  messages: Array<{ text: string; authorType: string; authorId: string | null; authorName?: string | null }>,
+  model: ReturnType<typeof getDefaultModel>,
+): Promise<string> {
+  const fallback = '目前智能体之间的意见有分歧，请你们拍板。';
+  const cfg = toConfig(model);
+  if (!cfg?.apiKey) return fallback;
+  try {
+    const reply = await completeChat(
+      cfg,
+      [
+        {
+          role: 'system',
+          content: '用一句中文概括这些智能体发言里的主要分歧，不超过 60 字，不要评价谁对谁错，只输出这句话。',
+        },
+        {
+          role: 'user',
+          content: messages.map((m) => `${senderName(conv, m as any)}：${m.text}`).join('\n').slice(0, 3000),
+        },
+      ],
+      { temperature: 0.2, maxTokens: 100 },
+    );
+    if (reply.trim()) return reply.trim().slice(0, 160);
+  } catch {
+    /* 用兜底 */
+  }
+  return fallback;
+}
+
+/** 意见冲突时，@ 群里所有真人来拍板 */
+async function askAllHumansOnConflict(
+  conv: Conversation,
+  messages: Array<{ text: string; authorType: string; authorId: string | null; authorName?: string | null }>,
+  model: ReturnType<typeof getDefaultModel>,
+): Promise<void> {
+  if (conv.type !== 'group' || messages.length < 2) return;
+  const humans = conv.members.filter((m) => m.memberType === 'human');
+  if (!humans.length) return;
+  if (!(await detectDisagreement(conv, messages, model))) return;
+
+  const summary = await summarizeDisagreement(conv, messages, model);
+  const mentions = humans.map((h) => `@${h.name}`).join(' ');
+  const authorId = messages[messages.length - 1]?.authorId
+    ?? conv.members.find((m) => m.memberType === 'agent')?.memberId;
+  if (!authorId) return;
+
+  addMessage({
+    conversationId: conv.id,
+    authorType: 'agent',
+    authorId,
+    role: 'assistant',
+    text: `${mentions} ${summary}`,
+  });
+  for (const h of humans) {
+    const human = getHuman(h.memberId);
+    if (human?.simulated) void scheduleSimulatedReply(conv.id, human.id, Date.now());
+  }
 }
 
 /** 找出这条发言里 @ 到的真人成员 */
@@ -1778,6 +1870,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
       }),
     });
 
+    const produced: Array<ReturnType<typeof addMessage>> = [];
     for (const agentId of targets) {
       if (aborted) break;
       const agent = getAgent(agentId);
@@ -1949,6 +2042,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
         status: failed ? 'error' : aborted ? 'interrupted' : 'done',
         parts: messageParts.length ? messageParts : undefined,
       });
+      produced.push(saved);
+      if (!failed) history.push({ role: 'assistant', content: full });
 
       await stream.writeSSE({
         event: 'message.end',
@@ -1968,6 +2063,12 @@ app.post('/api/conversations/:id/messages', async (c) => {
         const decision = await maybeWaitForHuman(runId, conv, full, targets.length - targets.indexOf(agentId) - 1);
         if (decision === 'skip') break;
       }
+    }
+
+    if (!aborted && conv.maxTurns === 0 && produced.length >= 2) {
+      // 不限制发言时，让所有智能体充分讨论；出现冲突就 @ 所有真人拍板
+      const spoken = produced.filter((m) => m.status === 'done' && m.text.trim());
+      if (spoken.length >= 2) void askAllHumansOnConflict(conv, spoken, defaultModel);
     }
 
     if (!aborted && targets.length) {

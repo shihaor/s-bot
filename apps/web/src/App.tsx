@@ -684,6 +684,12 @@ export default function App() {
     window.setTimeout(() => setToast((t) => (t === msg ? '' : t)), 2200);
   }
 
+  /** Electron 通知：带上当前主题，主进程用同色系自绘提醒 */
+  function notifyDesktop(title: string, body: string) {
+    const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+    (window as any).sbot?.notify?.(title, body, theme);
+  }
+
   async function openAgentDm(agentId: string) {
     try {
       const conv = await ensureDmApi(agentId);
@@ -1229,7 +1235,7 @@ export default function App() {
             setWaitReply('');
             if (document.hidden || !document.hasFocus()) {
               const where = conversations.find((c) => c.id === runConv)?.title ?? 'S-BOT';
-              (window as any).sbot?.notify?.(`${e.name} · ${where}`, '智能体在等你拍板');
+              notifyDesktop(`${e.name} · ${where}`, '智能体在等你拍板');
             }
           } else if (e.type === 'human.resume') {
             setHumanWait((cur) => (cur?.runId === e.runId ? null : cur));
@@ -1238,7 +1244,7 @@ export default function App() {
             if (document.hidden || !document.hasFocus()) {
               const who = agents.find((a) => a.id === e.agentId)?.name ?? '智能体';
               const where = conversations.find((c) => c.id === runConv)?.title ?? 'S-BOT';
-              (window as any).sbot?.notify?.(`${who} · ${where}`, e.text.slice(0, 90));
+              notifyDesktop(`${who} · ${where}`, e.text.slice(0, 90));
             }
             if (activeIdRef.current === runConv) {
               setMessages((prev) => [
@@ -1261,7 +1267,7 @@ export default function App() {
             }
           } else if (e.type === 'task.confirm') {
             if (document.hidden || !document.hasFocus()) {
-              (window as any).sbot?.notify?.('S-BOT', '有任务等你确认');
+              notifyDesktop('S-BOT', '有任务等你确认');
             }
             if (activeIdRef.current === runConv) setMessages((prev) => [...prev, e.message]);
             else setUnread((prev) => ({ ...prev, [runConv]: (prev[runConv] ?? 0) + 1 }));
