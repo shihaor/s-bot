@@ -1466,10 +1466,82 @@ async function buildContextSummary(
   }
 }
 
+/** 新智能体加入后，按自己的擅长方向给群里做一段上下文摘要，并说明准备怎么参与 */
+async function buildAgentJoinSummary(
+  conv: Conversation,
+  agent: { name: string; role: string; systemPrompt: string; skills: string[] },
+  askerName: string,
+  context: Array<{ text: string; authorType: string; authorId: string | null; authorName?: string | null }>,
+): Promise<string> {
+  const skill = agent.skills[0] ?? agent.role ?? '我的专业';
+  const skills = (agent.skills.length ? agent.skills : [agent.role]).filter(Boolean).join('、');
+  const recent = context.slice(-10);
+  const contextText = recent
+    .map((m) => `${senderName(conv, m as any)}：${m.text}`)
+    .join('\n')
+    .slice(0, 2600);
+
+  const fallbackLines = [`📋 从${skill}视角看上下文`, ''];
+  if (recent.length) {
+    fallbackLines.push('最近在讨论');
+    for (const m of recent.slice(-3)) {
+      fallbackLines.push(`• ${senderName(conv, m as any)}：${m.text.replace(/\s+/g, ' ').slice(0, 90)}`);
+    }
+    fallbackLines.push('', '我的判断');
+    fallbackLines.push(`• 结合${skills}，现在最需要先把讨论收敛成可执行的分工。`);
+    fallbackLines.push('', '我能接的部分');
+    fallbackLines.push(`• ${skill}相关的问题我来跟，先把上面的分歧拆成明确选项。`);
+  } else {
+    fallbackLines.push('群里还没有历史发言。');
+    fallbackLines.push('', '我能接的部分');
+    fallbackLines.push(`• ${skill}相关的部分我来接，等你们把目标丢进来。`);
+  }
+  fallbackLines.push('', `@${askerName} 我先从${skill}这块跟进，下一步建议把结论落成一条可执行的待办。`);
+  const fallback = fallbackLines.join('\n');
+
+  const cfg = toConfig(getDefaultModel());
+  if (!cfg?.baseUrl || !cfg.apiKey) return fallback;
+
+  try {
+    const reply = await completeChat(
+      cfg,
+      [
+        {
+          role: 'system',
+          content: [
+            `你是${agent.name}，${agent.role}，擅长${skills}。你刚被拉进群聊「${conv.title}」。`,
+            '请从你的专业视角，给群里所有人梳理一遍当前上下文，并说明你准备从哪里参与。',
+            '格式要求：',
+            `1. 第一行固定是：📋 从${skill}视角看上下文`,
+            '2. 依次写「最近在讨论」「我的判断」「我能接的部分」三段，没有内容的段可以省略',
+            '3. 每段用 • 列 1~3 条，每条不超过 40 字',
+            '4. 不要用 Markdown 的 #、**、表格，用空行分段',
+            `5. 最后单独一行 @${askerName}，给一个具体的下一步或分工建议`,
+            '6. 总字数控制在 280 字以内，只输出摘要正文',
+            agent.systemPrompt,
+          ].join('\n'),
+        },
+        {
+          role: 'user',
+          content: `最近发言：\n${contextText || '（还没有历史发言）'}\n\n群成员：${conv.members.map((m) => m.name).join('、')}`,
+        },
+      ],
+      { temperature: 0.4, maxTokens: 600 },
+    );
+
+    let text = tidySummary(reply || fallback);
+    if (!text.includes('摘要') && !text.includes('视角看上下文')) text = `📋 从${skill}视角看上下文\n\n${text}`;
+    if (!text.includes('@')) text += `\n\n@${askerName} 我先从${skill}这块跟进，下一步建议把结论落成一条可执行的待办。`;
+    return text.slice(0, 1400);
+  } catch {
+    return fallback;
+  }
+}
+
 /**
  * 成员加入群聊后给智能体发一个「事件」：
  * - 真人：让一个现有智能体给他发一段带排版的上下文摘要，并请他发表看法
- * - 智能体：现有智能体根据新成员的擅长方向提问，新智能体再回答一句
+ * - 智能体：新智能体按自己的擅长方向总结上下文，说明能接哪部分，并给出下一步
  */
 async function sendJoinEvent(conversationId: string, kind: 'human' | 'agent', memberId: string): Promise<void> {
   const conv = getConversation(conversationId);
@@ -1478,9 +1550,9 @@ async function sendJoinEvent(conversationId: string, kind: 'human' | 'agent', me
   const existingAgents = conv.members.filter((m) => m.memberType === 'agent' && m.memberId !== memberId && !m.muted);
   const askerMember = existingAgents[0];
   const asker = askerMember ? getAgent(askerMember.memberId) : null;
-  if (!asker) return;
 
   if (kind === 'human') {
+    if (!asker) return;
     const human = getHuman(memberId);
     if (!human) return;
     const context = joinContext(conversationId, 10);
@@ -1497,53 +1569,22 @@ async function sendJoinEvent(conversationId: string, kind: 'human' | 'agent', me
     return;
   }
 
-  const context = joinContext(conversationId);
   const newAgent = getAgent(memberId);
   if (!newAgent) return;
-  const question = await buildJoinQuestion(conv, 'agent', newAgent, asker, context);
-  addMessage({
-    conversationId,
-    authorType: 'agent',
-    authorId: asker.id,
-    role: 'assistant',
-    text: question,
-  });
-
-  const history = context.map((m) => ({
-    role: (m.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
-    content: m.text,
-  }));
-  let answer = '';
-  try {
-    for await (const delta of generateReply(
-      {
-        agentName: newAgent.name,
-        agentRole: newAgent.role,
-        systemPrompt: newAgent.systemPrompt,
-        skills: newAgent.skills,
-        history,
-        userText: question,
-        modelConfig: toConfig(getDefaultModel()),
-      },
-      toConfig(getDefaultModel()),
-    )) {
-      answer += delta;
-    }
-  } catch {
-    answer = '';
-  }
-  if (!answer.trim()) {
-    answer = `收到，我擅长${(newAgent.skills ?? []).slice(0, 2).join('、') || newAgent.role}，这块我先接。`;
-  }
+  const askerName = asker?.name
+    ?? conv.members.find((m) => m.memberType === 'human')?.name
+    ?? '大家';
+  const context = joinContext(conversationId, 12);
+  const summary = await buildAgentJoinSummary(conv, newAgent, askerName, context);
   addMessage({
     conversationId,
     authorType: 'agent',
     authorId: newAgent.id,
     role: 'assistant',
-    text: answer.trim(),
+    text: summary,
+    parts: [{ type: 'context-summary' }],
   });
 }
-
 
 function senderName(conv: Conversation, m: { authorId: string | null; authorName?: string | null; authorType: string }): string {
   if (m.authorType === 'user') return '用户';
