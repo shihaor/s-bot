@@ -59,6 +59,8 @@ export interface HumanInfo {
   role: string;
   color: string;
   initial: string;
+  simulated?: boolean;
+  online?: boolean;
   createdAt: number;
 }
 
@@ -326,18 +328,63 @@ export async function replyPermission(requestID: string, decision: 'once' | 'alw
   if (!res.ok) throw new Error('审批回复失败');
 }
 
-export async function fetchOpencodeStatus(): Promise<{
+export interface OpencodeStatusData {
   available: boolean;
   running: boolean;
   bin?: string;
   version?: string;
   url?: string;
   error?: string;
-}> {
-  const r = await getJson<{ data: { available: boolean; running: boolean; bin?: string; version?: string; url?: string; error?: string } }>(
-    '/api/opencode/status',
-  );
+  dataDir?: string;
+  sidecarDir?: string;
+  configFile?: string;
+}
+
+export async function fetchOpencodeStatus(): Promise<OpencodeStatusData> {
+  const r = await getJson<{ data: OpencodeStatusData }>('/api/opencode/status');
   return r.data;
+}
+
+export interface OpencodeCandidate {
+  bin: string;
+  version: string;
+}
+
+/** 扫描 opencode 安装位置；save=true 时把 path 保存为手动指定的可执行文件/安装目录 */
+export async function detectOpencode(path?: string, save = false): Promise<{
+  ok: boolean;
+  bin?: string;
+  error?: string;
+  status: OpencodeStatusData;
+  candidates: OpencodeCandidate[];
+}> {
+  const res = await apiFetch('/api/opencode/detect', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path, save }),
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    data?: { ok?: boolean; bin?: string; error?: string; status?: OpencodeStatusData; candidates?: OpencodeCandidate[] };
+    error?: string;
+  };
+  const d = body.data;
+  if (!d) throw new Error(body.error ?? `检测失败（${res.status}）`);
+  return {
+    ok: d.ok !== false,
+    bin: d.bin,
+    error: d.error,
+    status: d.status ?? (await fetchOpencodeStatus()),
+    candidates: d.candidates ?? [],
+  };
+}
+
+export async function openOpencodeDataDir(): Promise<{ ok: boolean; path: string; error?: string }> {
+  const res = await apiFetch('/api/opencode/open-data', { method: 'POST' });
+  return (await res.json().catch(() => ({ ok: false, path: '', error: '打开失败' }))) as {
+    ok: boolean;
+    path: string;
+    error?: string;
+  };
 }
 
 export interface OpencodeSkill {
@@ -428,6 +475,32 @@ export async function syncModelsToOpencode(): Promise<{ count: number; path: str
 export async function fetchHumans(): Promise<HumanInfo[]> {
   const r = await getJson<{ data: HumanInfo[] }>('/api/humans');
   return r.data;
+}
+
+/** 登录后每 30 秒打一次心跳，其他客户端就能看到你在线 */
+export async function heartbeatPresence(): Promise<void> {
+  await apiFetch('/api/presence', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+}
+
+export async function resumeHumanWait(runId: string, action: 'continue' | 'skip'): Promise<void> {
+  const res = await apiFetch(`/api/runs/${runId}/resume`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action }),
+  });
+  if (!res.ok) throw new Error(`继续失败（${res.status}）`);
+}
+
+/** 软等待时以被 @ 真人的身份直接回复，随后原来的智能体发言继续 */
+export async function replyHumanWait(runId: string, text: string): Promise<Message> {
+  const res = await apiFetch(`/api/runs/${runId}/reply`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { data?: Message; error?: string };
+  if (!res.ok || !body.data) throw new Error(body.error ?? `回复失败（${res.status}）`);
+  return body.data;
 }
 
 /* ---------- 设置 / 运行时 / 知识库 ---------- */
@@ -557,7 +630,9 @@ export async function testSettings(): Promise<{ ok: boolean; error?: string; ms?
 }
 
 export type ChatEvent =
-  | { type: 'run.start'; userMessageId: string; conversationId: string; targets: string[] }
+  | { type: 'human.wait'; runId: string; conversationId: string; humanId: string; name: string; role: string; color: string; initial: string; seconds: number; remaining: number }
+  | { type: 'human.resume'; runId: string; conversationId: string; humanId: string; name: string; decision: 'continue' | 'skip' | 'reply' | 'timeout' }
+  | { type: 'run.start'; runId: string; userMessageId: string; conversationId: string; targets: string[] }
   | {
       type: 'message.start';
       id: string;

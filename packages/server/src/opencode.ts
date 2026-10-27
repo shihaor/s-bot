@@ -1,12 +1,12 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import AdmZip from 'adm-zip';
 import { dirname, join, resolve } from 'node:path';
 import { OpenCode } from '@opencode/client';
 import type { Agent, ModelInfo } from '@sbot/shared';
-import { getAgentSession, getDefaultModel, getSettings, listModels, saveAgentSession } from './repo.js';
+import { getAgentSession, getDefaultModel, getSettings, listModels, saveAgentSession, saveSettings } from './repo.js';
 
 const isWin = process.platform === 'win32';
 const exeName = isWin ? 'opencode.exe' : 'opencode';
@@ -27,6 +27,9 @@ export interface OpencodeStatus {
   version?: string;
   url?: string;
   error?: string;
+  dataDir?: string;
+  sidecarDir?: string;
+  configFile?: string;
 }
 
 type Client = ReturnType<typeof OpenCode.make>;
@@ -63,17 +66,23 @@ function pathCandidates(): string[] {
       .filter(Boolean) as string[];
 
     // opencode 桌面版自带 CLI
+    add(join(local, 'Programs', '@opencode', 'desktop', 'resources', 'opencode-cli.exe'));
+    add(join(local, 'Programs', '@opencode', 'resources', 'opencode-cli.exe'));
     add(join(local, 'Programs', '@opencodedesktop', 'resources', 'opencode-cli.exe'));
     add(join(local, 'Programs', 'OpenCode', 'resources', 'opencode-cli.exe'));
     add(join(local, 'Programs', 'opencode', 'resources', 'opencode-cli.exe'));
     for (const dir of programDirs) {
       add(join(dir, 'OpenCode', 'resources', 'opencode-cli.exe'));
+      add(join(dir, '@opencode', 'desktop', 'resources', 'opencode-cli.exe'));
       add(join(dir, '@opencodedesktop', 'resources', 'opencode-cli.exe'));
     }
     // 扫描 %LOCALAPPDATA%\Programs\*（桌面版装在哪一层都能找到）
     try {
       for (const entry of readdirSync(join(local, 'Programs'), { withFileTypes: true })) {
-        if (entry.isDirectory()) add(join(local, 'Programs', entry.name, 'resources', 'opencode-cli.exe'));
+        if (!entry.isDirectory()) continue;
+        const base = join(local, 'Programs', entry.name);
+        add(join(base, 'resources', 'opencode-cli.exe'));
+        add(join(base, 'desktop', 'resources', 'opencode-cli.exe'));
       }
     } catch { /* ignore */ }
 
@@ -135,6 +144,125 @@ export function detectBinary(force = false): { bin: string; version: string } | 
   }
   binCache = null;
   return null;
+}
+
+export interface OpencodePaths {
+  dataDir: string;
+  sidecarDir: string;
+  runtimeDir: string;
+  configFile: string;
+}
+
+export function getOpencodePaths(): OpencodePaths {
+  return { dataDir, sidecarDir, runtimeDir, configFile: configFilePath() };
+}
+
+function isFile(p: string): boolean {
+  try { return statSync(p).isFile(); } catch { return false; }
+}
+
+function isDirectory(p: string): boolean {
+  try { return statSync(p).isDirectory(); } catch { return false; }
+}
+
+const BIN_NAMES = isWin ? ['opencode.exe', 'opencode-cli.exe'] : ['opencode', 'opencode-cli'];
+
+/** 在一个安装目录里按 opencode 常见的目录结构找可执行文件 */
+function binariesUnder(dir: string): string[] {
+  const out: string[] = [];
+  for (const name of BIN_NAMES) out.push(join(dir, name));
+  for (const sub of ['bin', 'resources', 'desktop/resources', 'OpenCode/resources', 'resources/app.asar.unpacked']) {
+    for (const name of BIN_NAMES) out.push(join(dir, sub, name));
+  }
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+      const base = join(dir, entry.name);
+      for (const name of BIN_NAMES) out.push(join(base, name));
+      for (const sub of ['bin', 'resources', 'desktop/resources']) {
+        for (const name of BIN_NAMES) out.push(join(base, sub, name));
+      }
+    }
+  } catch {
+    /* 目录不可读就算了 */
+  }
+  return out;
+}
+
+export interface BinaryCandidate {
+  bin: string;
+  version: string;
+}
+
+/**
+ * 扫描可用的 opencode：默认扫常见位置；传了目录/文件就优先检查它。
+ * 用于设置页「自动检测」和「使用这个安装目录」。
+ */
+export function scanBinaryCandidates(extra?: string, limit = 8): BinaryCandidate[] {
+  const input = (extra ?? '').trim().replace(/^"|"$/g, '');
+  const extraPaths = input ? (isDirectory(input) ? binariesUnder(input) : [input]) : [];
+  const seen = new Set<string>();
+  const result: BinaryCandidate[] = [];
+
+  for (const candidate of [...extraPaths, ...pathCandidates()]) {
+    const key = candidate.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!isFile(candidate)) continue;
+    const ok = probe(candidate);
+    if (!ok) continue;
+    result.push({ bin: candidate, version: ok.version });
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+/** 设置页手动指定安装目录 / 可执行文件；成功后立即生效 */
+export function applyBinaryPath(input: string): { ok: boolean; bin?: string; error?: string; status: OpencodeStatus } {
+  const value = input.trim().replace(/^"|"$/g, '');
+  if (!value) {
+    saveSettings({ opencodeBin: '' });
+    resetBinaryCache();
+    return { ok: true, status: getStatus() };
+  }
+
+  let bin = value;
+  if (isDirectory(value)) {
+    let foundBin: string | null = null;
+    for (const candidate of binariesUnder(value)) {
+      if (isFile(candidate) && probe(candidate)) {
+        foundBin = candidate;
+        break;
+      }
+    }
+    if (!foundBin) {
+      return { ok: false, error: '这个目录里没找到 opencode.exe / opencode-cli.exe', status: getStatus() };
+    }
+    bin = foundBin;
+  } else if (!isFile(value)) {
+    return { ok: false, error: '路径不存在，或者不是一个文件/目录', status: getStatus() };
+  } else if (!probe(value)) {
+    return { ok: false, error: '这个文件跑不起来 opencode --version，可能不是 v2 的 CLI', status: getStatus() };
+  }
+
+  saveSettings({ opencodeBin: bin });
+  resetBinaryCache();
+  // 换程序后让旧的 sidecar 退出，下次调用时用新版本重启
+  if (proc) shutdown();
+  const status = getStatus();
+  return { ok: true, bin, status };
+}
+
+/** 打开数据目录（Windows 资源管理器 / Finder / xdg-open） */
+export function openDataDir(): { ok: boolean; path: string; error?: string } {
+  try {
+    mkdirSync(dataDir, { recursive: true });
+    const cmd = isWin ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open';
+    spawn(cmd, [dataDir], { detached: true, stdio: 'ignore' }).unref();
+    return { ok: true, path: dataDir };
+  } catch (e) {
+    return { ok: false, path: dataDir, error: String((e as Error).message ?? e) };
+  }
 }
 
 function freePort(): Promise<number> {  return new Promise((res, rej) => {
@@ -310,6 +438,7 @@ export function getStatus(): OpencodeStatus {
     bin: bin?.bin,
     version: bin?.version,
     running: !!proc && !!client,
+    ...getOpencodePaths(),
   };
 }
 

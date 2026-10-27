@@ -128,6 +128,7 @@ ensureColumn('messages', 'author_name', 'author_name TEXT');
 ensureColumn('messages', 'author_color', 'author_color TEXT');
 ensureColumn('messages', 'author_initial', 'author_initial TEXT');
 ensureColumn('agents', 'owner_id', 'owner_id TEXT');
+ensureColumn('humans', 'simulated', 'simulated INTEGER NOT NULL DEFAULT 0');
 
 function seedModels() {
   const row = db.prepare('SELECT count(*) AS c FROM models').get() as { c: number } | undefined;
@@ -244,4 +245,29 @@ function seedTasks() {
   insert.run('task_seed_3', '输出增长实验的指标口径', '', 'cv_g2', '我', 'done', 'low', at - 172800000, at - 86400000);
 }
 seedTasks();
+
+/**
+ * 预置两个「模拟真人」同事：用来演示真人在线、拉群、@ 拍板和软等待。
+ * 只按固定 ID 补，不覆盖同名的真实账号。
+ */
+function seedSimulatedHumans() {
+  const rows: Array<{ id: string; name: string; role: string; color: string; initial: string }> = [
+    { id: 'hu_sim_lina', name: '李娜', role: '增长运营', color: '#FF7A9C', initial: '李' },
+    { id: 'hu_sim_wang', name: '王强', role: '后端工程师', color: '#37C3D6', initial: '王' },
+  ];
+  for (const h of rows) {
+    const byId = db.prepare('SELECT id FROM humans WHERE id = ?').get(h.id);
+    if (byId) {
+      db.prepare('UPDATE humans SET simulated = 1 WHERE id = ?').run(h.id);
+      continue;
+    }
+    const byName = db.prepare('SELECT id FROM humans WHERE name = ?').get(h.name);
+    if (byName) continue;
+    db.prepare(
+      'INSERT INTO humans (id, name, role, color, initial, created_at, simulated) VALUES (?, ?, ?, ?, ?, ?, 1)',
+    ).run(h.id, h.name, h.role, h.color, h.initial, Date.now());
+  }
+}
+seedSimulatedHumans();
+
 // seeded demo tasks map to the two group conversations

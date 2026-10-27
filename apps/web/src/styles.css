@@ -762,6 +762,51 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 .chat-drop-card b { display: block; margin-top: 5px; font-size: 16px; color: var(--text); }
 .acard.human { border-style: dashed; }
 .acard.human .sk { color: #7fb0ff; }
+.human-online { position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; border-radius: 50%; background: var(--success); border: 2px solid var(--bg-elev); }
+.presence-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #5b6477; margin-right: 5px; vertical-align: middle; }
+.presence-dot.on { background: var(--success); box-shadow: 0 0 6px rgba(61, 220, 151, 0.5); }
+
+/* ---------- 软等待：等真人拍板 ---------- */
+.wait-bar { margin-bottom: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(91, 140, 255, 0.4); background: var(--bg-elev); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18); }
+.wait-head { display: flex; align-items: center; gap: 10px; }
+.wait-avatar { width: 30px; height: 30px; flex: 0 0 30px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 600; }
+.wait-meta { flex: 1; min-width: 0; }
+.wait-meta b { display: block; font-size: 12.5px; }
+.wait-meta span { display: block; font-size: 10.5px; color: var(--text-faint); margin-top: 2px; }
+.wait-actions { display: flex; gap: 6px; }
+.wait-actions .btn { height: 28px; padding: 0 12px; font-size: 11.5px; }
+.wait-reply { display: flex; gap: 8px; margin-top: 8px; }
+.wait-reply .input { height: 32px; flex: 1; }
+.wait-reply .btn { height: 32px; }
+
+/* ---------- opencode 安装位置 / 检测 ---------- */
+.oc-current { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 12px; border-radius: 9px; background: var(--bg-soft); border: 1px solid var(--border-soft); }
+.oc-current-main { flex: 1; min-width: 0; }
+.oc-current-main > span { display: block; font-size: 10.5px; color: var(--text-faint); margin-bottom: 3px; }
+.oc-current-main code, .oc-dir-row code, .oc-candidate code { font-family: ui-monospace, Consolas, monospace; font-size: 10.5px; color: var(--text-dim); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-current .mini { flex: 0 0 auto; width: auto; margin: 0; padding: 0 10px; font-size: 11.5px; }
+.oc-path-row { display: flex; gap: 8px; }
+.oc-path-row .input { flex: 1; min-width: 0; }
+.oc-path-row .btn { flex: 0 0 auto; white-space: nowrap; border: 1px solid var(--border); background: var(--bg-soft); color: var(--text-dim); }
+.oc-path-row .btn:hover { background: var(--bg-hover); color: var(--text); }
+.oc-dirs .btn { border: 1px solid var(--border); background: var(--bg-soft); color: var(--text-dim); }
+.oc-dirs .btn:hover { background: var(--bg-hover); color: var(--text); }
+.oc-candidates { margin-top: 10px; border: 1px dashed var(--border); border-radius: 9px; padding: 8px 10px; }
+.oc-candidates-head { font-size: 10.5px; color: var(--text-faint); margin-bottom: 6px; }
+.oc-candidate { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 7px 8px; border-radius: 7px; }
+.oc-candidate:hover { background: var(--bg-hover); }
+.oc-candidate b { flex: 0 0 auto; font-size: 11.5px; font-weight: 500; color: var(--text); }
+.oc-candidate code { flex: 1; min-width: 0; }
+.oc-candidate span { flex: 0 0 auto; font-size: 10.5px; color: var(--accent); }
+.oc-candidate.on { background: rgba(91, 140, 255, 0.1); }
+.oc-dirs { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border-soft); }
+.oc-dir-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.oc-dir-row > span { flex: 0 0 68px; font-size: 10.5px; color: var(--text-faint); }
+.oc-dir-row code { flex: 1; min-width: 0; }
+.oc-dir-row .mini { width: auto; margin: 0; padding: 0 9px; font-size: 11px; }
+.oc-advanced { margin-top: 12px; border-top: 1px dashed var(--border-soft); padding-top: 10px; }
+.oc-advanced summary { cursor: pointer; font-size: 11.5px; color: var(--text-dim); }
+.oc-advanced summary:hover { color: var(--text); }
 
 /* ---------- 亮色主题：覆盖少量硬编码深色 ---------- */
 [data-theme="light"] ::-webkit-scrollbar-thumb { background: #c6cedd; }

@@ -4,6 +4,7 @@ import { getThemeMode, setThemeMode, type ThemeMode } from './theme';
 import {
   createModel,
   deleteModel,
+  detectOpencode,
   fetchKbDatasets,
   fetchKbStatus,
   fetchImportableModels,
@@ -11,6 +12,7 @@ import {
   fetchOpencodeStatus,
   fetchSettings,
   installOpencodeRuntime,
+  openOpencodeDataDir,
   patchSettings,
   saveEnabledKbs,
   setDefaultModel,
@@ -20,6 +22,8 @@ import {
   type AppSettingsData,
   type ImportableModel,
   type KbDataset,
+  type OpencodeCandidate,
+  type OpencodeStatusData,
 } from './api';
 
 interface Props {
@@ -48,10 +52,12 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   const [testMsg, setTestMsg] = useState<Record<string, string>>({});
 
   const [settings, setSettings] = useState<AppSettingsData | null>(null);
-  const [ocStatus, setOcStatus] = useState<{ available: boolean; running: boolean; version?: string; bin?: string; error?: string } | null>(null);
+  const [ocStatus, setOcStatus] = useState<OpencodeStatusData | null>(null);
   const [ocUrl, setOcUrl] = useState('');
   const [ocBin, setOcBin] = useState('');
   const [ocBusy, setOcBusy] = useState(false);
+  const [ocCandidates, setOcCandidates] = useState<OpencodeCandidate[]>([]);
+  const [ocScanBusy, setOcScanBusy] = useState(false);
   const [kbStatus, setKbStatus] = useState<{ ok: boolean; configured: boolean; baseUrl: string; error?: string; datasets?: number } | null>(null);
   const [kbs, setKbs] = useState<KbDataset[]>([]);
   const [kbBusy, setKbBusy] = useState(false);
@@ -108,6 +114,52 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
       setOcStatus(oc);
     } catch (e) {
       onToast(String(e));
+    }
+  }
+
+  async function copyText(text?: string) {
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      onToast('路径已复制');
+    } catch {
+      onToast('复制失败，请手动选中复制');
+    }
+  }
+
+  /** 自动扫描常见安装位置（也可以扫描输入框里的目录） */
+  async function scanOpencode() {
+    setOcScanBusy(true);
+    try {
+      const r = await detectOpencode(ocBin.trim() || undefined);
+      setOcCandidates(r.candidates);
+      setOcStatus(r.status);
+      if (!r.candidates.length) onToast(r.error ?? '没找到 opencode');
+      else onToast(`找到 ${r.candidates.length} 个可用的 opencode`);
+    } catch (e) {
+      onToast(String(e));
+    } finally {
+      setOcScanBusy(false);
+    }
+  }
+
+  /** 保存手动指定的目录/可执行文件并立即检测 */
+  async function useOpencodePath(path: string) {
+    setOcScanBusy(true);
+    try {
+      const r = await detectOpencode(path, true);
+      setOcStatus(r.status);
+      if (r.ok) {
+        setOcBin(path);
+        setOcCandidates(r.candidates);
+        onToast(`已使用 opencode ${r.status.version ?? ''}`.trim());
+      } else {
+        onToast(r.error ?? '还是没找到，请检查路径');
+      }
+    } catch (e) {
+      onToast(String(e));
+    } finally {
+      setOcScanBusy(false);
     }
   }
 
@@ -373,78 +425,140 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
             <p className="sub" style={{ marginBottom: 0 }}>让智能体能读写文件、跑命令。没有它也能聊天，只是没有工具。</p>
           </div>
           <b className={ocStatus?.available ? 'ok-text' : 'warn-text'}>
-            {ocStatus?.available ? `● 可用 ${ocStatus.version ?? ''}` : '● 未安装'}
+            {ocStatus?.available ? `● 可用 ${ocStatus.version ?? ''}` : '● 未找到'}
           </b>
         </div>
-        <label className="field" style={{ marginTop: 12 }}>
-          <span>离线包地址</span>
-          <input
-            className="input"
-            value={ocUrl}
-            onChange={(e) => setOcUrl(e.target.value)}
-            placeholder="http://10.201.1.19:80/artifactory/installer/opencode/OpenCode.zip"
-          />
-        </label>
-        <label className="field" style={{ marginTop: 8 }}>
-          <span>本机可执行文件（自动找不到时手动指定）</span>
-          <input
-            className="input"
-            value={ocBin}
-            onChange={(e) => setOcBin(e.target.value)}
-            placeholder="C:\Users\你\AppData\Local\Programs\@opencodedesktop\resources\opencode-cli.exe"
-          />
-        </label>
-        <div className="settings-actions">
-          <button
-            className="btn primary"
-            disabled={ocBusy}
-            onClick={async () => {
-              setOcBusy(true);
-              try {
-                const r = await installOpencodeRuntime(ocUrl.trim());
-                if (r.ok) {
-                  setOcStatus(r.status ?? ocStatus);
-                  onToast(`opencode ${r.version ?? ''} 安装完成`);
-                } else {
-                  if (r.status) setOcStatus(r.status);
-                  onToast(r.error ?? '安装失败，请联系史皓燃获取离线包');
-                }
-              } catch (e) {
-                onToast(String(e));
-              } finally {
-                setOcBusy(false);
-              }
-            }}
-          >
-            {ocBusy ? '安装中…' : ocStatus?.available ? '重新检测 / 覆盖安装' : '下载并安装'}
-          </button>
-          <button
-            className="btn"
-            onClick={async () => {
-              setOcStatus(await fetchOpencodeStatus());
-              onToast('已重新检测');
-            }}
-          >
-            仅检测
-          </button>
-          <button
-            className="btn"
-            onClick={async () => {
-              try {
-                await patchSettings({ opencodeBin: ocBin.trim() });
-                const st = await fetchOpencodeStatus();
-                setOcStatus(st);
-                onToast(st.available ? `已识别 ${st.version ?? ''}` : '还是没找到，请检查路径');
-              } catch (e) {
-                onToast(String(e));
-              }
-            }}
-          >
-            保存路径并检测
-          </button>
+
+        <div className="oc-current">
+          <div className="oc-current-main">
+            <span>当前使用</span>
+            <code title={ocStatus?.bin}>{ocStatus?.bin ?? '还没找到 opencode，点下面的「自动扫描」'}</code>
+          </div>
+          {ocStatus?.bin && (
+            <button className="mini" onClick={() => void copyText(ocStatus.bin)}>复制</button>
+          )}
         </div>
+
+        <label className="field" style={{ marginTop: 12 }}>
+          <span>安装目录或 opencode.exe 路径（填目录会自动找里面的 CLI）</span>
+          <div className="oc-path-row">
+            <input
+              className="input"
+              value={ocBin}
+              onChange={(e) => setOcBin(e.target.value)}
+              placeholder="C:\Users\你\AppData\Local\Programs\ai.opencode.desktop"
+            />
+            <button
+              className="btn"
+              disabled={ocScanBusy || !ocBin.trim()}
+              onClick={() => void useOpencodePath(ocBin.trim())}
+            >
+              使用这个位置
+            </button>
+            <button className="btn" disabled={ocScanBusy} onClick={() => void scanOpencode()}>
+              {ocScanBusy ? '检测中…' : '自动扫描'}
+            </button>
+          </div>
+        </label>
+
+        {ocCandidates.length > 0 && (
+          <div className="oc-candidates">
+            <div className="oc-candidates-head">找到 {ocCandidates.length} 个可用程序，点一个直接切换</div>
+            {ocCandidates.map((c) => (
+              <button
+                key={c.bin}
+                className={`oc-candidate ${ocStatus?.bin === c.bin ? 'on' : ''}`}
+                onClick={() => void useOpencodePath(c.bin)}
+              >
+                <b>opencode {c.version}</b>
+                <code>{c.bin}</code>
+                <span>{ocStatus?.bin === c.bin ? '使用中' : '使用'}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="oc-dirs">
+          <div className="oc-dir-row">
+            <span>数据目录</span>
+            <code title={ocStatus?.dataDir}>{ocStatus?.dataDir ?? '检测后显示'}</code>
+            <button className="mini" disabled={!ocStatus?.dataDir} onClick={() => void copyText(ocStatus?.dataDir)}>复制</button>
+          </div>
+          <div className="oc-dir-row">
+            <span>sidecar 目录</span>
+            <code title={ocStatus?.sidecarDir}>{ocStatus?.sidecarDir ?? '检测后显示'}</code>
+            <button className="mini" disabled={!ocStatus?.sidecarDir} onClick={() => void copyText(ocStatus?.sidecarDir)}>复制</button>
+          </div>
+          <div className="settings-actions" style={{ marginTop: 8 }}>
+            <button
+              className="btn"
+              onClick={async () => {
+                try {
+                  const r = await openOpencodeDataDir();
+                  onToast(r.ok ? '已打开数据目录' : r.error ?? '打开失败');
+                } catch (e) {
+                  onToast(String(e));
+                }
+              }}
+            >
+              打开数据目录
+            </button>
+            <button
+              className="btn"
+              onClick={async () => {
+                setOcStatus(await fetchOpencodeStatus());
+                onToast('已重新检测');
+              }}
+            >
+              仅检测
+            </button>
+          </div>
+        </div>
+
+        <details className="oc-advanced">
+          <summary>内网离线包 / 覆盖安装</summary>
+          <label className="field" style={{ marginTop: 10 }}>
+            <span>离线包地址（zip，里面包含 opencode.exe）</span>
+            <input
+              className="input"
+              value={ocUrl}
+              onChange={(e) => setOcUrl(e.target.value)}
+              placeholder="http://10.201.1.19:80/artifactory/installer/opencode/OpenCode.zip"
+            />
+          </label>
+          <div className="settings-actions">
+            <button
+              className="btn primary"
+              disabled={ocBusy}
+              onClick={async () => {
+                setOcBusy(true);
+                try {
+                  const r = await installOpencodeRuntime(ocUrl.trim());
+                  if (r.ok) {
+                    setOcStatus(r.status ?? ocStatus);
+                    onToast(`opencode ${r.version ?? ''} 安装完成`);
+                  } else {
+                    if (r.status) setOcStatus(r.status);
+                    onToast(r.error ?? '安装失败，检查离线包地址或手动指定安装目录');
+                  }
+                } catch (e) {
+                  onToast(String(e));
+                } finally {
+                  setOcBusy(false);
+                }
+              }}
+            >
+              {ocBusy ? '安装中…' : '下载并安装'}
+            </button>
+          </div>
+          <p className="sub" style={{ margin: '8px 0 0' }}>
+            安装会解压到上面的 sidecar 目录。内网下载不通时，让管理员把离线包放到这个地址，或者直接把 opencode.exe 放进 sidecar 目录。
+          </p>
+        </details>
+
         <p className="sub" style={{ margin: '10px 0 0' }}>
-          内网下载不通时，请联系<b>史皓燃</b>获取离线包，解压后把 opencode.exe 放到数据目录的 sidecar 文件夹。
+          没检测到？先装一次 opencode 桌面版，S-BOT 会自动找它自带的 CLI；已经装了但没识别，就把安装目录填到上面
+          （例如 <code>C:\Users\你\AppData\Local\Programs\ai.opencode.desktop</code>），点「使用这个位置」。
         </p>
       </div>
 

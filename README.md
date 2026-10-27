@@ -30,12 +30,15 @@ AI 同事和真人一起工作的桌面工作台。
 | 首次进入的开场白 + 推荐问题 | ✅ 模型生成，mock 有兜底 |
 | **opencode 执行引擎** | ✅ sidecar + 每群每智能体一个 session |
 | 工具调用 / 写入审批 | ✅ 工具卡片 + 允许一次 / 总是允许 / 拒绝 |
-| opencode 离线包装载 | ✅ 设置/首次启动探测，默认内网地址 |
+| opencode 运行时 | ✅ 自动扫描安装目录 / 手动指定 / 离线包 |
 | opencode 模型双向同步 | ✅ 读本机 providers 反显导入 + 一键写回 sidecar |
 | opencode 技能浏览 | ✅ 技能页展示内置 / 本机 / 项目 SKILL.md |
 | 对话式新建技能 | ✅ 多轮追问 + TCP 连通性验证 + 确认后写入 |
 | 知识库（RAGFlow） | ✅ 数据集启停、智能体绑定、检索引用角标 |
 | 真人成员 / 群内邀请 | ✅ 登录后把人拉进群 |
+| 真人在线状态 | ✅ 30 秒心跳，模拟真人常驻在线 |
+| 智能体 @ 真人软等待 | ✅ 暂停剩余发言，60 秒倒计时，可回复 / 继续 / 跳过 |
+| 模拟真人 | ✅ 预置李娜、王强，被 @ 后自动回复 |
 | 服务端消息推送 | ✅ `/api/events` SSE，其他客户端实时刷新 |
 | 智能体归属 | ✅ 私有智能体只有创建者能拉进群 |
 | 智能体库 | ✅ 卡片、增删改复制 |
@@ -43,7 +46,7 @@ AI 同事和真人一起工作的桌面工作台。
 | 主题 | ✅ 亮色 / 暗色 / 跟随系统，本地记忆 |
 | **Windows 安装包** | ✅ `S-BOT Setup 0.1.2.exe`（NSIS） |
 
-还没接：RAGFlow 知识库、附件、真人成员、XABP 登录。
+还没接：真实 XABP 登录（当前是原型级按名字登录）、移动端、自动更新。
 
 ---
 
@@ -101,13 +104,22 @@ s-bot/
 | GET | `/api/conversations/:id/export` | 导出交接包（聊天记录 + 任务） |
 | POST | `/api/conversations/:id/import` | 导入交接包到本群 |
 | GET | `/api/conversations/:id/intro` | 首次进入的开场白 + 推荐问题（模型生成，缓存 30 分钟） |
-| GET | `/api/opencode/status` | sidecar 是否可用 / 正在运行 |
+| GET | `/api/opencode/status` | sidecar 是否可用 / 正在运行 / 数据目录 |
+| POST | `/api/opencode/detect` | 扫描常见安装位置，或检测指定目录/可执行文件 |
+| POST | `/api/opencode/open-data` | 打开本地数据目录 |
+| POST | `/api/opencode/install` | 从离线 zip 安装 sidecar |
 | GET | `/api/opencode/importable` | 本机 opencode 配置里的自定义模型（用于反显/导入） |
 | POST | `/api/models/sync` | 把 S-BOT 的全部模型写进 sidecar 的 opencode 配置 |
 | GET | `/api/skills` | opencode 可用技能（内置 + 本机 + 项目） |
 | POST | `/api/skills` | 确认草案后写入 SKILL.md 并挂载给 opencode |
 | POST | `/api/skills/coach` | 技能教练：多轮对话 + 自动 TCP 连通性验证 |
 | POST | `/api/skills/verify` | 单独做一次 TCP 连通性测试 |
+| GET | `/api/humans` | 真人列表（含在线状态、是否模拟） |
+| POST | `/api/login` | 原型级登录 |
+| POST | `/api/presence` | 真人在线心跳 |
+| POST | `/api/conversations/:id/humans` | 把真人拉进群 |
+| POST | `/api/runs/:runId/resume` | 软等待：继续 / 跳过 |
+| POST | `/api/runs/:runId/reply` | 软等待：以被 @ 真人的身份回复 |
 | POST | `/api/permissions/:requestID` | 审批工具调用（once / always / reject） |
 | GET | `/api/tasks` | 任务列表（未完成在前） |
 | POST | `/api/tasks` | 新建任务 |
@@ -117,10 +129,13 @@ s-bot/
 SSE 事件：
 
 ```
-event: run.start       { userMessageId, targets }
+event: run.start       { runId, userMessageId, targets }
 event: message.start   { id, agentId, name, role, color, initial }
 event: message.delta   { id, delta }
 event: message.end     { id, agentId, savedId, text, createdAt, status }
+event: human.wait      { runId, conversationId, humanId, name, seconds, remaining }  // 智能体 @ 真人，暂停
+event: human.resume    { runId, decision }   // reply / continue / skip / timeout
+event: presence        { humanId, online }   // 真人上线
 event: task.confirm    { message, task }   // 智能体判定任务已完成，@ 发起者确认
 event: run.end         {}
 ```
@@ -194,6 +209,29 @@ event: run.end         {}
 - **S-BOT → opencode**：每次增删改模型、设默认模型都会自动同步；也可以点「同步到 opencode」手动触发。
   同步目标是 S-BOT 自己 sidecar 的配置（同一 Base URL 归到一个 provider），不会改写你本机的 opencode 配置。
 
+### opencode 装在哪
+
+设置 → opencode 运行时 会直接显示：
+
+- **当前使用**：真实跑起来的可执行文件路径，可一键复制
+- **数据目录 / sidecar 目录**：本地数据库和离线包装在哪，都能复制，也能点「打开数据目录」
+- **自动扫描**：会扫 `%LOCALAPPDATA%\Programs\*`（包括 opencode 桌面版自带的 CLI）、npm 依赖、PATH；
+  扫到多个版本会列出来，点一个就切换
+- **手动指定**：填安装目录（例如 `C:\Users\你\AppData\Local\Programs\ai.opencode.desktop`）或直接填
+  `opencode.exe` 路径，点「使用这个位置」，S-BOT 会自动在目录里找 `opencode-cli.exe`
+
+内网装不了时，再展开「内网离线包 / 覆盖安装」，把 zip 地址填进去。
+
+### 真人在线 / 软等待 / 模拟真人
+
+- 登录后客户端每 30 秒发一次心跳；2 分钟没心跳算离线
+- 工作台「同事」显示在线圆点和「模拟真人」标签，拖进群就能一起协作
+- 智能体发言里 `@真人` 会触发**软等待**：剩余智能体暂停，输入框上方出现等待条，
+  60 秒倒计时结束自动继续；也可以直接「回复」「继续」或「跳过」
+- 预置两个模拟真人：**李娜（增长运营）**、**王强（后端工程师）**。被 @ 后 3~5 秒自动回一句，
+  没配模型也能演示完整对话和软等待
+- 没有模型时，mock 回复也会让第一个智能体 @ 真人，方便测试这条链路
+
 ---
 
 ## Electron 打包
@@ -260,8 +298,8 @@ Electron 45 自带 Node 24，`node:sqlite` 已默认可用，打包后不需要�
 
 ## 下一步
 
-1. **真人 @ 拍板 + 软等待**：智能体 @ 真人后暂停剩余发言，60 秒倒计时自动继续，也可手动「继续 / 跳过」
-2. 把 Gate 脚本跑完，接 opencode 作为执行引擎（工具、权限、压缩）
-3. RAGFlow 检索接入 + 引用角标
-4. XABP 登录 + 真人成员/同事列表
-5. Electron 打包 + 自动更新（发布时统一构建）
+1. **真实 XABP 登录**：SSO、组织架构、在线状态由服务端统一维护
+2. 真人消息已读 / 未读、@ 提醒和桌面通知聚合
+3. 模拟真人接入真实 IM（企业微信 / 飞书），替换预置话术
+4. 自动更新 + 代码签名
+5. 服务器模式（共享数据库、鉴权、多端同步）

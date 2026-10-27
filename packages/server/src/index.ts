@@ -4,7 +4,7 @@ import { createConnection } from 'node:net';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
-import type { ChatIntro, Conversation } from '@sbot/shared';
+import type { ChatIntro, Conversation, Member } from '@sbot/shared';
 import {
   addMember,
   addMessage,
@@ -46,6 +46,7 @@ import {
 } from './repo.js';
 import { generateReply, completeChat, type ChatTurn, type ModelConfig } from './runtime.js';
 import {
+  applyBinaryPath,
   createSkill,
   ensureSession,
   ensureStarted as ensureOpencode,
@@ -53,10 +54,12 @@ import {
   importableModels,
   installFromZip,
   listSkills,
+  openDataDir,
   resetBinaryCache,
   resetSkillInventory,
   resolvePermission,
   runAgent,
+  scanBinaryCandidates,
   shutdown as shutdownOpencode,
   syncModelConfig,
 } from './opencode.js';
@@ -83,6 +86,29 @@ app.get('/api/runtime', (c) => {
 });
 
 app.get('/api/opencode/status', (c) => c.json({ data: getOpencodeStatus() }));
+
+/** 扫描常见安装位置；传 path 就直接检测这个目录/文件 */
+app.post('/api/opencode/detect', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const path = String(b?.path ?? '').trim();
+
+  if (b?.save === true) {
+    const r = applyBinaryPath(path);
+    return c.json({ data: { ...r, candidates: scanBinaryCandidates() } }, r.ok ? 200 : 400);
+  }
+
+  const candidates = scanBinaryCandidates(path || undefined);
+  return c.json({
+    data: {
+      ok: candidates.length > 0,
+      candidates,
+      status: getOpencodeStatus(),
+      error: candidates.length ? undefined : path ? '这个位置没找到可用的 opencode' : '常见位置都没找到 opencode',
+    },
+  });
+});
+
+app.post('/api/opencode/open-data', (c) => c.json(openDataDir()));
 
 app.get('/api/opencode/importable', (c) => c.json({ data: importableModels() }));
 
@@ -316,16 +342,53 @@ app.patch('/api/kb/enabled', async (c) => {
 
 /* ---------- 真人 / 推送 ---------- */
 
+/**
+ * 真人在线状态：客户端每 30 秒打一次心跳，2 分钟没心跳就算离线。
+ * 模拟真人（预置的李娜/王强）始终在线，用来演示拉群和 @ 拍板。
+ */
+const ONLINE_TTL = 120_000;
+const humanSeen = new Map<string, number>();
+
+function isHumanOnline(h: { id: string; simulated?: boolean }): boolean {
+  if (h.simulated) return true;
+  return (humanSeen.get(h.id) ?? 0) > Date.now() - ONLINE_TTL;
+}
+
+function markHumanOnline(id: string): void {
+  const was = isHumanOnline({ id });
+  humanSeen.set(id, Date.now());
+  if (!was) {
+    const h = getHuman(id);
+    broadcast('presence', { humanId: id, name: h?.name ?? '', online: true });
+  }
+}
+
+function humansWithPresence() {
+  return listHumans().map((h) => ({ ...h, online: isHumanOnline(h) }));
+}
+
 /** 原型级登录：按名字建/找真人，不做密码校验；身份通过 x-sbot-user 头传递 */
 app.post('/api/login', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   const name = String(b?.name ?? '').trim();
   if (!name) return c.json({ error: 'name required' }, 400);
   const human = upsertHuman({ name, role: String(b?.role ?? '') });
-  return c.json({ data: human });
+  markHumanOnline(human.id);
+  return c.json({ data: { ...human, online: true } });
 });
 
-app.get('/api/humans', (c) => c.json({ data: listHumans() }));
+app.get('/api/humans', (c) => c.json({ data: humansWithPresence() }));
+
+/** 登录客户端的心跳；带上 x-sbot-user 或 { humanId } */
+app.post('/api/presence', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const id = String(c.req.header('x-sbot-user') ?? b?.humanId ?? '').trim();
+  if (!id) return c.json({ ok: false, error: 'humanId required' }, 400);
+  const h = getHuman(id);
+  if (!h) return c.json({ ok: false, error: 'human not found' }, 404);
+  markHumanOnline(id);
+  return c.json({ ok: true, data: { id, online: true } });
+});
 
 /** 所有客户端共享的事件流：新消息、任务、成员变化 */
 app.get('/api/events', (c) => {
@@ -969,6 +1032,184 @@ function pickTargets(conv: Conversation, text: string): string[] {
   return agents.slice(0, Math.min(conv.maxTurns || 3, agents.length)).map((a) => a.memberId);
 }
 
+/** 找出这条发言里 @ 到的真人成员 */
+function humansMentioned(text: string, conv: Conversation): Member[] {
+  const mentions = [...text.matchAll(/@([^\s@，,。.！!？?]+)/g)].map((m) => m[1]!);
+  if (!mentions.length) return [];
+  return conv.members.filter(
+    (m) => m.memberType === 'human' && mentions.some((n) => m.name === n || m.name.includes(n) || n.includes(m.name)),
+  );
+}
+
+/**
+ * 软等待：智能体 @ 真人后暂停，等真人回复、手动继续/跳过，或者 60 秒超时。
+ * 同一个 run 只允许一个等待。
+ */
+const HUMAN_WAIT_SECONDS = 60;
+
+interface HumanWaitEntry {
+  runId: string;
+  conversationId: string;
+  humanId: string;
+  resolve: (decision: HumanWaitDecision) => void;
+}
+
+type HumanWaitDecision = 'continue' | 'skip' | 'reply' | 'timeout';
+
+const humanWaits = new Map<string, HumanWaitEntry>();
+
+function resolveHumanWait(runId: string, decision: HumanWaitDecision): boolean {
+  const entry = humanWaits.get(runId);
+  if (!entry) return false;
+  entry.resolve(decision);
+  return true;
+}
+
+function findHumanWaitForConversation(conversationId: string): HumanWaitEntry | null {
+  for (const entry of humanWaits.values()) {
+    if (entry.conversationId === conversationId) return entry;
+  }
+  return null;
+}
+
+function waitForHuman(
+  runId: string,
+  conversationId: string,
+  human: Member,
+  remaining: number,
+): Promise<HumanWaitDecision> {
+  return new Promise((resolve) => {
+    let done = false;
+    let timer: NodeJS.Timeout | undefined;
+
+    const finish = (decision: HumanWaitDecision) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      bus.off('event', onMessage);
+      humanWaits.delete(runId);
+      broadcast('human.resume', {
+        runId,
+        conversationId,
+        humanId: human.memberId,
+        name: human.name,
+        decision,
+      });
+      resolve(decision);
+    };
+
+    const onMessage = (event: unknown) => {
+      const e = event as { type?: string; conversationId?: string; data?: { authorType?: string; authorId?: string } };
+      if (e.type !== 'message' || e.conversationId !== conversationId) return;
+      if (e.data?.authorType === 'human' && e.data.authorId === human.memberId) finish('reply');
+    };
+
+    timer = setTimeout(() => finish('timeout'), HUMAN_WAIT_SECONDS * 1000);
+    humanWaits.set(runId, { runId, conversationId, humanId: human.memberId, resolve: finish });
+    bus.on('event', onMessage);
+
+    broadcast('human.wait', {
+      runId,
+      conversationId,
+      humanId: human.memberId,
+      name: human.name,
+      role: human.role,
+      color: human.color,
+      initial: human.initial,
+      seconds: HUMAN_WAIT_SECONDS,
+      remaining,
+    });
+  });
+}
+
+const SIM_REPLIES: Record<string, string[]> = {
+  hu_sim_lina: [
+    '增长这边可以。先按 10% 流量灰度，三天后看首日留存再决定要不要放量。',
+    '我拍板：这周先小流量验证，别一次全量。指标口径我下午补一版。',
+    '没问题，我拉一下上周的留存数据，明天评审时带上。',
+  ],
+  hu_sim_wang: [
+    '后端没问题，接口两天能给。回滚开关我一起加上，避免上线后被动。',
+    '我担心老接口兼容，建议先双写一周再切，风险可控一些。',
+    '行，我先出个技术方案，明天评审前发群里。',
+  ],
+};
+
+/** 模拟真人被 @ 后自动回一句，用来演示对话和软等待 */
+async function scheduleSimulatedReply(conversationId: string, humanId: string, triggerAt: number): Promise<void> {
+  const human = getHuman(humanId);
+  if (!human?.simulated) return;
+
+  setTimeout(async () => {
+    const conv = getConversation(conversationId);
+    if (!conv || !conv.members.some((m) => m.memberId === humanId)) return;
+
+    const hasReplied = () =>
+      listMessages(conversationId, 12).some(
+        (m) => m.authorType === 'human' && m.authorId === humanId && m.createdAt >= triggerAt,
+      );
+    if (hasReplied()) return;
+
+    const pool = SIM_REPLIES[humanId] ?? ['收到，我看一下。'];
+    let text = pool[Math.floor(Math.random() * pool.length)] ?? pool[0]!;
+
+    const cfg = toConfig(getDefaultModel());
+    if (cfg?.baseUrl && cfg.apiKey) {
+      try {
+        const context = listMessages(conversationId, 8)
+          .map((m) => `${senderName(conv, m)}：${m.text}`)
+          .join('\n');
+        const reply = await completeChat(
+          cfg,
+          [
+            {
+              role: 'system',
+              content: `你是${human.name}，${human.role}，群里的真人同事。别人 @ 你时用 1~2 句中文口语回复，给出判断或下一步，不超过 80 字。不要自称 AI。`,
+            },
+            { role: 'user', content: `群聊「${conv.title}」最近的发言：\n${context}\n\n请回复。` },
+          ],
+          { temperature: 0.6, maxTokens: 160 },
+        );
+        if (reply.trim()) text = reply.trim();
+      } catch {
+        /* 模型不可用就用兜底话术 */
+      }
+    }
+
+    if (hasReplied()) return;
+    addMessage({
+      conversationId,
+      authorType: 'human',
+      authorId: human.id,
+      authorName: human.name,
+      authorColor: human.color,
+      authorInitial: human.initial,
+      role: 'user',
+      text,
+    });
+  }, 3500 + Math.floor(Math.random() * 1500));
+}
+
+/** 暂停剩余智能体发言，等待真人拍板 */
+async function maybeWaitForHuman(
+  runId: string,
+  conv: Conversation,
+  text: string,
+  remaining: number,
+): Promise<HumanWaitDecision | null> {
+  const mentions = humansMentioned(text, conv);
+  const first = mentions[0];
+  if (!first) return null;
+
+  for (const m of mentions) {
+    const h = getHuman(m.memberId);
+    if (h?.simulated) void scheduleSimulatedReply(conv.id, h.id, Date.now());
+  }
+  if (remaining <= 0) return null;
+  return waitForHuman(runId, conv.id, first, remaining);
+}
+
+
 function senderName(conv: Conversation, m: { authorId: string | null; authorName?: string | null; authorType: string }): string {
   if (m.authorType === 'user') return '用户';
   const mem = conv.members.find((x) => x.memberId === m.authorId);
@@ -995,10 +1236,15 @@ function buildOpencodePrompt(
     ? citations.map((c) => `[${c.n}] ${c.doc}：${c.text}`).join('\n')
     : '';
 
+  const humans = conv.members
+    .filter((m) => m.memberType === 'human')
+    .map((m) => `${m.name}${m.role ? `（${m.role}）` : ''}`);
+
   const persona = [
     `你是${agent.name}，${agent.role}。`,
     agent.systemPrompt,
     '你在一个多人会话里，成员包括用户和其他智能体。只代表你自己发言，不要替别人说话，不要在开头加自己的名字。',
+    humans.length ? `群里还有真人同事：${humans.join('、')}。需要拍板时可以用 @名字 征求他们的意见。` : '',
     '回答简短具体，控制在 120 字以内。',
     refs ? '如果用了下面的资料，请在句末用 [1][2] 这样的角标标出来。' : '',
   ].filter(Boolean).join('\n');
@@ -1031,28 +1277,34 @@ app.post('/api/conversations/:id/messages', async (c) => {
     .filter((m) => m.status === 'done' && (m.role === 'user' || m.role === 'assistant'))
     .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.text }));
 
+  const uid = c.req.header('x-sbot-user') || null;
+  const author = uid ? getHuman(uid) : null;
   const userMessage = addMessage({
     conversationId: id,
-    authorType: c.req.header('x-sbot-user') ? 'human' : 'user',
-    authorId: c.req.header('x-sbot-user') || null,
-    authorName: (() => {
-      const uid = c.req.header('x-sbot-user');
-      return uid ? getHuman(uid)?.name ?? null : null;
-    })(),
-    authorColor: (() => {
-      const uid = c.req.header('x-sbot-user');
-      return uid ? getHuman(uid)?.color ?? null : null;
-    })(),
-    authorInitial: (() => {
-      const uid = c.req.header('x-sbot-user');
-      return uid ? getHuman(uid)?.initial ?? null : null;
-    })(),
+    authorType: uid ? 'human' : 'user',
+    authorId: uid,
+    authorName: author?.name ?? null,
+    authorColor: author?.color ?? null,
+    authorInitial: author?.initial ?? null,
     role: 'user',
     text,
     parts,
   });
 
-  const targets = pickTargets(conv, text);
+  // 真人回复正在软等待的那条发言：让原来的 run 继续，避免再起一轮重复回复
+  const pendingWait = findHumanWaitForConversation(id);
+  const isWaitedHuman = !!pendingWait && !!uid && pendingWait.humanId === uid;
+  if (isWaitedHuman) pendingWait!.resolve('reply');
+  const suppressRun = isWaitedHuman;
+
+  // 用户直接 @ 模拟真人：稍后自动回一句
+  for (const m of humansMentioned(text, conv)) {
+    const h = getHuman(m.memberId);
+    if (h?.simulated) void scheduleSimulatedReply(id, h.id, Date.now());
+  }
+
+  const targets = suppressRun ? [] : pickTargets(conv, text);
+  const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const defaultModel = getDefaultModel();
   const fallback = toConfig(defaultModel);
   const runtimeMode = (process.env.SBOT_RUNTIME ?? 'auto').toLowerCase();
@@ -1068,6 +1320,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
     stream.onAbort(() => {
       aborted = true;
       abortCtl.abort();
+      resolveHumanWait(runId, 'skip');
     });
 
     let opencodeOn = false;
@@ -1082,6 +1335,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
     await stream.writeSSE({
       event: 'run.start',
       data: JSON.stringify({
+        runId,
         userMessageId: userMessage.id,
         conversationId: id,
         targets,
@@ -1214,6 +1468,13 @@ app.post('/api/conversations/:id/messages', async (c) => {
               references: citations.length
                 ? citations.map((c) => `[${c.n}] ${c.doc}：${c.text}`).join('\n')
                 : undefined,
+              humanNames: targets.indexOf(agentId) === 0
+                ? conv.members
+                    .filter((m) => m.memberType === 'human')
+                    .map((m) => ({ name: m.name, simulated: !!getHuman(m.memberId)?.simulated }))
+                    .sort((a, b) => Number(b.simulated) - Number(a.simulated))
+                    .map((m) => m.name)
+                : undefined,
             },
             fallback,
           )) {
@@ -1266,9 +1527,15 @@ app.post('/api/conversations/:id/messages', async (c) => {
           parts: messageParts,
         }),
       });
+
+      // 智能体 @ 到真人：暂停后面的智能体，等真人回复 / 继续 / 跳过
+      if (!aborted) {
+        const decision = await maybeWaitForHuman(runId, conv, full, targets.length - targets.indexOf(agentId) - 1);
+        if (decision === 'skip') break;
+      }
     }
 
-    if (!aborted) {
+    if (!aborted && targets.length) {
       const pendingTask = tasksForConversation(id, 'todo')[0];
       if (pendingTask) {
         try {
@@ -1296,6 +1563,42 @@ app.post('/api/conversations/:id/messages', async (c) => {
 
     await stream.writeSSE({ event: 'run.end', data: '{}' });
   });
+});
+
+/** 软等待：手动继续 / 跳过 */
+app.post('/api/runs/:runId/resume', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const action = b?.action === 'skip' ? 'skip' : 'continue';
+  const ok = resolveHumanWait(c.req.param('runId'), action);
+  if (!ok) return c.json({ ok: false, error: 'wait not found' }, 404);
+  return c.json({ ok: true, action });
+});
+
+/** 软等待：以被 @ 真人的身份直接回一句，然后让原来的 run 继续 */
+app.post('/api/runs/:runId/reply', async (c) => {
+  const runId = c.req.param('runId');
+  const entry = humanWaits.get(runId);
+  if (!entry) return c.json({ error: 'wait not found' }, 404);
+
+  const b = await c.req.json().catch(() => ({} as any));
+  const text = String(b?.text ?? '').trim();
+  if (!text) return c.json({ error: 'text required' }, 400);
+
+  const human = getHuman(entry.humanId);
+  if (!human) return c.json({ error: 'human not found' }, 404);
+
+  const message = addMessage({
+    conversationId: entry.conversationId,
+    authorType: 'human',
+    authorId: human.id,
+    authorName: human.name,
+    authorColor: human.color,
+    authorInitial: human.initial,
+    role: 'user',
+    text,
+  });
+  resolveHumanWait(runId, 'reply');
+  return c.json({ data: message });
 });
 
 const port = Number(process.env.PORT ?? 8787);

@@ -87,7 +87,7 @@ export default function Home({
               <div className="bt">登录后可以邀请同事一起协作</div>
               <div className="bd">发现同事 · 拉真人进群 · 多端同步</div>
             </div>
-            <button className="btn primary" onClick={() => onToast('登录入口在左下角头像')}>登录</button>
+            <button className="btn primary" onClick={onInvite}>登录 / 邀请同事</button>
           </div>
         )}
 
@@ -226,14 +226,18 @@ export default function Home({
                 >
                   <div
                     className="av"
-                    style={{ width: 30, height: 30, flexBasis: 30, fontSize: 11.5, background: `${h.color}22`, border: `2px solid ${h.color}`, color: h.color }}
+                    style={{ width: 30, height: 30, flexBasis: 30, fontSize: 11.5, background: `${h.color}22`, border: `2px solid ${h.color}`, color: h.color, position: 'relative' }}
                   >
                     {h.initial}
+                    {h.online && <span className="human-online" />}
                   </div>
                   <div style={{ minWidth: 0 }}>
                     <div className="nm" style={{ color: h.color }}>{h.name}</div>
                     <div className="rl">{h.role || '同事'}</div>
-                    <div className="sk human-tag">真人</div>
+                    <div className="sk human-tag">
+                      <i className={`presence-dot ${h.online ? 'on' : ''}`} />
+                      {h.simulated ? '模拟真人' : '真人'}
+                    </div>
                   </div>
                 </div>
               ))}

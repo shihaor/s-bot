@@ -168,7 +168,13 @@ export function addMessage(input: {
       authorType: input.authorType,
       authorId: input.authorId,
       authorName: input.authorName ?? null,
+      authorColor: input.authorColor ?? null,
+      authorInitial: input.authorInitial ?? null,
+      role: input.role,
       text: input.text,
+      parts: input.parts ?? [],
+      modelId: input.modelId ?? null,
+      status: input.status ?? 'done',
       createdAt,
     },
     input.conversationId,
@@ -690,6 +696,7 @@ export interface Human {
   role: string;
   color: string;
   initial: string;
+  simulated?: boolean;
   createdAt: number;
 }
 
@@ -701,6 +708,7 @@ const mapHuman = (r: any): Human => ({
   role: r.role ?? '',
   color: r.color ?? '#5B8CFF',
   initial: r.initial ?? '人',
+  simulated: !!r.simulated,
   createdAt: r.created_at,
 });
 

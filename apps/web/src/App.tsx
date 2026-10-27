@@ -25,10 +25,13 @@ import {
   fetchRuntime,
   fetchTasks,
   importConversation as importConversationApi,
+  heartbeatPresence,
   loginHuman,
   apiUrl,
   removeMember as removeMemberApi,
+  replyHumanWait,
   replyPermission,
+  resumeHumanWait,
   sendMessage,
   updateAgent as updateAgentApi,
   updateConversation,
@@ -297,6 +300,19 @@ export default function App() {
   const [draggingMember, setDraggingMember] = useState<MemberPayload | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [chatDrop, setChatDrop] = useState(false);
+  const [humanWait, setHumanWait] = useState<{
+    runId: string;
+    conversationId: string;
+    humanId: string;
+    name: string;
+    role: string;
+    color: string;
+    seconds: number;
+    deadline: number;
+  } | null>(null);
+  const [waitLeft, setWaitLeft] = useState(0);
+  const [waitReply, setWaitReply] = useState('');
+  const [waitBusy, setWaitBusy] = useState(false);
   const [user, setUser] = useState<{ id?: string; name: string; role: string; initial: string } | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [mention, setMention] = useState<string | null>(null);
@@ -346,16 +362,73 @@ export default function App() {
       try {
         const e = JSON.parse(ev.data) as { type: string; conversationId?: string; data?: any };
         if (e.type === 'message' && e.data) {
-          const p = e.data as { conversationId: string; authorType: string };
+          const p = e.data as {
+            id?: string;
+            conversationId: string;
+            authorType: string;
+            authorId?: string | null;
+            authorName?: string | null;
+            authorColor?: string | null;
+            authorInitial?: string | null;
+            role?: Message['role'];
+            text?: string;
+            createdAt?: number;
+          };
           if (p.conversationId !== activeIdRef.current && (p.authorType === 'agent' || p.authorType === 'human')) {
             setUnread((prev) => ({ ...prev, [p.conversationId]: (prev[p.conversationId] ?? 0) + 1 }));
           }
           if (p.conversationId === activeIdRef.current && !runningRef.current) {
             void fetchMessages(p.conversationId).then(setMessages).catch(() => {});
+          } else if (
+            p.conversationId === activeIdRef.current &&
+            p.authorType === 'human' &&
+            p.authorId &&
+            p.authorId !== localStorage.getItem('sbot.user')
+          ) {
+            // 软等待/模拟真人回复：run 还在进行时也把这条消息插进来
+            setMessages((prev) => {
+              if (!p.id || prev.some((m) => m.id === p.id)) return prev;
+              return [
+                ...prev,
+                {
+                  id: p.id,
+                  conversationId: p.conversationId,
+                  authorType: 'human',
+                  authorId: p.authorId,
+                  authorName: p.authorName ?? null,
+                  authorColor: p.authorColor ?? null,
+                  authorInitial: p.authorInitial ?? null,
+                  role: p.role ?? 'user',
+                  text: p.text ?? '',
+                  parts: [],
+                  modelId: null,
+                  status: 'done',
+                  createdAt: p.createdAt ?? Date.now(),
+                } as Message,
+              ];
+            });
           }
           void refreshConversations();
         } else if (e.type === 'task') {
           void refreshTasks();
+        } else if (e.type === 'presence') {
+          void fetchHumans().then(setHumans).catch(() => {});
+        } else if (e.type === 'human.wait') {
+          const p = e.data as { runId: string; conversationId: string; humanId: string; name: string; role: string; color: string; seconds: number };
+          setHumanWait({
+            runId: p.runId,
+            conversationId: p.conversationId,
+            humanId: p.humanId,
+            name: p.name,
+            role: p.role,
+            color: p.color,
+            seconds: p.seconds,
+            deadline: Date.now() + p.seconds * 1000,
+          });
+          setWaitReply('');
+        } else if (e.type === 'human.resume') {
+          const p = e.data as { runId: string };
+          setHumanWait((cur) => (cur?.runId === p.runId ? null : cur));
         }
       } catch {
         /* ignore */
@@ -363,6 +436,9 @@ export default function App() {
     };
     es.addEventListener('message', onEvent);
     es.addEventListener('task', onEvent);
+    es.addEventListener('presence', onEvent);
+    es.addEventListener('human.wait', onEvent);
+    es.addEventListener('human.resume', onEvent);
     return () => es.close();
   }, []);
 
@@ -404,6 +480,31 @@ export default function App() {
     }, 62000);
     return () => window.clearTimeout(timer);
   }, [permissionReq]);
+
+  // 登录后每 30 秒报一次在线，别的客户端就能看到「真人在线」
+  useEffect(() => {
+    if (!user?.id) return;
+    let alive = true;
+    const tick = () => { if (alive) void heartbeatPresence().catch(() => {}); };
+    tick();
+    const timer = window.setInterval(tick, 30000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [user?.id]);
+
+  // 软等待倒计时
+  useEffect(() => {
+    if (!humanWait) {
+      setWaitLeft(0);
+      return;
+    }
+    const tick = () => setWaitLeft(Math.max(0, Math.ceil((humanWait.deadline - Date.now()) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 500);
+    return () => window.clearInterval(timer);
+  }, [humanWait]);
 
   // 托盘退出时中断当前会话
   useEffect(() => {
@@ -937,6 +1038,36 @@ export default function App() {
       .filter((m) => !q || m.name.toLowerCase().includes(q) || m.role.includes(q));
   }, [mention, active]);
 
+  async function submitHumanWait() {
+    if (!humanWait || waitBusy) return;
+    const text = waitReply.trim();
+    if (!text) return;
+    setWaitBusy(true);
+    try {
+      const msg = await replyHumanWait(humanWait.runId, text);
+      setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
+      setWaitReply('');
+      setHumanWait(null);
+    } catch (e) {
+      showToast(String(e));
+    } finally {
+      setWaitBusy(false);
+    }
+  }
+
+  async function decideHumanWait(action: 'continue' | 'skip') {
+    if (!humanWait || waitBusy) return;
+    setWaitBusy(true);
+    try {
+      await resumeHumanWait(humanWait.runId, action);
+      setHumanWait(null);
+    } catch (e) {
+      showToast(String(e));
+    } finally {
+      setWaitBusy(false);
+    }
+  }
+
   async function handleSend(override?: string) {
     const text = (override ?? input).trim();
     const parts = override ? [] : attachments.map((a) => ({ ...a }));
@@ -1013,6 +1144,24 @@ export default function App() {
               resources: e.resources,
               agentId: e.agentId,
             });
+          } else if (e.type === 'human.wait') {
+            setHumanWait({
+              runId: e.runId,
+              conversationId: e.conversationId,
+              humanId: e.humanId,
+              name: e.name,
+              role: e.role,
+              color: e.color,
+              seconds: e.seconds,
+              deadline: Date.now() + e.seconds * 1000,
+            });
+            setWaitReply('');
+            if (document.hidden || !document.hasFocus()) {
+              const where = conversations.find((c) => c.id === runConv)?.title ?? 'S-BOT';
+              (window as any).sbot?.notify?.(`${e.name} · ${where}`, '智能体在等你拍板');
+            }
+          } else if (e.type === 'human.resume') {
+            setHumanWait((cur) => (cur?.runId === e.runId ? null : cur));
           } else if (e.type === 'message.end') {
             setStreaming(null);
             if (document.hidden || !document.hasFocus()) {
@@ -1058,6 +1207,7 @@ export default function App() {
       runningRef.current = false;
       setStreaming(null);
       setPermissionReq(null);
+      setHumanWait(null);
       abortRef.current = null;
       refreshConversations();
     }
@@ -1442,7 +1592,7 @@ export default function App() {
                     <div className="msg gap">
                       <div className="typing">
                         <span className="dots"><i /><i /><i /></span>
-                        {retrievingAgent ? '正在检索知识库…' : '正在思考…'}
+                        {humanWait ? `等 ${humanWait.name} 回复…` : retrievingAgent ? '正在检索知识库…' : '正在思考…'}
                       </div>
                     </div>
                   )}
@@ -1469,6 +1619,48 @@ export default function App() {
               {error && <div className="error-line">{error}</div>}
 
               <footer className="composer-wrap">
+                {humanWait && humanWait.conversationId === activeId && (
+                  <div className="wait-bar">
+                    <div className="wait-head">
+                      <span
+                        className="wait-avatar"
+                        style={{ background: `${humanWait.color}22`, border: `2px solid ${humanWait.color}`, color: humanWait.color }}
+                      >
+                        {humanWait.name.slice(0, 1)}
+                      </span>
+                      <div className="wait-meta">
+                        <b>等 {humanWait.name} 拍板</b>
+                        <span>{waitLeft > 0 ? `${waitLeft}s 后自动继续` : '正在继续…'}{humanWait.role ? ` · ${humanWait.role}` : ''}</span>
+                      </div>
+                      <div className="wait-actions">
+                        <button className="btn" disabled={waitBusy} onClick={() => void decideHumanWait('continue')}>继续</button>
+                        <button className="btn" disabled={waitBusy} onClick={() => void decideHumanWait('skip')}>跳过</button>
+                      </div>
+                    </div>
+                    <div className="wait-reply">
+                      <input
+                        className="input"
+                        value={waitReply}
+                        disabled={waitBusy}
+                        placeholder={`以 ${humanWait.name} 的身份回一句…`}
+                        onChange={(e) => setWaitReply(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            void submitHumanWait();
+                          }
+                        }}
+                      />
+                      <button
+                        className="btn primary"
+                        disabled={waitBusy || !waitReply.trim()}
+                        onClick={() => void submitHumanWait()}
+                      >
+                        回复
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {messages.length > 0 && intro && intro.suggestions.length > 0 && (
                   <div className="suggest-bar">
                     {intro.suggestions.map((q) => (
@@ -1614,11 +1806,13 @@ export default function App() {
               localStorage.setItem('sbot.userInfo', JSON.stringify({ id: human.id, name: human.name, role: human.role, initial: human.initial }));
               setUser({ id: human.id, name: human.name, role: human.role, initial: human.initial });
               setLoginOpen(false);
-              showToast('欢迎回来，张伟');
               // 重新拉一次智能体（私有智能体按身份过滤）
               setAgents(await fetchAgents());
               setConversations(await fetchConversations());
-              setHumans(await fetchHumans());
+              const hs = await fetchHumans();
+              setHumans(hs);
+              const onlineOthers = hs.filter((h) => h.online && h.id !== human.id).length;
+              showToast(onlineOthers ? `欢迎回来，张伟 · ${onlineOthers} 位同事在线` : '欢迎回来，张伟');
             } catch (e) {
               showToast(String(e));
             }
@@ -1696,10 +1890,12 @@ export default function App() {
                 <p className="sub" style={{ color: 'var(--warn)', margin: '4px 0 0' }}>{ocSetup.error}</p>
               )}
               <p className="sub" style={{ margin: '10px 0 0' }}>
-                内网下载不通时，请联系<b>史皓燃</b>获取离线包。
+                已经装了 opencode 桌面版？去「设置 → opencode 运行时」点自动扫描，或直接填它的安装目录。
+                内网下载不通时，让管理员把离线包放到上面的地址。
               </p>
             </div>
             <div className="sheet-foot">
+              <button className="btn" onClick={() => { setOcSetup(null); setView('settings'); }}>去设置里指定目录</button>
               <button className="btn" onClick={() => setOcSetup(null)}>稍后</button>
               <button
                 className="btn primary"
@@ -1711,7 +1907,7 @@ export default function App() {
                     showToast(`opencode ${r.version ?? ''} 安装完成`);
                     setOcSetup(null);
                   } else {
-                    setOcSetup({ ...ocSetup, busy: false, error: r.error ?? '安装失败，请联系史皓燃获取离线包' });
+                    setOcSetup({ ...ocSetup, busy: false, error: r.error ?? '安装失败，可以在设置里手动指定安装目录' });
                   }
                 }}
               >

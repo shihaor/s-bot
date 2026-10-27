@@ -13,6 +13,8 @@ export interface StreamContext {
   userText: string;
   modelConfig?: ModelConfig | null;
   references?: string;
+  /** 群里除自己外的真人同事，用来演示 @ 拍板 */
+  humanNames?: string[];
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -54,7 +56,11 @@ const MOCK_REPLIES: Record<string, string[]> = {
 
 async function* mockStream(ctx: StreamContext): AsyncGenerator<string> {
   const pool = MOCK_REPLIES[ctx.agentRole] ?? [`我是${ctx.agentName}，${ctx.agentRole}。说说你的想法？`];
-  const text = pool[Math.floor(Math.random() * pool.length)] ?? pool[0]!;
+  let text = pool[Math.floor(Math.random() * pool.length)] ?? pool[0]!;
+  // mock 模式也演一遍「智能体 @ 真人拍板」，方便没有模型时测试软等待
+  if (ctx.humanNames?.length) {
+    text += `\n\n@${ctx.humanNames[0]} 这个点你来拍板一下？`;
+  }
   await sleep(260 + Math.random() * 240);
   for (const ch of chunks(text)) {
     await sleep(14 + Math.random() * 22);
@@ -67,6 +73,7 @@ async function* llmStream(ctx: StreamContext, cfg: ModelConfig): AsyncGenerator<
     ctx.systemPrompt,
     '',
     '你正在一个多人群聊里，成员包括用户和其他智能体。',
+    ctx.humanNames?.length ? `群里还有真人同事：${ctx.humanNames.join('、')}。需要拍板时可以用 @名字 征求他们的意见。` : '',
     '只代表你自己发言，不要替别人说话，也不要在回复开头加自己的名字。',
     '回答控制在 120 字以内，简短、具体。',
     ctx.references ? `\n以下是检索到的资料，用了就请在句末用 [1][2] 这样的角标标出来：\n${ctx.references}` : '',
