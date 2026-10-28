@@ -112,6 +112,29 @@ export async function coachAgent(messages: { role: 'user' | 'assistant'; content
   return body.data;
 }
 
+export interface ExecutionPlan {
+  type: 'execution-plan';
+  planId: string;
+  conversationId: string;
+  agentId: string;
+  agentName: string;
+  agentRole: string;
+  agentColor: string;
+  title: string;
+  htmlName: string;
+  sourceMessageId: string;
+}
+
+export async function startExecution(plan: ExecutionPlan, allowTools: boolean): Promise<void> {
+  const res = await apiFetch('/api/executions/start', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ...plan, allowTools }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+  if (!res.ok || !body.ok) throw new Error(body.error ?? `开始实现失败（${res.status}）`);
+}
+
 export async function createAgent(input: {
   name: string;
   role: string;
@@ -754,6 +777,7 @@ export type ChatEvent =
   | { type: 'retrieval.done'; agentId: string; count: number }
   | { type: 'permission.ask'; agentId: string; messageId: string; requestID: string; action: string; resources: string[] }
   | { type: 'task.confirm'; message: Message; task: Task }
+  | { type: 'execution.plan'; message: Message }
   | { type: 'run.end' };
 
 export async function sendMessage(

@@ -34,10 +34,12 @@ import {
   replyPermission,
   resumeHumanWait,
   sendMessage,
+  startExecution,
   updateAgent as updateAgentApi,
   updateConversation,
   updateMember as updateMemberApi,
   updateTask as updateTaskApi,
+  type ExecutionPlan,
   type KbDataset,
   type HumanInfo,
 } from './api';
@@ -157,6 +159,61 @@ function RichText({ text }: { text: string }) {
   );
 }
 
+function ExecutionCard({ plan }: { plan: ExecutionPlan }) {
+  const [allow, setAllow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState('');
+
+  async function start() {
+    if (busy || done) return;
+    setBusy(true);
+    setError('');
+    try {
+      await startExecution(plan, allow);
+      setDone(true);
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="exec-card">
+      <div className="exec-head">
+        <div
+          className="av"
+          style={{ width: 30, height: 30, flexBasis: 30, fontSize: 11, background: `${plan.agentColor}22`, border: `2px solid ${plan.agentColor}`, color: plan.agentColor }}
+        >
+          {plan.agentName.slice(0, 1)}
+        </div>
+        <div className="exec-title">
+          <b>交给 {plan.agentName} 实现</b>
+          <span>{plan.agentRole} · {plan.title}</span>
+        </div>
+        <span className={`exec-status ${done ? 'done' : ''}`}>{done ? '已开始' : '待确认'}</span>
+      </div>
+
+      <label className="exec-check">
+        <input type="checkbox" checked={allow} disabled={busy || done} onChange={(e) => setAllow(e.target.checked)} />
+        <span>
+          <b>本次任务始终允许工具操作</b>
+          <em>只对这次实现生效，结束后自动失效；不放心就保持不勾，逐次审批</em>
+        </span>
+      </label>
+
+      {error && <div className="exec-error">{error}</div>}
+
+      <div className="exec-actions">
+        <button className="btn primary" disabled={busy || done} onClick={() => void start()}>
+          {busy ? '启动中…' : done ? '已开始实现' : '开始实现'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function renderParts(
   m: Message,
   onTaskAction: (id: string, status: Task['status']) => void,
@@ -181,6 +238,7 @@ function renderParts(
       toolId?: string;
       detail?: string;
       status?: 'running' | 'ok' | 'failed';
+      url?: string;
       n?: number;
       kb?: string;
       doc?: string;
@@ -219,6 +277,22 @@ function renderParts(
       files.push(<img key={i} className="msg-img" src={part.dataUrl} alt="" onClick={() => window.open(part.dataUrl, '_blank')} />);
     } else if (part.type === 'context-summary') {
       /* 摘要气泡的标记，正文已经渲染在 bubble 里，这里不重复出附件卡片 */
+    } else if (part.type === 'execution-plan' && (part as unknown as ExecutionPlan).planId) {
+      cards.push(<ExecutionCard key={`exec-${i}`} plan={part as unknown as ExecutionPlan} />);
+    } else if (part.type === 'artifact' && part.url) {
+      const url = apiUrl(part.url);
+      cards.push(
+        <div className="artifact-card" key={`art-${i}`}>
+          <div className="artifact-main">
+            <b>{part.name || '实现产物.html'}</b>
+            <span>HTML · {fmtSize(Number(part.size ?? 0))}</span>
+          </div>
+          <div className="artifact-actions">
+            <button className="btn primary" onClick={() => window.open(url, '_blank', 'noopener')}>预览</button>
+            <a className="btn" href={url} download={part.name || 'artifact.html'}>下载</a>
+          </div>
+        </div>,
+      );
     } else if (part.type === 'file' || part.name) {
       files.push(<div key={i} className="msg-file">📄 {part.name} · {fmtSize(Number(part.size ?? 0))}</div>);
     }
@@ -1273,6 +1347,11 @@ export default function App() {
             else setUnread((prev) => ({ ...prev, [runConv]: (prev[runConv] ?? 0) + 1 }));
             void refreshTasks();
             showToast('有任务等你确认');
+          } else if (e.type === 'execution.plan') {
+            if (activeIdRef.current === runConv) {
+              setMessages((prev) => (prev.some((m) => m.id === e.message.id) ? prev : [...prev, e.message]));
+            }
+            showToast('技术评审结束，可以开始实现');
           }
         },
         controller.signal,

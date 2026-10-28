@@ -923,6 +923,8 @@ interface RunInput {
   sessionId: string;
   prompt: string;
   signal: AbortSignal;
+  /** 本次任务始终允许工具操作，不再逐次等待审批 */
+  autoApprove?: boolean;
 }
 
 export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> {
@@ -981,16 +983,22 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
           break;
         case 'permission.asked': {
           const requestID = String(raw.data.id);
-          yield {
-            type: 'permission',
-            requestID,
-            action: String(raw.data.action),
-            resources: Array.isArray(raw.data.resources) ? raw.data.resources.map(String) : [],
-          };
-          const decision = await waitPermission(requestID);
-          try {
-            await client.permission.reply({ sessionID: sessionId, requestID, decision });
-          } catch { /* 请求可能已超时 */ }
+          if (input.autoApprove) {
+            try {
+              await client.permission.reply({ sessionID: sessionId, requestID, decision: 'always' });
+            } catch { /* 请求可能已超时 */ }
+          } else {
+            yield {
+              type: 'permission',
+              requestID,
+              action: String(raw.data.action),
+              resources: Array.isArray(raw.data.resources) ? raw.data.resources.map(String) : [],
+            };
+            const decision = await waitPermission(requestID);
+            try {
+              await client.permission.reply({ sessionID: sessionId, requestID, decision });
+            } catch { /* 请求可能已超时 */ }
+          }
           break;
         }
         case 'session.execution.succeeded':

@@ -838,6 +838,28 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 .oc-advanced summary { cursor: pointer; font-size: 11.5px; color: var(--text-dim); }
 .oc-advanced summary:hover { color: var(--text); }
 
+/* ---------- 评审 → 实现 → 再评审 ---------- */
+.exec-card { margin-top: 10px; border: 1px solid rgba(91, 140, 255, 0.35); background: var(--bg-elev); border-radius: 12px; padding: 12px 14px; max-width: 620px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14); }
+.exec-head { display: flex; align-items: center; gap: 10px; }
+.exec-title { flex: 1; min-width: 0; }
+.exec-title b { display: block; font-size: 12.5px; font-weight: 600; }
+.exec-title span { display: block; font-size: 10.5px; color: var(--text-faint); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.exec-status { font-size: 10.5px; color: var(--warn, #f5a524); flex: 0 0 auto; }
+.exec-status.done { color: var(--success); }
+.exec-check { display: flex; align-items: flex-start; gap: 8px; margin: 10px 0; padding: 9px 10px; border-radius: 8px; background: var(--bg-soft); cursor: pointer; }
+.exec-check input { margin-top: 2px; accent-color: var(--accent); }
+.exec-check b { display: block; font-size: 11.5px; font-weight: 500; color: var(--text); }
+.exec-check em { display: block; font-style: normal; font-size: 10.5px; color: var(--text-faint); margin-top: 2px; line-height: 1.5; }
+.exec-actions { display: flex; justify-content: flex-end; }
+.exec-error { margin: 0 0 8px; padding: 7px 9px; border-radius: 7px; background: rgba(245, 82, 93, 0.08); border: 1px solid rgba(245, 82, 93, 0.25); color: #ff8f96; font-size: 11px; }
+.artifact-card { display: flex; align-items: center; gap: 12px; margin-top: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border-soft); background: var(--bg-soft); max-width: 620px; }
+.artifact-main { flex: 1; min-width: 0; }
+.artifact-main b { display: block; font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.artifact-main span { display: block; font-size: 10.5px; color: var(--text-faint); margin-top: 2px; }
+.artifact-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.artifact-actions .btn { height: 28px; padding: 0 10px; font-size: 11.5px; text-decoration: none; }
+[data-theme="light"] .exec-card { box-shadow: 0 8px 24px rgba(24, 38, 65, 0.1); }
+
 /* ---------- 找同事 / Mattermost ---------- */
 .colleague-sheet { width: 720px; }
 .colleague-body { padding: 16px 20px; overflow-y: auto; max-height: calc(88vh - 120px); display: flex; flex-direction: column; }

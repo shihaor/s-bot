@@ -1,6 +1,8 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { createConnection } from 'node:net';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
@@ -75,6 +77,10 @@ import { broadcast, bus } from './events.js';
 
 const app = new Hono();
 app.use('*', cors());
+
+/** 工作流产物目录：实现完成的 HTML 放这里，通过 /api/artifacts 预览 */
+const dataDir = resolve(process.env.SBOT_DATA_DIR ?? dirname(process.env.SBOT_DB ?? './data/sbot.db'));
+const artifactRoot = join(dataDir, 'artifacts');
 
 const toConfig = (m: ReturnType<typeof getModel>): ModelConfig | null =>
   m ? { baseUrl: m.baseUrl, apiKey: m.apiKey, model: m.model } : null;
@@ -1857,6 +1863,364 @@ function textWithAttachments(text: string, parts: unknown, limit = 12_000): stri
   return [text.trim(), attachment].filter(Boolean).join('\n\n');
 }
 
+/* ---------- 评审 → 实现 → 再评审 ---------- */
+
+interface ExecutionPlanPart {
+  type: 'execution-plan';
+  planId: string;
+  conversationId: string;
+  agentId: string;
+  agentName: string;
+  agentRole: string;
+  agentColor: string;
+  title: string;
+  htmlName: string;
+  sourceMessageId: string;
+}
+
+type ExecutionStatus = 'running' | 'done' | 'failed';
+const executionRuns = new Map<string, ExecutionStatus>();
+
+/** 找一个最像“实现者”的智能体：前端 / UI / 开发优先 */
+function pickImplementer(conv: Conversation): Member | null {
+  const ranked = conv.members
+    .filter((m) => m.memberType === 'agent' && !m.muted)
+    .map((m) => {
+      const a = getAgent(m.memberId);
+      const text = [m.name, m.role, a?.description ?? '', ...(a?.skills ?? [])].join(' ');
+      let score = 0;
+      if (/(前端|frontend|web|页面|界面|ui)/i.test(text)) score += 10;
+      if (/(全栈|开发|实现|工程师)/i.test(text)) score += 3;
+      if (/(架构|后端|数据|文案|产品|评审)/.test(text)) score -= 4;
+      return { member: m, score };
+    })
+    .sort((a, b) => b.score - a.score);
+  return ranked[0] && ranked[0].score > 0 ? ranked[0].member : null;
+}
+
+function hasImplementationIntent(text: string): boolean {
+  return /(实现|开发|做一个|做一版|做出来|改版|搭建|落地|上线|按这个|照着|照着做|写个|写一版)/.test(text);
+}
+
+function htmlAttachment(parts: unknown): { name: string; text: string } | null {
+  if (!Array.isArray(parts)) return null;
+  for (const raw of parts) {
+    const p = raw as { type?: string; name?: string; text?: string } | null;
+    if (!p || typeof p.text !== 'string' || !p.text.trim()) continue;
+    if (/\.html?$/i.test(String(p.name ?? ''))) return { name: String(p.name), text: p.text };
+  }
+  return null;
+}
+
+function makeExecutionPlan(
+  conv: Conversation,
+  text: string,
+  parts: unknown,
+  sourceMessageId: string,
+): ExecutionPlanPart | null {
+  if (conv.type !== 'group') return null;
+  const html = htmlAttachment(parts);
+  if (!html || !text.trim() || !hasImplementationIntent(text)) return null;
+  const implementer = pickImplementer(conv);
+  if (!implementer) return null;
+  const agent = getAgent(implementer.memberId);
+  if (!agent) return null;
+  return {
+    type: 'execution-plan',
+    planId: `plan_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    conversationId: conv.id,
+    agentId: agent.id,
+    agentName: agent.name,
+    agentRole: agent.role,
+    agentColor: agent.color,
+    title: text.split(/\r?\n/)[0]!.trim().slice(0, 80) || `按 ${html.name} 实现`,
+    htmlName: html.name,
+    sourceMessageId,
+  };
+}
+
+function findGeneratedHtml(dir: string, since: number, depth = 0): string | null {
+  if (depth > 3) return null;
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const files = entries
+    .filter((e) => e.isFile() && /\.html?$/i.test(e.name))
+    .map((e) => join(dir, e.name))
+    .filter((p) => {
+      try { return statSync(p).mtimeMs >= since - 3000; } catch { return false; }
+    });
+  const index = files.find((p) => basename(p).toLowerCase() === 'index.html');
+  if (index) return index;
+  if (files.length) return files.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0]!;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const found = findGeneratedHtml(join(dir, entry.name), since, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function extractHtml(text: string): string {
+  const fenced = text.match(/```html\s*\r?\n([\s\S]*?)```/i);
+  if (fenced && fenced[1]!.trim()) return fenced[1]!.trim();
+  const idx = text.search(/<!doctype html|<html[\s>]/i);
+  return idx >= 0 ? text.slice(idx).trim() : '';
+}
+
+function saveArtifact(conversationId: string, planId: string, title: string, html: string) {
+  const dir = join(artifactRoot, conversationId);
+  mkdirSync(dir, { recursive: true });
+  const file = `${planId}.html`;
+  writeFileSync(join(dir, file), html, 'utf8');
+  const safeTitle = (title || '实现').replace(/[\\/:*?"<>|]/g, ' ').trim().slice(0, 40) || '实现';
+  return {
+    url: `/api/artifacts/${encodeURIComponent(conversationId)}/${file}`,
+    name: `${safeTitle}.html`,
+    size: Buffer.byteLength(html),
+  };
+}
+
+async function runExecution(plan: ExecutionPlanPart, allowTools: boolean): Promise<void> {
+  if (executionRuns.get(plan.planId) === 'running') return;
+  executionRuns.set(plan.planId, 'running');
+
+  const conv = getConversation(plan.conversationId);
+  const agent = getAgent(plan.agentId);
+  if (!conv || !agent) {
+    executionRuns.set(plan.planId, 'failed');
+    return;
+  }
+
+  const source = listMessages(plan.conversationId, 200).find((m) => m.id === plan.sourceMessageId);
+  const prototype = htmlAttachment(source?.parts);
+  const context = joinContext(plan.conversationId, 12)
+    .map((m) => `${senderName(conv, m)}：${m.text}`)
+    .join('\n')
+    .slice(0, 4000);
+
+  addMessage({
+    conversationId: plan.conversationId,
+    authorType: 'agent',
+    authorId: agent.id,
+    role: 'assistant',
+    text: allowTools
+      ? `开始实现：${plan.title}。本次任务已允许工具操作，我直接写文件。`
+      : `开始实现：${plan.title}。先产出可预览的单文件版本。`,
+  });
+
+  const startedAt = Date.now();
+  const model = getDefaultModel();
+  const cfg = toConfig(model);
+  let html = '';
+  let modeNote = '';
+
+  if (allowTools) {
+    let opencodeOn = false;
+    try {
+      opencodeOn = await ensureOpencode(model ?? null);
+    } catch {
+      opencodeOn = false;
+    }
+    if (opencodeOn) {
+      try {
+        const session = await ensureSession(plan.conversationId, agent);
+        writeFileSync(join(session.workspace, 'prototype.html'), prototype?.text ?? '', 'utf8');
+        writeFileSync(
+          join(session.workspace, 'brief.md'),
+          `# 需求\n\n${plan.title}\n\n## 群聊评审\n\n${context || '（无）'}\n`,
+          'utf8',
+        );
+        const prompt = [
+          `你是${agent.name}，${agent.role}。群里已经完成技术评审，现在请你直接实现，不要再问问题。`,
+          '工作区根目录有 prototype.html（用户上传的原型）和 brief.md（需求与评审意见）。',
+          '请产出一个可运行的单文件 index.html，CSS 和 JS 全部内联，保存到工作区根目录。',
+          '不要修改 prototype.html 和 brief.md；完成后用一句话说明你实现了什么。',
+        ].join('\n');
+        for await (const ev of runAgent({
+          sessionId: session.sessionId,
+          prompt,
+          signal: new AbortController().signal,
+          autoApprove: true,
+        })) {
+          if (ev.type === 'error') break;
+        }
+        const file = findGeneratedHtml(session.workspace, startedAt);
+        if (file) html = readFileSync(file, 'utf8');
+        if (!html) modeNote = 'opencode 没有找到新生成的 HTML，已回退到模型产物。';
+      } catch {
+        modeNote = 'opencode 执行失败，已回退到模型产物。';
+      }
+    } else {
+      modeNote = 'opencode 不可用，已改用模型产物。';
+    }
+  }
+
+  if (!html) {
+    if (!cfg?.apiKey) {
+      addMessage({
+        conversationId: plan.conversationId,
+        authorType: 'agent',
+        authorId: agent.id,
+        role: 'assistant',
+        text: '没有可用的模型，无法生成实现产物。请先在设置里配置模型，或开启 opencode。',
+      });
+      executionRuns.set(plan.planId, 'failed');
+      return;
+    }
+    try {
+      const reply = await completeChat(
+        cfg,
+        [
+          {
+            role: 'system',
+            content: [
+              `你是${agent.name}，${agent.role}。`,
+              agent.systemPrompt,
+              '根据用户原型和群聊评审意见，实现一个完整、可运行的单文件 HTML 页面，CSS 和 JS 全部内联。',
+              '只输出一个 ```html 代码块，不要解释。',
+            ].join('\n'),
+          },
+          {
+            role: 'user',
+            content: `需求：${plan.title}\n\n群聊上下文：\n${context || '（无）'}\n\n用户上传的原型：\n${(prototype?.text ?? '').slice(0, 12000)}`,
+          },
+        ],
+        { temperature: 0.35, maxTokens: 6000 },
+      );
+      html = extractHtml(reply);
+    } catch {
+      /* 下面统一报错 */
+    }
+  }
+
+  if (!html) {
+    addMessage({
+      conversationId: plan.conversationId,
+      authorType: 'agent',
+      authorId: agent.id,
+      role: 'assistant',
+      text: `实现失败：没有生成 HTML 产物。${modeNote}`,
+    });
+    executionRuns.set(plan.planId, 'failed');
+    return;
+  }
+
+  const artifact = saveArtifact(plan.conversationId, plan.planId, plan.title, html);
+  addMessage({
+    conversationId: plan.conversationId,
+    authorType: 'agent',
+    authorId: agent.id,
+    role: 'assistant',
+    text: `实现完成：${plan.title}${modeNote ? `\n${modeNote}` : ''}`,
+    parts: [{ type: 'artifact', ...artifact }],
+  });
+
+  // 其他智能体评审
+  if (cfg?.apiKey) {
+    const reviewers = conv.members
+      .filter((m) => m.memberType === 'agent' && m.memberId !== agent.id && !m.muted)
+      .slice(0, 3);
+    for (const reviewer of reviewers) {
+      const a = getAgent(reviewer.memberId);
+      if (!a) continue;
+      try {
+        const review = await completeChat(
+          cfg,
+          [
+            {
+              role: 'system',
+              content: [
+                `你是${a.name}，${a.role}。`,
+                a.systemPrompt,
+                '你在评审一个刚完成的页面实现。只代表自己，给出一句明确结论和一个具体问题或可上线判断，不超过 80 字。',
+              ].join('\n'),
+            },
+            {
+              role: 'user',
+              content: `任务：${plan.title}\n\n实现代码（截断）：\n${html.slice(0, 5000)}\n\n请评审。`,
+            },
+          ],
+          { temperature: 0.35, maxTokens: 220 },
+        );
+        if (review.trim()) {
+          addMessage({
+            conversationId: plan.conversationId,
+            authorType: 'agent',
+            authorId: a.id,
+            role: 'assistant',
+            text: review.trim(),
+          });
+        }
+      } catch {
+        /* 单个评审失败不影响其他 */
+      }
+    }
+  }
+
+  // @ 所有真人做最终评审
+  const humans = conv.members.filter((m) => m.memberType === 'human');
+  if (humans.length) {
+    const mentions = humans.map((h) => `@${h.name}`).join(' ');
+    addMessage({
+      conversationId: plan.conversationId,
+      authorType: 'agent',
+      authorId: agent.id,
+      role: 'assistant',
+      text: `${mentions} 实现已经完成，请评审。产物：${artifact.url}`,
+    });
+    for (const h of humans) {
+      const human = getHuman(h.memberId);
+      if (human?.simulated) void scheduleSimulatedReply(plan.conversationId, human.id, Date.now());
+    }
+  }
+
+  executionRuns.set(plan.planId, 'done');
+}
+
+app.post('/api/executions/start', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const plan: ExecutionPlanPart = {
+    type: 'execution-plan',
+    planId: String(b?.planId ?? ''),
+    conversationId: String(b?.conversationId ?? ''),
+    agentId: String(b?.agentId ?? ''),
+    agentName: String(b?.agentName ?? ''),
+    agentRole: String(b?.agentRole ?? ''),
+    agentColor: String(b?.agentColor ?? ''),
+    title: String(b?.title ?? ''),
+    htmlName: String(b?.htmlName ?? ''),
+    sourceMessageId: String(b?.sourceMessageId ?? ''),
+  };
+  if (!plan.planId || !plan.conversationId || !plan.agentId || !plan.sourceMessageId) {
+    return c.json({ ok: false, error: '缺少执行计划参数' }, 400);
+  }
+  if (!getConversation(plan.conversationId) || !getAgent(plan.agentId)) {
+    return c.json({ ok: false, error: '会话或智能体不存在' }, 404);
+  }
+  const status = executionRuns.get(plan.planId);
+  if (status === 'running' || status === 'done') {
+    return c.json({ ok: false, error: status === 'running' ? '这个任务已经在执行了' : '这个任务已经完成' }, 409);
+  }
+  void runExecution(plan, b?.allowTools === true);
+  return c.json({ ok: true });
+});
+
+/** 预览实现产物：CSP sandbox 隔离，避免页面拿到 S-BOT 的同源权限 */
+app.get('/api/artifacts/:convId/:file', (c) => {
+  const convId = c.req.param('convId').replace(/[^a-zA-Z0-9_-]/g, '');
+  const file = basename(c.req.param('file')).replace(/[^a-zA-Z0-9_.-]/g, '');
+  if (!/\.html?$/i.test(file)) return c.json({ error: 'not found' }, 404);
+  const path = join(artifactRoot, convId, file);
+  if (!existsSync(path)) return c.json({ error: 'not found' }, 404);
+  c.header('Content-Security-Policy', "sandbox allow-scripts allow-forms allow-popups");
+  c.header('Cache-Control', 'no-store');
+  return c.html(readFileSync(path, 'utf8'));
+});
+
 app.post('/api/conversations/:id/messages', async (c) => {
   const id = c.req.param('id');
   const conv = getConversation(id);
@@ -2143,6 +2507,22 @@ app.post('/api/conversations/:id/messages', async (c) => {
       if (!aborted) {
         const decision = await maybeWaitForHuman(runId, conv, full, targets.length - targets.indexOf(agentId) - 1);
         if (decision === 'skip') break;
+      }
+    }
+
+    // 技术评审结束后：如果用户上传了 HTML 并要“实现”，给一张执行卡片
+    if (!aborted && conv.type === 'group') {
+      const planPart = makeExecutionPlan(conv, text, parts, userMessage.id);
+      if (planPart) {
+        const card = addMessage({
+          conversationId: id,
+          authorType: 'agent',
+          authorId: planPart.agentId,
+          role: 'assistant',
+          text: '技术评审结束，确认后可以开始实现。',
+          parts: [planPart],
+        });
+        await stream.writeSSE({ event: 'execution.plan', data: JSON.stringify({ message: card }) });
       }
     }
 
