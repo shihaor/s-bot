@@ -596,6 +596,87 @@ app.get('/api/agents', (c) => {
   });
 });
 
+const AGENT_COACH_PROMPT = `你是 S-BOT 的智能体教练，帮用户设计一个 AI 同事。用中文多轮对话，先弄清：
+1. 这个智能体负责什么工作、给谁用
+2. 它的性格和说话风格（直接、严格、温和、简洁……）
+3. 边界：只做什么、不做什么
+4. 3~5 个擅长标签
+
+工作方式：
+- 每次最多问 2~3 个关键问题，不要一次列一长串清单，也不要编造用户没提供的信息。
+- 信息足够时，输出一个完整草案。草案必须放在一个 \`\`\`agent 代码块里，内容必须是合法 JSON：
+\`\`\`agent
+{"name":"老周","role":"产品经理","description":"只谈用户价值、场景和优先级","skills":["需求拆解","优先级排序","用户价值判断"],"systemPrompt":"你是老周，产品经理。只谈用户价值、场景和优先级，不写代码。说话简短口语化，一次不超过 120 字。","color":"#5B8CFF"}
+\`\`\`
+- systemPrompt 写成第二人称「你是……」，明确角色、只谈什么、说话风格、不要做什么，控制在 120 字以内。
+- color 只能从这些里选：#5B8CFF、#3DDC97、#F5A524、#C77DFF、#FF7A9C、#37C3D6、#A0E85C、#FF9F5A。
+- 输出草案后，用一句话请用户确认；确认后设定会填入表单，由用户自己创建，不要声称已经创建或会直接替用户创建。
+- 普通回复保持简洁，不要重复整份 JSON，除非用户要求修改。
+
+当前环境：${process.platform}。`;
+
+function parseAgentDraft(reply: string): {
+  name: string;
+  role: string;
+  description: string;
+  skills: string[];
+  systemPrompt: string;
+  color: string;
+} | null {
+  const block = reply.match(/```(?:agent|json:agent)\s*\r?\n([\s\S]*?)```/i);
+  if (!block) return null;
+  try {
+    const raw = JSON.parse(block[1]!.trim()) as Record<string, unknown>;
+    const name = String(raw.name ?? '').trim();
+    const role = String(raw.role ?? '').trim();
+    if (!name || !role) return null;
+    const skills = Array.isArray(raw.skills)
+      ? raw.skills.map((s) => String(s).trim()).filter(Boolean).slice(0, 6)
+      : String(raw.skills ?? '').split(/[,，]/).map((s) => s.trim()).filter(Boolean).slice(0, 6);
+    const palette = ['#5B8CFF', '#3DDC97', '#F5A524', '#C77DFF', '#FF7A9C', '#37C3D6', '#A0E85C', '#FF9F5A'];
+    const color = palette.includes(String(raw.color)) ? String(raw.color) : palette[0]!;
+    return {
+      name,
+      role,
+      description: String(raw.description ?? '').trim().slice(0, 200),
+      skills,
+      systemPrompt: String(raw.systemPrompt ?? '').trim().slice(0, 1200),
+      color,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 对话式创建智能体：多轮对话，信息够了返回结构化草案 */
+app.post('/api/agents/coach', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const raw = Array.isArray(b?.messages) ? b.messages : [];
+  const turns: ChatTurn[] = raw
+    .filter((m: any) => (m?.role === 'user' || m?.role === 'assistant') && typeof m.content === 'string')
+    .slice(-40)
+    .map((m: any) => ({ role: m.role, content: m.content.slice(0, 8000) }));
+
+  if (!turns.length || turns[turns.length - 1]!.role !== 'user') {
+    return c.json({ error: '需要一条用户消息' }, 400);
+  }
+
+  const cfg = toConfig(getDefaultModel());
+  if (!cfg || !cfg.baseUrl.trim() || !cfg.apiKey.trim()) {
+    return c.json({ error: '还没有可用的模型，请先在设置里添加模型并填写 API Key' }, 400);
+  }
+
+  try {
+    const reply = await completeChat(cfg, [
+      { role: 'system', content: AGENT_COACH_PROMPT },
+      ...turns,
+    ], { temperature: 0.55, maxTokens: 1800 });
+    return c.json({ data: { reply, draft: parseAgentDraft(reply) } });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 502);
+  }
+});
+
 app.post('/api/agents', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   const name = String(b?.name ?? '').trim();

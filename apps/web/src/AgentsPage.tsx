@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { Agent, ModelInfo } from '@sbot/shared';
-import type { KbDataset } from './api';
+import type { AgentCoachDraft, KbDataset } from './api';
+import AgentCoach from './AgentCoach';
 
 const COLORS = ['#5B8CFF', '#3DDC97', '#F5A524', '#C77DFF', '#FF7A9C', '#37C3D6', '#A0E85C', '#FF9F5A'];
 
@@ -51,6 +52,22 @@ interface Props {
 export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCreate, onUpdate, onDelete, onDuplicate }: Props) {
   const [form, setForm] = useState<FormState | null>(null);
   const [busy, setBusy] = useState(false);
+  const [coachOpen, setCoachOpen] = useState(false);
+
+  function useCoachDraft(draft: AgentCoachDraft) {
+    const color = COLORS.includes(draft.color) ? draft.color : COLORS[0]!;
+    setForm({
+      ...EMPTY,
+      name: draft.name,
+      role: draft.role,
+      color,
+      description: draft.description,
+      skills: draft.skills,
+      skillsText: draft.skills.join('，'),
+      systemPrompt: draft.systemPrompt,
+    });
+    setCoachOpen(false);
+  }
 
   function edit(a: Agent) {
     setForm({
@@ -103,7 +120,10 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
           <h2>智能体库</h2>
           <p>每个智能体 = 人设 + 模型 + 擅长。点卡片直接开单聊。</p>
         </div>
-        <button className="btn primary" onClick={() => setForm({ ...EMPTY })}>+ 新建智能体</button>
+        <div className="head-actions">
+          <button className="btn" onClick={() => setCoachOpen(true)}>✦ 对话生成</button>
+          <button className="btn primary" onClick={() => setForm({ ...EMPTY })}>+ 新建智能体</button>
+        </div>
       </div>
 
       <div className="agent-grid">
@@ -139,6 +159,13 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
           </div>
         ))}
       </div>
+
+      {coachOpen && (
+        <AgentCoach
+          onClose={() => setCoachOpen(false)}
+          onUse={useCoachDraft}
+        />
+      )}
 
       {form && (
         <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setForm(null); }}>

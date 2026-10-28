@@ -86,6 +86,32 @@ export async function addHumanMember(conversationId: string, name: string, role:
   return body.data!;
 }
 
+export interface AgentCoachDraft {
+  name: string;
+  role: string;
+  description: string;
+  skills: string[];
+  systemPrompt: string;
+  color: string;
+}
+
+export async function coachAgent(messages: { role: 'user' | 'assistant'; content: string }[]): Promise<{
+  reply: string;
+  draft: AgentCoachDraft | null;
+}> {
+  const res = await apiFetch('/api/agents/coach', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages }),
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    data?: { reply: string; draft: AgentCoachDraft | null };
+    error?: string;
+  };
+  if (!res.ok || !body.data) throw new Error(body.error ?? `智能体教练不可用（${res.status}）`);
+  return body.data;
+}
+
 export async function createAgent(input: {
   name: string;
   role: string;
