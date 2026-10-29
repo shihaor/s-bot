@@ -34,6 +34,7 @@ import {
   replyPermission,
   resumeHumanWait,
   sendMessage,
+  setLanIdentity,
   startExecution,
   updateAgent as updateAgentApi,
   updateConversation,
@@ -214,6 +215,48 @@ function ExecutionCard({ plan }: { plan: ExecutionPlan }) {
   );
 }
 
+function FileChangesCard({ files }: { files: Array<{ name: string; path: string; size: number; content?: string; truncated?: boolean }> }) {
+  const [open, setOpen] = useState<{ name: string; path: string; size: number; content?: string; truncated?: boolean } | null>(null);
+  if (!files.length) return null;
+
+  return (
+    <div className="file-changes">
+      <div className="fc-head">
+        <b>文件改动</b>
+        <span>{files.length} 个文件 · 点击查看内容</span>
+      </div>
+      {files.map((file, i) => (
+        <button key={`${file.path}-${i}`} className="fc-row" onClick={() => setOpen(file)}>
+          <span className="fc-name">{file.name}</span>
+          <span className="fc-path">{file.path}</span>
+          <span className="fc-size">{fmtSize(file.size)}</span>
+          <span className="fc-view">查看</span>
+        </button>
+      ))}
+
+      {open && (
+        <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpen(null); }}>
+          <div className="sheet file-preview-sheet">
+            <div className="sheet-head">
+              <h3>{open.name}</h3>
+              <p>{open.path} · {fmtSize(open.size)}</p>
+            </div>
+            <div className="sheet-body">
+              <pre className="file-preview">
+                {open.content ?? '二进制文件，无法预览内容'}
+                {open.truncated ? '\n\n…（内容已截断）' : ''}
+              </pre>
+            </div>
+            <div className="sheet-foot">
+              <button className="btn" onClick={() => setOpen(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function renderParts(
   m: Message,
   onTaskAction: (id: string, status: Task['status']) => void,
@@ -239,6 +282,7 @@ function renderParts(
       detail?: string;
       status?: 'running' | 'ok' | 'failed';
       url?: string;
+      files?: Array<{ name: string; path: string; size: number; content?: string; truncated?: boolean }>;
       n?: number;
       kb?: string;
       doc?: string;
@@ -279,6 +323,8 @@ function renderParts(
       /* 摘要气泡的标记，正文已经渲染在 bubble 里，这里不重复出附件卡片 */
     } else if (part.type === 'execution-plan' && (part as unknown as ExecutionPlan).planId) {
       cards.push(<ExecutionCard key={`exec-${i}`} plan={part as unknown as ExecutionPlan} />);
+    } else if (part.type === 'file-changes' && Array.isArray(part.files) && part.files.length) {
+      cards.push(<FileChangesCard key={`files-${i}`} files={part.files} />);
     } else if (part.type === 'artifact' && part.url) {
       const url = apiUrl(part.url);
       cards.push(
@@ -582,6 +628,16 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [user?.id]);
+
+  // 把当前身份广播到局域网，其他 S-BOT 客户端会自动发现
+  useEffect(() => {
+    void setLanIdentity({
+      name: user?.name ?? 'S-BOT 用户',
+      role: user?.role ?? '',
+      color: '#5B8CFF',
+      initial: user?.initial ?? '人',
+    }).catch(() => {});
+  }, [user?.name, user?.role, user?.initial]);
 
   // 软等待倒计时
   useEffect(() => {

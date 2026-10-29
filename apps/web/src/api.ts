@@ -543,6 +543,32 @@ export async function heartbeatPresence(): Promise<void> {
   await apiFetch('/api/presence', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
 }
 
+export interface LanPeer {
+  id: string;
+  name: string;
+  role: string;
+  color: string;
+  initial: string;
+  host: string;
+  port: number;
+  lastSeen: number;
+}
+
+/** 内网发现：返回局域网里其他 S-BOT 客户端 */
+export async function fetchLanPeers(): Promise<LanPeer[]> {
+  const r = await getJson<{ data: LanPeer[] }>('/api/lan/peers');
+  return r.data;
+}
+
+/** 把自己的名字/角色广播到局域网 */
+export async function setLanIdentity(input: { name?: string; role?: string; color?: string; initial?: string }): Promise<void> {
+  await apiFetch('/api/lan/identity', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
 export interface Colleague {
   source: 'local' | 'mattermost';
   id: string;

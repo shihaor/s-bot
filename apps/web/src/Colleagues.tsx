@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   fetchColleagues,
+  fetchLanPeers,
   fetchMattermostStatus,
   inviteMattermostUser,
   type Colleague,
+  type LanPeer,
   type MattermostMeta,
 } from './api';
 
@@ -28,12 +30,29 @@ export function ColleagueSearchDialog({
   const [query, setQuery] = useState('');
   const [rows, setRows] = useState<Colleague[]>([]);
   const [mm, setMm] = useState<MattermostMeta | null>(null);
+  const [lanPeers, setLanPeers] = useState<LanPeer[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
+  }, []);
+
+  // 飞秋式内网发现：每 4 秒刷新一次在线客户端
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      void fetchLanPeers()
+        .then((list) => { if (alive) setLanPeers(list); })
+        .catch(() => { /* 本地服务不支持时忽略 */ });
+    };
+    load();
+    const timer = window.setInterval(load, 4000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -102,6 +121,36 @@ export function ColleagueSearchDialog({
             <div className="colleague-note warn">Mattermost 连接失败：{mm.error ?? '请检查地址和 Token'}</div>
           )}
           {error && <div className="colleague-note warn">{error}</div>}
+
+          {lanPeers.length > 0 && (
+            <div className="lan-peers">
+              <div className="colleague-count">
+                内网发现 {lanPeers.length} 位同事 <span className="lan-tag">自动发现</span>
+              </div>
+              {lanPeers.map((p) => (
+                <div
+                  key={p.id}
+                  className="colleague-row"
+                  title={`${p.host} · ${p.role || '同事'}`}
+                  onClick={() => onToast('已发现内网同事，直连和拉群将在下一步接入')}
+                >
+                  <span
+                    className="colleague-av"
+                    style={{ background: `${p.color}22`, borderColor: p.color, color: p.color }}
+                  >
+                    {p.initial || p.name.slice(0, 1)}
+                    <i className="human-online" />
+                  </span>
+                  <span className="colleague-main">
+                    <span className="colleague-name">{p.name}</span>
+                    <span className="colleague-role">{p.role || '同事'} · {p.host}</span>
+                  </span>
+                  <span className="colleague-state on">在线</span>
+                  <span className="colleague-action">已发现</span>
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="colleague-count">
             {rows.length ? `${rows.length} 个结果 · ${onlineCount} 个在线` : query ? '没有匹配的同事' : 'S-BOT 里的同事'}

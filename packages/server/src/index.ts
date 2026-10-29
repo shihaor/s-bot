@@ -2,7 +2,7 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { createConnection } from 'node:net';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
@@ -67,6 +67,7 @@ import {
   syncModelConfig,
 } from './opencode.js';
 import { listDatasets, ragflowStatus, retrieve } from './ragflow.js';
+import { getLanIdentity, getLanPeers, setLanIdentity } from './lan.js';
 import {
   getMattermostStatus,
   getMockMattermostPosts,
@@ -393,6 +394,20 @@ app.post('/api/login', async (c) => {
 });
 
 app.get('/api/humans', (c) => c.json({ data: humansWithPresence() }));
+
+/* ---------- 局域网发现（飞秋式） ---------- */
+app.get('/api/lan/peers', (c) => c.json({ data: getLanPeers(), self: getLanIdentity() }));
+
+app.post('/api/lan/identity', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  setLanIdentity({
+    name: typeof b?.name === 'string' ? b.name : undefined,
+    role: typeof b?.role === 'string' ? b.role : undefined,
+    color: typeof b?.color === 'string' ? b.color : undefined,
+    initial: typeof b?.initial === 'string' ? b.initial : undefined,
+  });
+  return c.json({ data: getLanIdentity() });
+});
 
 /** 登录客户端的心跳；带上 x-sbot-user 或 { humanId } */
 app.post('/api/presence', async (c) => {
@@ -1971,6 +1986,65 @@ function extractHtml(text: string): string {
   return idx >= 0 ? text.slice(idx).trim() : '';
 }
 
+const PREVIEW_TEXT_EXT = /\.(html?|css|scss|less|js|mjs|cjs|jsx|ts|tsx|json|md|txt|yml|yaml|xml|svg|vue|svelte|py|go|java|kt|rs|c|cpp|h|hpp|sh|sql)$/i;
+
+function collectChangedFiles(
+  dir: string,
+  since: number,
+): Array<{ name: string; path: string; size: number; content?: string; truncated?: boolean }> {
+  const files: Array<{ name: string; path: string; size: number; content?: string; truncated?: boolean }> = [];
+  let budget = 80_000;
+
+  const walk = (current: string, depth: number) => {
+    if (depth > 3 || files.length >= 12) return;
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (files.length >= 12) break;
+      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, depth + 1);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (entry.name === 'prototype.html' || entry.name === 'brief.md') continue;
+      let stat;
+      try {
+        stat = statSync(full);
+      } catch {
+        continue;
+      }
+      if (stat.mtimeMs < since - 3000) continue;
+      const rel = relative(dir, full).replace(/\\/g, '/');
+      const item: { name: string; path: string; size: number; content?: string; truncated?: boolean } = {
+        name: entry.name,
+        path: rel,
+        size: stat.size,
+      };
+      if (PREVIEW_TEXT_EXT.test(entry.name) && stat.size <= 300 * 1024 && budget > 0) {
+        try {
+          const raw = readFileSync(full, 'utf8');
+          const clipped = raw.slice(0, Math.min(20_000, budget));
+          budget -= clipped.length;
+          item.content = clipped;
+          if (raw.length > clipped.length) item.truncated = true;
+        } catch {
+          /* 读不了就只给文件名 */
+        }
+      }
+      files.push(item);
+    }
+  };
+
+  walk(dir, 0);
+  return files;
+}
+
 function saveArtifact(conversationId: string, planId: string, title: string, html: string) {
   const dir = join(artifactRoot, conversationId);
   mkdirSync(dir, { recursive: true });
@@ -2017,6 +2091,7 @@ async function runExecution(plan: ExecutionPlanPart, allowTools: boolean): Promi
   const cfg = toConfig(model);
   let html = '';
   let modeNote = '';
+  let changedFiles: Array<{ name: string; path: string; size: number; content?: string; truncated?: boolean }> = [];
 
   if (allowTools) {
     let opencodeOn = false;
@@ -2050,6 +2125,7 @@ async function runExecution(plan: ExecutionPlanPart, allowTools: boolean): Promi
         }
         const file = findGeneratedHtml(session.workspace, startedAt);
         if (file) html = readFileSync(file, 'utf8');
+        changedFiles = collectChangedFiles(session.workspace, startedAt);
         if (!html) modeNote = 'opencode 没有找到新生成的 HTML，已回退到模型产物。';
       } catch {
         modeNote = 'opencode 执行失败，已回退到模型产物。';
@@ -2110,13 +2186,25 @@ async function runExecution(plan: ExecutionPlanPart, allowTools: boolean): Promi
   }
 
   const artifact = saveArtifact(plan.conversationId, plan.planId, plan.title, html);
+  if (!changedFiles.length) {
+    changedFiles = [{
+      name: artifact.name,
+      path: artifact.name,
+      size: artifact.size,
+      content: html.slice(0, 20_000),
+      truncated: html.length > 20_000,
+    }];
+  }
   addMessage({
     conversationId: plan.conversationId,
     authorType: 'agent',
     authorId: agent.id,
     role: 'assistant',
     text: `实现完成：${plan.title}${modeNote ? `\n${modeNote}` : ''}`,
-    parts: [{ type: 'artifact', ...artifact }],
+    parts: [
+      { type: 'artifact', ...artifact },
+      { type: 'file-changes', files: changedFiles },
+    ],
   });
 
   // 其他智能体评审
