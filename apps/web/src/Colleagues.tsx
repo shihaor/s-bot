@@ -20,11 +20,15 @@ export function ColleagueSearchDialog({
   onClose,
   onOpenLocal,
   onInviteMattermost,
+  inviteConversationId,
+  onInviteLan,
   onToast,
 }: {
   onClose: () => void;
   onOpenLocal: (id: string) => void;
   onInviteMattermost: (username: string) => void;
+  inviteConversationId?: string;
+  onInviteLan?: (peer: LanPeer) => void;
   onToast: (msg: string) => void;
 }) {
   const [query, setQuery] = useState('');
@@ -132,7 +136,10 @@ export function ColleagueSearchDialog({
                   key={p.id}
                   className="colleague-row"
                   title={`${p.host} · ${p.role || '同事'}`}
-                  onClick={() => onToast('已发现内网同事，直连和拉群将在下一步接入')}
+                  onClick={() => {
+                    if (inviteConversationId && onInviteLan) onInviteLan(p);
+                    else onToast('打开一个群聊后，可以把内网同事邀请进来');
+                  }}
                 >
                   <span
                     className="colleague-av"
@@ -146,7 +153,7 @@ export function ColleagueSearchDialog({
                     <span className="colleague-role">{p.role || '同事'} · {p.host}</span>
                   </span>
                   <span className="colleague-state on">在线</span>
-                  <span className="colleague-action">已发现</span>
+                  <span className="colleague-action">{inviteConversationId ? '邀请入群' : '已发现'}</span>
                 </div>
               ))}
             </div>

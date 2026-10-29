@@ -12,6 +12,11 @@ import {
   addMessage,
   clearAgentSessions,
   createAgent,
+  findConversationByP2PGroup,
+  getP2PState,
+  setP2PState,
+  upsertP2PAgent,
+  upsertP2PHuman,
   createGroup,
   createModel,
   createTask,
@@ -67,7 +72,7 @@ import {
   syncModelConfig,
 } from './opencode.js';
 import { listDatasets, ragflowStatus, retrieve } from './ragflow.js';
-import { getLanIdentity, getLanPeers, setLanIdentity } from './lan.js';
+import { getLanIdentity, getLanPeers, setLanIdentity, setLanPort } from './lan.js';
 import {
   getMattermostStatus,
   getMockMattermostPosts,
@@ -407,6 +412,322 @@ app.post('/api/lan/identity', async (c) => {
     initial: typeof b?.initial === 'string' ? b.initial : undefined,
   });
   return c.json({ data: getLanIdentity() });
+});
+
+/* ---------- P2P 邀请 / 接受（局域网直连） ---------- */
+
+interface P2PMemberCard {
+  p2pId: string;
+  kind: 'human' | 'agent';
+  memberId: string;
+  name: string;
+  role: string;
+  color: string;
+  initial: string;
+  skills?: string[];
+}
+
+interface P2PInvite {
+  inviteId: string;
+  groupId: string;
+  title: string;
+  token: string;
+  summary: string;
+  host: { id: string; name: string; host: string; port: number };
+  members: P2PMemberCard[];
+}
+
+const p2pInvites = new Map<string, P2PInvite>();
+
+function p2pOwnId(): string {
+  return getLanIdentity().id;
+}
+
+function p2pRemoteAddress(c: any): string {
+  try {
+    const addr = c.env?.incoming?.socket?.remoteAddress ?? c.env?.remoteAddr ?? '';
+    return String(addr).replace(/^::ffff:/, '');
+  } catch {
+    return '';
+  }
+}
+
+async function p2pPost(host: string, port: number, path: string, body: unknown, token: string): Promise<void> {
+  if (!host || !port) throw new Error('对方没有可连接的 P2P 端口');
+  const res = await fetch(`http://${host}:${port}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-sbot-p2p': token },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`对方 P2P 请求失败 ${res.status}${text ? `：${text.slice(0, 160)}` : ''}`);
+  }
+}
+
+async function p2pSummary(conv: Conversation): Promise<string> {
+  const context = joinContext(conv.id, 10)
+    .map((m) => `${senderName(conv, m)}：${m.text}`)
+    .join('\n')
+    .slice(0, 2400);
+  const fallback = [
+    '📋 群聊上下文摘要',
+    '',
+    `群聊：${conv.title}`,
+    '',
+    '最近在讨论',
+    ...(context
+      ? context.split('\n').slice(-4).map((line) => `• ${line.slice(0, 100)}`)
+      : ['• 群里还没有历史发言']),
+    '',
+    '你加入后可以直接接着聊，之前的完整记录不会同步。',
+  ].join('\n');
+
+  const cfg = toConfig(getDefaultModel());
+  if (!cfg?.apiKey) return fallback;
+  try {
+    const reply = await completeChat(
+      cfg,
+      [
+        {
+          role: 'system',
+          content: `你是群聊助理。用 250 字以内给刚加入的同事写一份带排版的上下文摘要：第一行「📋 群聊上下文摘要」，然后「最近在讨论」「已经对齐」「还需要确认」三段，用 • 列表，不要 Markdown 符号。群名：${conv.title}。`,
+        },
+        { role: 'user', content: context || '（还没有历史发言）' },
+      ],
+      { temperature: 0.35, maxTokens: 420 },
+    );
+    return reply.trim() || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function p2pMemberCards(conv: Conversation): P2PMemberCard[] {
+  const own = p2pOwnId();
+  return conv.members.map((m) => ({
+    p2pId: `p_${own}_${m.memberId}`,
+    kind: m.memberType,
+    memberId: m.memberId,
+    name: m.name,
+    role: m.role,
+    color: m.color,
+    initial: m.initial,
+    skills: m.memberType === 'agent' ? getAgent(m.memberId)?.skills ?? [] : undefined,
+  }));
+}
+
+/** 群主邀请一个内网同事：生成群 ID/token、摘要，发到对方 P2P 端口 */
+app.post('/api/p2p/invite', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const conversationId = String(b?.conversationId ?? '');
+  const peer = b?.peer as { id?: string; name?: string; host?: string; port?: number } | undefined;
+  const conv = getConversation(conversationId);
+  if (!conv || conv.type !== 'group') return c.json({ ok: false, error: '只能邀请到群聊' }, 400);
+  if (!peer?.id || !peer.host || !peer.port) return c.json({ ok: false, error: '对方 P2P 地址不完整' }, 400);
+
+  const own = getLanIdentity();
+  let state = getP2PState(conv.id);
+  if (!state) {
+    state = {
+      groupId: `pg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      hostId: own.id,
+      token: Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2),
+      peers: [],
+    };
+    setP2PState(conv.id, state);
+  }
+  if (state.hostId !== own.id) return c.json({ ok: false, error: '只有群主能邀请成员' }, 403);
+
+  const summary = await p2pSummary(conv);
+  const invite: P2PInvite = {
+    inviteId: `inv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    groupId: state.groupId,
+    title: conv.title,
+    token: state.token,
+    summary,
+    host: { id: own.id, name: own.name, host: '', port: own.port },
+    members: p2pMemberCards(conv),
+  };
+
+  try {
+    await p2pPost(String(peer.host), Number(peer.port), '/api/p2p/receive-invite', { kind: 'invite', ...invite }, state.token);
+    return c.json({ ok: true, groupId: state.groupId, summary });
+  } catch (e) {
+    return c.json({ ok: false, error: String((e as Error).message ?? e) }, 502);
+  }
+});
+
+/** 收到邀请：先放内存，推给界面让用户接受 */
+app.post('/api/p2p/receive-invite', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  if (b?.kind !== 'invite' || !b?.inviteId || !b?.groupId) return c.json({ ok: false, error: '邀请格式不对' }, 400);
+  const hostAddress = p2pRemoteAddress(c) || String(b.host?.host ?? '');
+  const invite: P2PInvite = {
+    inviteId: String(b.inviteId),
+    groupId: String(b.groupId),
+    title: String(b.title ?? '内网群聊'),
+    token: String(b.token ?? ''),
+    summary: String(b.summary ?? ''),
+    host: {
+      id: String(b.host?.id ?? ''),
+      name: String(b.host?.name ?? '内网同事'),
+      host: hostAddress,
+      port: Number(b.host?.port ?? 0),
+    },
+    members: Array.isArray(b.members) ? b.members : [],
+  };
+  p2pInvites.set(invite.inviteId, invite);
+  broadcast('p2p.invite', {
+    inviteId: invite.inviteId,
+    groupId: invite.groupId,
+    title: invite.title,
+    hostName: invite.host.name,
+    summary: invite.summary,
+    memberCount: invite.members.length,
+  });
+  return c.json({ ok: true });
+});
+
+/** 接受邀请：本地建群、写影子成员与摘要，再回报群主 */
+app.post('/api/p2p/invites/:inviteId/accept', async (c) => {
+  const invite = p2pInvites.get(c.req.param('inviteId'));
+  if (!invite) return c.json({ ok: false, error: '邀请已失效' }, 404);
+
+  const b = await c.req.json().catch(() => ({} as any));
+  const localName = String(b?.name ?? '内网同事').trim() || '内网同事';
+  const localRole = String(b?.role ?? '');
+  const localColor = String(b?.color ?? '#5B8CFF');
+  const localInitial = String(b?.initial ?? localName.slice(0, 1));
+  const self = upsertHuman({ name: localName, role: localRole });
+
+  const memberIds: string[] = [self.id];
+  for (const card of invite.members.slice(0, 6)) {
+    if (!card?.p2pId || !card?.name) continue;
+    if (card.kind === 'agent') {
+      upsertP2PAgent({
+        id: card.p2pId,
+        name: card.name,
+        role: card.role,
+        color: card.color,
+        initial: card.initial,
+        skills: card.skills,
+      });
+    } else {
+      upsertP2PHuman({
+        id: card.p2pId,
+        name: `${card.name}（内网）`,
+        role: card.role,
+        color: card.color,
+        initial: card.initial,
+      });
+    }
+    memberIds.push(card.p2pId);
+  }
+
+  if (memberIds.length < 2) return c.json({ ok: false, error: '邀请里没有可加入的成员' }, 400);
+  const conv = createGroup(invite.title, memberIds.slice(0, 7));
+  const own = getLanIdentity();
+  setP2PState(conv.id, {
+    groupId: invite.groupId,
+    hostId: invite.host.id,
+    token: invite.token,
+    peers: [{
+      id: invite.host.id,
+      name: invite.host.name,
+      host: invite.host.host,
+      port: invite.host.port,
+      token: invite.token,
+    }],
+  });
+
+  const shadowAgent = conv.members.find((m) => m.memberType === 'agent');
+  if (shadowAgent) {
+    addMessage({
+      conversationId: conv.id,
+      authorType: 'agent',
+      authorId: shadowAgent.memberId,
+      role: 'assistant',
+      text: invite.summary || '📋 群聊上下文摘要\n\n你已加入群聊，之前的完整记录不会同步。',
+      parts: [{ type: 'context-summary' }],
+    });
+  }
+
+  try {
+    await p2pPost(
+      invite.host.host,
+      invite.host.port,
+      '/api/p2p/accept',
+      {
+        kind: 'accept',
+        groupId: invite.groupId,
+        token: invite.token,
+        peer: { id: own.id, name: localName, port: own.port },
+        human: {
+          p2pId: `p_${own.id}_${self.id}`,
+          name: localName,
+          role: localRole,
+          color: localColor,
+          initial: localInitial,
+        },
+      },
+      invite.token,
+    );
+  } catch {
+    /* 群主暂时不可达，本地群先建好 */
+  }
+
+  p2pInvites.delete(invite.inviteId);
+  return c.json({ data: conv });
+});
+
+app.post('/api/p2p/invites/:inviteId/decline', (c) => {
+  p2pInvites.delete(c.req.param('inviteId'));
+  return c.json({ ok: true });
+});
+
+/** 群主收到接受：把新成员写成影子真人，记下 peer */
+app.post('/api/p2p/accept', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const conv = findConversationByP2PGroup(String(b?.groupId ?? ''));
+  if (!conv) return c.json({ ok: false, error: '群不存在' }, 404);
+  const state = getP2PState(conv.id);
+  if (!state || state.token !== String(b?.token ?? '')) return c.json({ ok: false, error: '群 token 不匹配' }, 403);
+
+  const human = b?.human as { p2pId?: string; name?: string; role?: string; color?: string; initial?: string } | undefined;
+  if (human?.p2pId && human.name) {
+    upsertP2PHuman({
+      id: human.p2pId,
+      name: human.name,
+      role: human.role,
+      color: human.color,
+      initial: human.initial,
+    });
+    addMember(conv.id, human.p2pId, 'human');
+    addMessage({
+      conversationId: conv.id,
+      authorType: 'system',
+      authorId: null,
+      role: 'system',
+      text: `${human.name} 加入了群聊`,
+    });
+  }
+
+  const peer = b?.peer as { id?: string; name?: string; port?: number } | undefined;
+  if (peer?.id) {
+    const host = p2pRemoteAddress(c);
+    const peers = state.peers.filter((p) => p.id !== peer.id);
+    peers.push({
+      id: peer.id,
+      name: String(peer.name ?? '内网同事'),
+      host,
+      port: Number(peer.port ?? 0),
+      token: state.token,
+    });
+    setP2PState(conv.id, { peers });
+  }
+  return c.json({ ok: true });
 });
 
 /** 登录客户端的心跳；带上 x-sbot-user 或 { humanId } */
@@ -1335,6 +1656,83 @@ async function askAllHumansOnConflict(
   }
 }
 
+/** 多轮讨论后由主持人智能体给结论；有冲突时 @ 所有真人 */
+async function postDiscussionConclusion(
+  conv: Conversation,
+  messages: Array<{ text: string; authorType: string; authorId: string | null; authorName?: string | null }>,
+  model: ReturnType<typeof getDefaultModel>,
+): Promise<void> {
+  if (conv.type !== 'group' || messages.length < 2) return;
+  const agents = conv.members.filter((m) => m.memberType === 'agent' && !m.muted);
+  const leadMember = agents.find((a) => /产品|评审|主持|架构/.test(`${a.name} ${a.role}`)) ?? agents[0];
+  const lead = leadMember ? getAgent(leadMember.memberId) : null;
+  if (!lead) return;
+
+  const humans = conv.members.filter((m) => m.memberType === 'human');
+  const hasConflict = await detectDisagreement(conv, messages, model);
+  const mentions = hasConflict && humans.length ? humans.map((h) => `@${h.name}`).join(' ') : '';
+  const context = messages.slice(-12).map((m) => `${senderName(conv, m as any)}：${m.text}`).join('\n').slice(0, 5000);
+
+  const fallbackLines = [
+    '📌 讨论结论',
+    '',
+    '核心共识',
+    ...messages.slice(-3).map((m) => `• ${m.text.replace(/\s+/g, ' ').slice(0, 100)}`),
+    '',
+    '下一步',
+    '• 先把上面共识落成一条可执行待办，再继续验证。',
+  ];
+  if (hasConflict) fallbackLines.push('', '目前还有分歧，需要真人拍板。');
+  const fallback = fallbackLines.join('\n');
+
+  const cfg = toConfig(model);
+  let text = fallback;
+  if (cfg?.apiKey) {
+    try {
+      const reply = await completeChat(
+        cfg,
+        [
+          {
+            role: 'system',
+            content: [
+              `你是${lead.name}，${lead.role}，现在是这场群聊讨论的主持人。`,
+              '请基于大家的发言给出最终结论，不要重复每个人说过的话。',
+              '结构：第一行「📌 讨论结论」，然后分「核心共识」「仍存在的分歧」「建议下一步」三段，用 • 列表；最后说明需要谁拍板。',
+              '不要用 Markdown 的 #、**、表格；总字数 280 字以内，语气明确。',
+              lead.systemPrompt,
+            ].join('\n'),
+          },
+          { role: 'user', content: `群聊发言：\n${context}` },
+        ],
+        { temperature: 0.35, maxTokens: 500 },
+      );
+      if (reply.trim()) text = reply.trim();
+    } catch {
+      /* 用兜底 */
+    }
+  }
+
+  if (hasConflict && mentions && !text.includes('@')) {
+    text += `\n\n${mentions} 目前还有分歧，请你们拍板。`;
+  }
+
+  addMessage({
+    conversationId: conv.id,
+    authorType: 'agent',
+    authorId: lead.id,
+    role: 'assistant',
+    text,
+    parts: [{ type: 'discussion-conclusion' }],
+  });
+
+  if (hasConflict) {
+    for (const h of humans) {
+      const human = getHuman(h.memberId);
+      if (human?.simulated) void scheduleSimulatedReply(conv.id, human.id, Date.now());
+    }
+  }
+}
+
 /** 找出这条发言里 @ 到的真人成员 */
 function humansMentioned(text: string, conv: Conversation): Member[] {
   const mentions = [...text.matchAll(/@([^\s@，,。.！!？?]+)/g)].map((m) => m[1]!);
@@ -1815,7 +2213,7 @@ function buildOpencodePrompt(
     agent.systemPrompt,
     '你在一个多人会话里，成员包括用户和其他智能体。只代表你自己发言，不要替别人说话，不要在开头加自己的名字。',
     humans.length ? `群里还有真人同事：${humans.join('、')}。需要拍板时可以用 @名字 征求他们的意见。` : '',
-    '回答简短具体，控制在 120 字以内。',
+    '回答控制在 260 字以内：先简要给出判断依据，再给结论，不要只回一句话。',
     refs ? '如果用了下面的资料，请在句末用 [1][2] 这样的角标标出来。' : '',
   ].filter(Boolean).join('\n');
 
@@ -2404,10 +2802,18 @@ app.post('/api/conversations/:id/messages', async (c) => {
     });
 
     const produced: Array<ReturnType<typeof addMessage>> = [];
-    for (const agentId of targets) {
-      if (aborted) break;
-      const agent = getAgent(agentId);
-      if (!agent) continue;
+    const maxRounds = conv.maxTurns === 0 ? 2 : 1;
+    let stopDiscussion = false;
+
+    for (let round = 0; round < maxRounds && !stopDiscussion; round++) {
+      const roundText = round === 0
+        ? promptText
+        : `${promptText}\n\n这是第 ${round + 1} 轮讨论。请直接回应其他智能体的观点：同意什么、反对什么、补充依据，不要重复上一轮。`;
+
+      for (const agentId of targets) {
+        if (aborted || stopDiscussion) break;
+        const agent = getAgent(agentId);
+        if (!agent) continue;
 
       // 绑定了知识库的智能体，先检索（超时/失败都不影响发言）
       let citations: Array<{ n: number; kb: string; doc: string; score: number; text: string }> = [];
@@ -2445,7 +2851,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
         try {
           const sess = await ensureSession(id, agent);
           usedOpencode = true;
-          const prompt = buildOpencodePrompt(conv, agent, promptText, userMessage.createdAt, citations);
+          const prompt = buildOpencodePrompt(conv, agent, roundText, userMessage.createdAt, citations);
 
           for await (const ev of runAgent({ sessionId: sess.sessionId, prompt, signal: abortCtl.signal })) {
             if (aborted) break;
@@ -2524,7 +2930,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
               systemPrompt: agent.systemPrompt,
               skills: agent.skills,
               history,
-              userText: promptText,
+              userText: roundText,
               modelConfig: picked && picked.id !== defaultModel?.id ? toConfig(picked) : fallback,
               references: citations.length
                 ? citations.map((c) => `[${c.n}] ${c.doc}：${c.text}`).join('\n')
@@ -2594,8 +3000,17 @@ app.post('/api/conversations/:id/messages', async (c) => {
       // 智能体 @ 到真人：暂停后面的智能体，等真人回复 / 继续 / 跳过
       if (!aborted) {
         const decision = await maybeWaitForHuman(runId, conv, full, targets.length - targets.indexOf(agentId) - 1);
-        if (decision === 'skip') break;
+        if (decision === 'skip') {
+          stopDiscussion = true;
+          break;
+        }
       }
+      }
+    }
+
+    // 无限制模式：多轮讨论后由主持人智能体给出结论
+    if (!aborted && conv.maxTurns === 0 && produced.length >= 2) {
+      await postDiscussionConclusion(conv, produced, defaultModel);
     }
 
     // 技术评审结束后：如果用户上传了 HTML 并要“实现”，给一张执行卡片
@@ -2612,12 +3027,6 @@ app.post('/api/conversations/:id/messages', async (c) => {
         });
         await stream.writeSSE({ event: 'execution.plan', data: JSON.stringify({ message: card }) });
       }
-    }
-
-    if (!aborted && conv.maxTurns === 0 && produced.length >= 2) {
-      // 不限制发言时，让所有智能体充分讨论；出现冲突就 @ 所有真人拍板
-      const spoken = produced.filter((m) => m.status === 'done' && m.text.trim());
-      if (spoken.length >= 2) void askAllHumansOnConflict(conv, spoken, defaultModel);
     }
 
     if (!aborted && targets.length) {
@@ -2687,6 +3096,7 @@ app.post('/api/runs/:runId/reply', async (c) => {
 });
 
 const port = Number(process.env.PORT ?? 8787);
+setLanPort(port);
 
 const staticDir = process.env.SBOT_STATIC_DIR;
 if (staticDir) {

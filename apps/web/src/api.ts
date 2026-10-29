@@ -538,6 +538,38 @@ export async function fetchHumans(): Promise<HumanInfo[]> {
   return r.data;
 }
 
+export async function inviteLanPeer(
+  conversationId: string,
+  peer: { id: string; name: string; host: string; port: number },
+): Promise<{ groupId: string; summary: string }> {
+  const res = await apiFetch('/api/p2p/invite', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ conversationId, peer }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; groupId?: string; summary?: string; error?: string };
+  if (!res.ok || !body.ok) throw new Error(body.error ?? `邀请失败（${res.status}）`);
+  return { groupId: body.groupId ?? '', summary: body.summary ?? '' };
+}
+
+export async function acceptP2PInvite(
+  inviteId: string,
+  profile: { name: string; role: string; color: string; initial: string },
+): Promise<Conversation> {
+  const res = await apiFetch(`/api/p2p/invites/${encodeURIComponent(inviteId)}/accept`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(profile),
+  });
+  const body = (await res.json().catch(() => ({}))) as { data?: Conversation; ok?: boolean; error?: string };
+  if (!res.ok || !body.data) throw new Error(body.error ?? `接受邀请失败（${res.status}）`);
+  return body.data;
+}
+
+export async function declineP2PInvite(inviteId: string): Promise<void> {
+  await apiFetch(`/api/p2p/invites/${encodeURIComponent(inviteId)}/decline`, { method: 'POST' });
+}
+
 /** 登录后每 30 秒打一次心跳，其他客户端就能看到你在线 */
 export async function heartbeatPresence(): Promise<void> {
   await apiFetch('/api/presence', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });

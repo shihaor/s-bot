@@ -3,6 +3,7 @@ import type { Agent, ChatIntro, Conversation, Member, Message, ModelInfo, Task }
 import confetti from 'canvas-confetti';
 import {
   addHumanMember,
+  acceptP2PInvite,
   addMember as addMemberApi,
   createAgent as createAgentApi,
   createGroup as createGroupApi,
@@ -10,6 +11,7 @@ import {
   deleteAgent as deleteAgentApi,
   deleteConversation as deleteConversationApi,
   deleteTask as deleteTaskApi,
+  declineP2PInvite,
   ensureDm as ensureDmApi,
   ensureHumanDm,
   exportConversation as exportConversationApi,
@@ -27,7 +29,7 @@ import {
   fetchTasks,
   importConversation as importConversationApi,
   heartbeatPresence,
-  loginHuman,
+  inviteLanPeer,
   apiUrl,
   removeMember as removeMemberApi,
   replyHumanWait,
@@ -43,6 +45,7 @@ import {
   type ExecutionPlan,
   type KbDataset,
   type HumanInfo,
+  type LanPeer,
 } from './api';
 import { hasMemberDrag, readMemberDrag, setMemberDrag, type MemberPayload } from './drag';
 import Home from './Home';
@@ -450,6 +453,15 @@ export default function App() {
   const [taskDecisions, setTaskDecisions] = useState<Record<string, 'done' | 'todo'>>({});
   const [newGroupOpen, setNewGroupOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
+  const [p2pInvite, setP2pInvite] = useState<{
+    inviteId: string;
+    groupId: string;
+    title: string;
+    hostName: string;
+    summary: string;
+    memberCount: number;
+  } | null>(null);
+  const [p2pInviteBusy, setP2pInviteBusy] = useState(false);
   const [findColleaguesOpen, setFindColleaguesOpen] = useState(false);
   const [inviteExternalOpen, setInviteExternalOpen] = useState(false);
   const [inviteExternalUser, setInviteExternalUser] = useState('');
@@ -600,6 +612,16 @@ export default function App() {
         } else if (e.type === 'human.resume') {
           const p = e.data as { runId: string };
           setHumanWait((cur) => (cur?.runId === p.runId ? null : cur));
+        } else if (e.type === 'p2p.invite') {
+          const p = e.data as { inviteId: string; groupId: string; title: string; hostName: string; summary: string; memberCount: number };
+          setP2pInvite({
+            inviteId: p.inviteId,
+            groupId: p.groupId,
+            title: p.title,
+            hostName: p.hostName,
+            summary: p.summary,
+            memberCount: p.memberCount,
+          });
         }
       } catch {
         /* ignore */
@@ -610,6 +632,7 @@ export default function App() {
     es.addEventListener('presence', onEvent);
     es.addEventListener('human.wait', onEvent);
     es.addEventListener('human.resume', onEvent);
+    es.addEventListener('p2p.invite', onEvent);
     return () => es.close();
   }, []);
 
@@ -843,6 +866,51 @@ export default function App() {
     } catch (e) {
       showToast(String(e));
     }
+  }
+
+  async function handleInviteLan(peer: LanPeer) {
+    if (!active || active.type !== 'group') {
+      showToast('先打开一个群聊，再邀请内网同事');
+      return;
+    }
+    try {
+      await inviteLanPeer(active.id, { id: peer.id, name: peer.name, host: peer.host, port: peer.port });
+      showToast(`邀请已发送给 ${peer.name}`);
+    } catch (e) {
+      showToast(String(e));
+    }
+  }
+
+  async function acceptP2PInviteNow() {
+    if (!p2pInvite || p2pInviteBusy) return;
+    setP2pInviteBusy(true);
+    try {
+      const conv = await acceptP2PInvite(p2pInvite.inviteId, {
+        name: profile.name,
+        role: profile.role,
+        color: profile.color,
+        initial: profile.initial,
+      });
+      await refreshConversations();
+      setActiveId(conv.id);
+      setView('chat');
+      showToast(`已加入「${p2pInvite.title}」`);
+      setP2pInvite(null);
+    } catch (e) {
+      showToast(String(e));
+    } finally {
+      setP2pInviteBusy(false);
+    }
+  }
+
+  async function declineP2PInviteNow() {
+    if (!p2pInvite) return;
+    try {
+      await declineP2PInvite(p2pInvite.inviteId);
+    } catch {
+      /* ignore */
+    }
+    setP2pInvite(null);
   }
 
   function showToast(msg: string) {
@@ -1882,6 +1950,8 @@ export default function App() {
                     const same = prev && prev.authorType === 'agent' && prevKey === authorKey;
                     const isSummary = Array.isArray(m.parts)
                       && m.parts.some((p) => (p as { type?: string } | null)?.type === 'context-summary');
+                    const isConclusion = Array.isArray(m.parts)
+                      && m.parts.some((p) => (p as { type?: string } | null)?.type === 'discussion-conclusion');
                     return (
                       <div key={m.id} id={`m-${m.id}`} className={`msg ${same ? '' : 'gap'}`}>
                         {!same && person ? (
@@ -1897,7 +1967,7 @@ export default function App() {
                               <span className="time">{fmtTime(m.createdAt)}</span>
                             </div>
                           )}
-                          <div className={`bubble ${isSummary ? 'summary' : ''}`}><RichText text={m.text} /></div>
+                          <div className={`bubble ${isSummary ? 'summary' : ''} ${isConclusion ? 'conclusion' : ''}`}><RichText text={m.text} /></div>
                           {renderParts(m, (id, status) => void handleTaskStatus(id, status), decidedTasks, (c) => setSelectedCitation(c))}
                           {m.status === 'interrupted' && <div className="interrupted">■ 已中断</div>}
                         </div>
@@ -2112,36 +2182,32 @@ export default function App() {
           onInviteHuman={(name, role) => void inviteHumanToActive(name, role)}
         />
       )}
+      {p2pInvite && (
+        <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setP2pInvite(null); }}>
+          <div className="sheet p2p-invite-sheet">
+            <div className="sheet-head">
+              <h3>群邀请</h3>
+              <p>{p2pInvite.hostName} 邀请你加入「{p2pInvite.title}」，已有 {p2pInvite.memberCount} 位成员。</p>
+            </div>
+            <div className="sheet-body">
+              <div className="p2p-invite-note">加入后只同步这份摘要，之前的完整聊天记录不会拉取。</div>
+              <pre className="p2p-invite-summary">{p2pInvite.summary || '📋 群聊上下文摘要\n\n（群主没有附摘要）'}</pre>
+            </div>
+            <div className="sheet-foot">
+              <button className="btn" onClick={() => void declineP2PInviteNow()}>拒绝</button>
+              <button className="btn primary" disabled={p2pInviteBusy} onClick={() => void acceptP2PInviteNow()}>
+                {p2pInviteBusy ? '加入中…' : '接受并加入'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {loginOpen && (
         <LoginDialog
           user={user}
           profile={profile}
           onSaveProfile={saveLocalProfile}
           onClose={() => setLoginOpen(false)}
-          onLogin={async (name, role) => {
-            try {
-              const human = await loginHuman(name, role);
-              localStorage.setItem('sbot.user', human.id);
-              localStorage.setItem('sbot.userInfo', JSON.stringify({ id: human.id, name: human.name, role: human.role, initial: human.initial }));
-              setUser({ id: human.id, name: human.name, role: human.role, initial: human.initial });
-              setLoginOpen(false);
-              if (profile.name === '我') {
-                const nextProfile = { ...profile, name: human.name, role: human.role, initial: human.initial };
-                setProfile(nextProfile);
-                localStorage.setItem('sbot.profile', JSON.stringify(nextProfile));
-              }
-              // 重新拉一次智能体（私有智能体按身份过滤）
-              setAgents(await fetchAgents());
-              setConversations(await fetchConversations());
-              const hs = await fetchHumans();
-              setHumans(hs);
-              const onlineOthers = hs.filter((h) => h.online && h.id !== human.id).length;
-              showToast(onlineOthers ? `欢迎回来，${human.name} · ${onlineOthers} 位同事在线` : `欢迎回来，${human.name}`);
-            } catch (e) {
-              showToast(String(e));
-              throw e;
-            }
-          }}
           onLogout={() => {
             localStorage.removeItem('sbot.user');
             localStorage.removeItem('sbot.userInfo');
@@ -2163,6 +2229,8 @@ export default function App() {
             setInviteExternalUser(username);
             setInviteExternalOpen(true);
           }}
+          inviteConversationId={active?.type === 'group' ? active.id : undefined}
+          onInviteLan={(peer) => void handleInviteLan(peer)}
           onToast={showToast}
         />
       )}

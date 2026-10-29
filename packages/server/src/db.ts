@@ -123,12 +123,25 @@ ensureColumn('agents', 'visibility', "visibility TEXT NOT NULL DEFAULT 'team'");
 ensureColumn('agents', 'tools', "tools TEXT NOT NULL DEFAULT '{}'");
 ensureColumn('conversations', 'auto_reply', 'auto_reply INTEGER NOT NULL DEFAULT 1');
 ensureColumn('conversations', 'sup_model', 'sup_model TEXT');
-ensureColumn('conversations', 'max_turns', 'max_turns INTEGER NOT NULL DEFAULT 3');
+ensureColumn('conversations', 'max_turns', 'max_turns INTEGER NOT NULL DEFAULT 0');
+ensureColumn('conversations', 'p2p_group_id', 'p2p_group_id TEXT');
+ensureColumn('conversations', 'p2p_host_id', 'p2p_host_id TEXT');
+ensureColumn('conversations', 'p2p_token', 'p2p_token TEXT');
+ensureColumn('conversations', 'p2p_peers', "p2p_peers TEXT NOT NULL DEFAULT '[]'");
 ensureColumn('messages', 'author_name', 'author_name TEXT');
 ensureColumn('messages', 'author_color', 'author_color TEXT');
 ensureColumn('messages', 'author_initial', 'author_initial TEXT');
 ensureColumn('agents', 'owner_id', 'owner_id TEXT');
 ensureColumn('humans', 'simulated', 'simulated INTEGER NOT NULL DEFAULT 0');
+
+/** 一次性默认：群聊发言不限制，让智能体多轮讨论 */
+function migrateUnlimitedTurns() {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'max_turns_unlimited_v2'").get();
+  if (done) return;
+  db.exec('UPDATE conversations SET max_turns = 0');
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('max_turns_unlimited_v2', '1')").run();
+}
+migrateUnlimitedTurns();
 
 function seedModels() {
   const row = db.prepare('SELECT count(*) AS c FROM models').get() as { c: number } | undefined;

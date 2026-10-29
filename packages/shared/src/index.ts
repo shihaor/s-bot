@@ -50,6 +50,8 @@ export interface Conversation {
   maxTurns: number;
   createdAt: number;
   updatedAt: number;
+  p2pGroupId?: string | null;
+  p2pHostId?: string | null;
   members: Member[];
   lastMessage: LastMessage | null;
 }

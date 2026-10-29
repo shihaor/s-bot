@@ -141,44 +141,20 @@ export function LoginDialog({
   user,
   profile,
   onClose,
-  onLogin,
   onLogout,
   onSaveProfile,
 }: {
   user: { name: string; role: string; initial: string } | null;
   profile: LocalProfile;
   onClose: () => void;
-  onLogin: (name: string, role: string) => Promise<void>;
   onLogout: () => void;
   onSaveProfile: (next: LocalProfile) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<LocalProfile>(profile);
-  const [loginForm, setLoginForm] = useState(false);
-  const [loginName, setLoginName] = useState('张伟');
-  const [loginRole, setLoginRole] = useState('前端工程师');
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => { setDraft(profile); }, [profile]);
-
-  async function submitLogin() {
-    const name = loginName.trim();
-    const role = loginRole.trim();
-    if (!name) {
-      setError('名字不能为空');
-      return;
-    }
-    setBusy(true);
-    setError('');
-    try {
-      await onLogin(name, role);
-    } catch (e) {
-      setError(String((e as Error).message ?? e));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   function saveProfile() {
     const name = draft.name.trim();
@@ -243,29 +219,19 @@ export function LoginDialog({
                     <span>{user.name} · {user.role}</span>
                     <button className="btn" onClick={onLogout}>退出登录</button>
                   </div>
-                ) : loginForm ? (
-                  <div className="profile-login">
-                    <div className="two">
-                      <label className="field"><span>登录名字</span>
-                        <input className="input" value={loginName} onChange={(e) => setLoginName(e.target.value)} placeholder="张伟" />
-                      </label>
-                      <label className="field"><span>职位</span>
-                        <input className="input" value={loginRole} onChange={(e) => setLoginRole(e.target.value)} placeholder="前端工程师" />
-                      </label>
-                    </div>
-                    {error && <div className="profile-error">{error}</div>}
+                ) : (
+                  <>
                     <div className="profile-actions">
-                      <button className="btn" onClick={() => setLoginForm(false)}>取消</button>
-                      <button className="btn primary" disabled={busy} onClick={() => void submitLogin()}>
-                        {busy ? '登录中…' : '登录 / 绑定账号'}
+                      <button
+                        className="btn primary"
+                        onClick={() => setError('XABP OIDC 登录还在接入中，当前继续使用本地身份')}
+                      >
+                        使用 XABP OIDC 登录
                       </button>
                     </div>
-                    <p className="profile-hint">当前是原型登录，后续会接企业 SSO / Mattermost 账号。</p>
-                  </div>
-                ) : (
-                  <div className="profile-actions">
-                    <button className="btn primary" onClick={() => setLoginForm(true)}>登录 / 绑定账号</button>
-                  </div>
+                    {error && <div className="profile-error">{error}</div>}
+                    <p className="profile-hint">全局登录后续统一走 XABP 服务的 OIDC 模式；当前先使用本地身份。</p>
+                  </>
                 )}
               </div>
             </>
@@ -541,7 +507,7 @@ export function GroupDrawer({
             </select>
           </div>
           <div className="drow">
-            <div><div className="k">单条消息最多发言</div><div className="d">无限制 = 所有智能体都发言，冲突时 @ 所有真人</div></div>
+            <div><div className="k">单条消息最多发言</div><div className="d">无限制 = 两轮讨论，最后给结论；冲突 @ 所有真人</div></div>
             <select className="dselect" value={conv.maxTurns} onChange={(e) => onPatch({ maxTurns: Number(e.target.value) })}>
               {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n} 个</option>)}
               <option value={0}>无限制</option>

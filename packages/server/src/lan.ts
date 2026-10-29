@@ -34,6 +34,13 @@ let identity: Identity = { name: 'S-BOT 用户', role: '', color: '#5B8CFF', ini
 let socket: Socket | null = null;
 let timer: NodeJS.Timeout | null = null;
 let lastBroadcast = '';
+let serverPort = 0;
+
+export function setLanPort(port: number): void {
+  if (!Number.isFinite(port) || port <= 0) return;
+  serverPort = port;
+  beacon();
+}
 
 function beacon() {
   if (!socket) return;
@@ -45,7 +52,7 @@ function beacon() {
     role: identity.role,
     color: identity.color,
     initial: identity.initial,
-    port: 0,
+    port: serverPort,
     ts: Date.now(),
   });
   const send = (target: string) => {
@@ -127,7 +134,7 @@ export function getLanPeers(): LanPeer[] {
 }
 
 export function getLanIdentity() {
-  return { id: instanceId, ...identity, port: PORT };
+  return { id: instanceId, ...identity, port: serverPort };
 }
 
 export function setLanIdentity(next: Partial<Identity>): void {

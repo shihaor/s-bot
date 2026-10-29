@@ -97,7 +97,9 @@ const mapConversation = (r: any, withMembers = true): Conversation => ({
   muted: !!r.muted,
   autoReply: r.auto_reply === undefined ? true : !!r.auto_reply,
   supModel: r.sup_model ?? null,
-  maxTurns: r.max_turns ?? 3,
+  maxTurns: r.max_turns ?? 0,
+  p2pGroupId: r.p2p_group_id ?? null,
+  p2pHostId: r.p2p_host_id ?? null,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
   members: withMembers ? membersOf(r.id) : [],
@@ -127,6 +129,7 @@ export function listMessages(conversationId: string, limit = 200): Message[] {
 
 let seq = 0;
 export function addMessage(input: {
+  id?: string;
   conversationId: string;
   authorType: Message['authorType'];
   authorId: string | null;
@@ -140,7 +143,7 @@ export function addMessage(input: {
   parts?: unknown[];
   createdAt?: number;
 }): Message {
-  const id = `msg_${Date.now().toString(36)}_${(seq++).toString(36)}`;
+  const id = input.id ?? `msg_${Date.now().toString(36)}_${(seq++).toString(36)}`;
   const createdAt = input.createdAt ?? Date.now();
   db.prepare(
     `INSERT INTO messages (id, conversation_id, author_type, author_id, author_name, author_color, author_initial, role, text, parts, model_id, status, created_at)
@@ -389,7 +392,7 @@ export function createGroup(title: string, memberIds: string[]): Conversation {
   const id = `cv_g_${Date.now().toString(36)}`;
   const at = Date.now();
   db.prepare(
-    'INSERT INTO conversations (id, type, title, model_id, pinned, muted, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, ?, ?)',
+    'INSERT INTO conversations (id, type, title, model_id, pinned, muted, max_turns, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, 0, ?, ?)',
   ).run(id, 'group', title, at, at);
   for (const agentId of memberIds) addMember(id, agentId);
   const names = memberIds.map((m) => getAgent(m)?.name).filter(Boolean).join('、');
@@ -562,7 +565,7 @@ export function ensureDm(agentId: string): Conversation {
   const id = `cv_dm_${agentId}`;
   const at = Date.now();
   db.prepare(
-    'INSERT INTO conversations (id, type, title, model_id, pinned, muted, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, ?, ?)',
+    'INSERT INTO conversations (id, type, title, model_id, pinned, muted, max_turns, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, 0, ?, ?)',
   ).run(id, 'dm', agent.name, at, at);
   db.prepare(
     "INSERT INTO conversation_members (conversation_id, member_type, member_id, muted, talk) VALUES (?, 'agent', ?, 0, 'normal')",
@@ -584,7 +587,7 @@ export function ensureHumanDm(humanId: string): Conversation {
   const id = `cv_dm_${humanId}`;
   const at = Date.now();
   db.prepare(
-    'INSERT INTO conversations (id, type, title, model_id, pinned, muted, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, ?, ?)',
+    'INSERT INTO conversations (id, type, title, model_id, pinned, muted, max_turns, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, 0, ?, ?)',
   ).run(id, 'dm', human.name, at, at);
   db.prepare(
     "INSERT INTO conversation_members (conversation_id, member_type, member_id, muted, talk) VALUES (?, 'human', ?, 0, 'normal')",
@@ -696,6 +699,115 @@ export function updateConversation(
   if (!fields.length) return;
   values.push(id);
   db.prepare(`UPDATE conversations SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export interface P2PPeer {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  token?: string;
+}
+
+export interface P2PState {
+  groupId: string;
+  hostId: string;
+  token: string;
+  peers: P2PPeer[];
+}
+
+export function getP2PState(conversationId: string): P2PState | null {
+  const row = db.prepare(
+    'SELECT p2p_group_id, p2p_host_id, p2p_token, p2p_peers FROM conversations WHERE id = ?',
+  ).get(conversationId) as any;
+  if (!row?.p2p_group_id) return null;
+  let peers: P2PPeer[] = [];
+  try {
+    const parsed = JSON.parse(row.p2p_peers ?? '[]');
+    if (Array.isArray(parsed)) peers = parsed;
+  } catch { /* ignore */ }
+  return {
+    groupId: String(row.p2p_group_id),
+    hostId: String(row.p2p_host_id ?? ''),
+    token: String(row.p2p_token ?? ''),
+    peers,
+  };
+}
+
+export function setP2PState(conversationId: string, patch: Partial<P2PState>): void {
+  const fields: string[] = [];
+  const values: Array<string | null> = [];
+  if (patch.groupId !== undefined) { fields.push('p2p_group_id = ?'); values.push(patch.groupId); }
+  if (patch.hostId !== undefined) { fields.push('p2p_host_id = ?'); values.push(patch.hostId); }
+  if (patch.token !== undefined) { fields.push('p2p_token = ?'); values.push(patch.token); }
+  if (patch.peers !== undefined) { fields.push('p2p_peers = ?'); values.push(JSON.stringify(patch.peers)); }
+  if (!fields.length) return;
+  values.push(conversationId);
+  db.prepare(`UPDATE conversations SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function findConversationByP2PGroup(groupId: string): Conversation | null {
+  const row = db.prepare('SELECT * FROM conversations WHERE p2p_group_id = ?').get(groupId) as any;
+  return row ? mapConversation(row) : null;
+}
+
+/** 给 P2P 群创建远端真人的本地影子记录 */
+export function upsertP2PHuman(input: { id: string; name: string; role?: string; color?: string; initial?: string }): Human {
+  const existing = getHuman(input.id);
+  if (existing) return existing;
+  const name = input.name.trim() || '内网同事';
+  const fallbackName = `${name}（内网）`;
+  try {
+    db.prepare('INSERT INTO humans (id, name, role, color, initial, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      input.id,
+      name,
+      input.role ?? '',
+      input.color ?? '#5B8CFF',
+      input.initial ?? name.slice(0, 1),
+      Date.now(),
+    );
+  } catch {
+    db.prepare('INSERT OR IGNORE INTO humans (id, name, role, color, initial, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      input.id,
+      fallbackName,
+      input.role ?? '',
+      input.color ?? '#5B8CFF',
+      input.initial ?? name.slice(0, 1),
+      Date.now(),
+    );
+  }
+  return getHuman(input.id)!;
+}
+
+/** 给 P2P 群创建远端智能体的本地影子（不包含模型/系统提示，执行在创建者机器） */
+export function upsertP2PAgent(input: {
+  id: string;
+  name: string;
+  role?: string;
+  color?: string;
+  initial?: string;
+  skills?: string[];
+}): Agent {
+  const existing = getAgent(input.id);
+  if (existing) return existing;
+  const name = input.name.trim() || '内网智能体';
+  try {
+    db.prepare(`
+      INSERT INTO agents (id, name, role, color, initial, model_id, system_prompt, skills, kb_ids, created_at, description, visibility, tools, owner_id)
+      VALUES (?, ?, ?, ?, ?, NULL, '', ?, '[]', ?, '', 'team', '{}', NULL)
+    `).run(
+      input.id,
+      name,
+      input.role ?? '',
+      input.color ?? '#5B8CFF',
+      input.initial ?? name.slice(0, 1),
+      JSON.stringify(input.skills ?? []),
+      Date.now(),
+    );
+  } catch {
+    /* 影子已存在 */
+  }
+  return getAgent(input.id)!;
 }
 
 export function deleteConversation(id: string): void {

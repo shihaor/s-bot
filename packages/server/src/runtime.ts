@@ -75,7 +75,7 @@ async function* llmStream(ctx: StreamContext, cfg: ModelConfig): AsyncGenerator<
     '你正在一个多人群聊里，成员包括用户和其他智能体。',
     ctx.humanNames?.length ? `群里还有真人同事：${ctx.humanNames.join('、')}。需要拍板时可以用 @名字 征求他们的意见。` : '',
     '只代表你自己发言，不要替别人说话，也不要在回复开头加自己的名字。',
-    '回答控制在 120 字以内，简短、具体。',
+    '回答控制在 260 字以内：先简要给出你的判断依据，再给明确结论，不要只回一句话。',
     ctx.references ? `\n以下是检索到的资料，用了就请在句末用 [1][2] 这样的角标标出来：\n${ctx.references}` : '',
   ].join('\n');
 
