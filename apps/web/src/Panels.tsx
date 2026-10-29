@@ -126,58 +126,187 @@ export function SearchPanel({
   );
 }
 
+export interface LocalProfile {
+  name: string;
+  role: string;
+  color: string;
+  initial: string;
+  status: 'online' | 'busy' | 'away';
+}
+
+const PROFILE_COLORS = ['#5B8CFF', '#3DDC97', '#F5A524', '#C77DFF', '#FF7A9C', '#37C3D6', '#A0E85C', '#FF9F5A'];
+const STATUS_LABEL: Record<LocalProfile['status'], string> = { online: '在线', busy: '忙碌', away: '离开' };
+
 export function LoginDialog({
   user,
+  profile,
   onClose,
   onLogin,
   onLogout,
+  onSaveProfile,
 }: {
   user: { name: string; role: string; initial: string } | null;
+  profile: LocalProfile;
   onClose: () => void;
-  onLogin: () => void;
+  onLogin: (name: string, role: string) => Promise<void>;
   onLogout: () => void;
+  onSaveProfile: (next: LocalProfile) => void;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<LocalProfile>(profile);
+  const [loginForm, setLoginForm] = useState(false);
+  const [loginName, setLoginName] = useState('张伟');
+  const [loginRole, setLoginRole] = useState('前端工程师');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => { setDraft(profile); }, [profile]);
+
+  async function submitLogin() {
+    const name = loginName.trim();
+    const role = loginRole.trim();
+    if (!name) {
+      setError('名字不能为空');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      await onLogin(name, role);
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function saveProfile() {
+    const name = draft.name.trim();
+    if (!name) {
+      setError('名字不能为空');
+      return;
+    }
+    onSaveProfile({
+      ...draft,
+      name,
+      role: draft.role.trim(),
+      initial: name.slice(0, 1) || '我',
+    });
+    setEditing(false);
+    setError('');
+  }
+
   return (
     <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      {user ? (
-        <div className="sheet">
-          <div className="sheet-head"><h3>{user.name}</h3><p>{user.role} · 已通过 XABP 登录</p></div>
-          <div className="sheet-body">
-            <div className="kv"><span>当前模式</span><b className="ok-text">在线</b></div>
-            <div className="kv"><span>数据同步</span><b>本地 + 服务器</b></div>
-          </div>
-          <div className="sheet-foot">
-            <button className="btn" onClick={onClose}>关闭</button>
-            <button className="btn danger" style={{ width: 'auto' }} onClick={onLogout}>退出登录</button>
-          </div>
+      <div className="sheet profile-sheet">
+        <div className="sheet-head">
+          <h3>我</h3>
+          <p>本地身份用于内网发现和聊天；登录后解锁云端服务。</p>
         </div>
-      ) : (
-        <div className="sheet">
-          <div className="sheet-head"><h3>登录</h3><p>登录后可以和人一起协作，不登录也能继续用 AI。</p></div>
-          <div className="sheet-body">
-            <div className="login-hero">
-              <div className="lg">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="8" r="3.6" />
-                  <path d="M4.5 20a7.5 7.5 0 0 1 15 0" />
-                </svg>
+
+        <div className="sheet-body">
+          {!editing ? (
+            <>
+              <div className="profile-hero">
+                <div className="profile-avatar" style={{ background: `${profile.color}22`, borderColor: profile.color, color: profile.color }}>
+                  {profile.initial || profile.name.slice(0, 1)}
+                  {profile.status === 'online' && <span className="human-online" />}
+                </div>
+                <div className="profile-meta">
+                  <h3>{profile.name}</h3>
+                  <p>{profile.role || '同事'} · <span className={`profile-status ${profile.status}`}>{STATUS_LABEL[profile.status]}</span></p>
+                </div>
+                <button className="btn" onClick={() => setEditing(true)}>编辑资料</button>
               </div>
-              <h3>和同事一起用 AI</h3>
-              <p>用 XABP 账号登录，就能发现同事、把真人拉进群。</p>
+
+              <div className="profile-local">
+                <b>本地身份</b>
+                <span>局域网可发现 · 资料只存在这台电脑</span>
+              </div>
+
+              <div className="profile-cloud">
+                <div className="profile-cloud-head">
+                  <b>{user ? '云端账号' : '登录享受更多服务'}</b>
+                  <span>{user ? `已登录：${user.name}` : '不登录也能继续用本地和内网功能'}</span>
+                </div>
+                <div className="cloud-list">
+                  {['云端智能体库', '跨设备同步', '团队通讯录', '外网中继'].map((item) => (
+                    <div key={item} className="cloud-row">
+                      <span>{item}</span>
+                      <em>即将上线</em>
+                    </div>
+                  ))}
+                </div>
+
+                {user ? (
+                  <div className="profile-account">
+                    <span>{user.name} · {user.role}</span>
+                    <button className="btn" onClick={onLogout}>退出登录</button>
+                  </div>
+                ) : loginForm ? (
+                  <div className="profile-login">
+                    <div className="two">
+                      <label className="field"><span>登录名字</span>
+                        <input className="input" value={loginName} onChange={(e) => setLoginName(e.target.value)} placeholder="张伟" />
+                      </label>
+                      <label className="field"><span>职位</span>
+                        <input className="input" value={loginRole} onChange={(e) => setLoginRole(e.target.value)} placeholder="前端工程师" />
+                      </label>
+                    </div>
+                    {error && <div className="profile-error">{error}</div>}
+                    <div className="profile-actions">
+                      <button className="btn" onClick={() => setLoginForm(false)}>取消</button>
+                      <button className="btn primary" disabled={busy} onClick={() => void submitLogin()}>
+                        {busy ? '登录中…' : '登录 / 绑定账号'}
+                      </button>
+                    </div>
+                    <p className="profile-hint">当前是原型登录，后续会接企业 SSO / Mattermost 账号。</p>
+                  </div>
+                ) : (
+                  <div className="profile-actions">
+                    <button className="btn primary" onClick={() => setLoginForm(true)}>登录 / 绑定账号</button>
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="profile-edit">
+              <div className="two">
+                <label className="field"><span>名字</span>
+                  <input className="input" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="你的名字" />
+                </label>
+                <label className="field"><span>职位</span>
+                  <input className="input" value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value })} placeholder="比如 前端工程师" />
+                </label>
+              </div>
+              <label className="field"><span>在线状态</span>
+                <select className="input" value={draft.status} onChange={(e) => setDraft({ ...draft, status: e.target.value as LocalProfile['status'] })}>
+                  <option value="online">在线</option>
+                  <option value="busy">忙碌</option>
+                  <option value="away">离开</option>
+                </select>
+              </label>
+              <label className="field"><span>头像颜色</span>
+                <div className="swatches">
+                  {PROFILE_COLORS.map((c) => (
+                    <button key={c} type="button" className={`swatch ${draft.color === c ? 'on' : ''}`} style={{ background: c }} onClick={() => setDraft({ ...draft, color: c })} />
+                  ))}
+                </div>
+              </label>
+              {error && <div className="profile-error">{error}</div>}
+              <div className="profile-actions">
+                <button className="btn" onClick={() => { setDraft(profile); setEditing(false); setError(''); }}>取消</button>
+                <button className="btn primary" onClick={saveProfile}>保存资料</button>
+              </div>
             </div>
-            <div className="perks">
-              <div className="perk"><span className="ic">1</span><span>发现同事，直接单聊</span></div>
-              <div className="perk"><span className="ic">2</span><span>把真人拉进群，和 AI 一起协作</span></div>
-              <div className="perk"><span className="ic">3</span><span>聊天记录多端同步</span></div>
-            </div>
-          </div>
-          <div className="sheet-foot">
-            <span className="foot-note">本地模式的数据不会上传</span>
-            <button className="btn" onClick={onClose}>暂不登录</button>
-            <button className="btn primary" onClick={onLogin}>使用 XABP 登录</button>
-          </div>
+          )}
         </div>
-      )}
+
+        <div className="sheet-foot">
+          <span className="foot-note">本地资料不会上传</span>
+          <button className="btn" onClick={onClose}>关闭</button>
+        </div>
+      </div>
     </div>
   );
 }

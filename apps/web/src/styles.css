@@ -872,6 +872,32 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 .file-preview-sheet { width: min(860px, 92vw); }
 .file-preview { margin: 0; padding: 14px; border-radius: 9px; background: var(--bg-soft); border: 1px solid var(--border-soft); font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; max-height: 60vh; overflow: auto; color: var(--text-dim); }
 
+/* ---------- 个人资料 / 登录 ---------- */
+.profile-sheet { width: 560px; }
+.profile-hero { display: flex; align-items: center; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--border-soft); }
+.profile-avatar { position: relative; width: 52px; height: 52px; flex: 0 0 52px; border-radius: 50%; display: grid; place-items: center; font-size: 18px; font-weight: 600; border: 2px solid; }
+.profile-avatar .human-online { border-color: var(--bg-elev); }
+.profile-meta { flex: 1; min-width: 0; }
+.profile-meta h3 { font-size: 16px; font-weight: 600; }
+.profile-meta p { font-size: 11.5px; color: var(--text-faint); margin-top: 3px; }
+.profile-status.online { color: var(--success); }
+.profile-status.busy { color: var(--warn, #f5a524); }
+.profile-status.away { color: var(--text-faint); }
+.profile-local { margin-top: 14px; padding: 10px 12px; border-radius: 9px; background: var(--bg-soft); border: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 2px; }
+.profile-local b { font-size: 11.5px; font-weight: 500; }
+.profile-local span { font-size: 10.5px; color: var(--text-faint); }
+.profile-cloud { margin-top: 16px; border-top: 1px solid var(--border-soft); padding-top: 14px; }
+.profile-cloud-head b { display: block; font-size: 12.5px; font-weight: 600; }
+.profile-cloud-head span { display: block; font-size: 10.5px; color: var(--text-faint); margin-top: 3px; }
+.cloud-list { margin-top: 10px; display: flex; flex-direction: column; gap: 2px; }
+.cloud-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 9px; font-size: 11.5px; color: var(--text-dim); border-radius: 6px; background: var(--bg-soft); }
+.cloud-row em { font-style: normal; font-size: 9.5px; color: var(--text-faint); border: 1px solid var(--border-soft); border-radius: 4px; padding: 0 4px; }
+.profile-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.profile-account { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; font-size: 11.5px; color: var(--text-dim); }
+.profile-login { margin-top: 10px; }
+.profile-error { margin-top: 8px; color: #ff8f96; font-size: 11px; }
+.profile-hint { margin-top: 6px; font-size: 10px; color: var(--text-faint); line-height: 1.5; }
+
 /* ---------- 找同事 / Mattermost ---------- */
 .colleague-sheet { width: 720px; }
 .colleague-body { padding: 16px 20px; overflow-y: auto; max-height: calc(88vh - 120px); display: flex; flex-direction: column; }

@@ -9,6 +9,7 @@ interface Props {
   conversations: Conversation[];
   tasks: Task[];
   userName: string | null;
+  localName?: string;
   onOpenConv: (id: string) => void;
   onOpenAgent: (id: string) => void;
   onGoAgents: () => void;
@@ -45,6 +46,7 @@ export default function Home({
   conversations,
   tasks,
   userName,
+  localName,
   onOpenConv,
   onOpenAgent,
   onGoAgents,
@@ -93,7 +95,7 @@ export default function Home({
       <div className="home-inner">
         <div className="greet">
           <div>
-            <h1>{greet}，{userName ?? '朋友'}</h1>
+            <h1>{greet}，{userName ?? (localName && localName !== '我' ? localName : '朋友')}</h1>
             <p>{userName ? '和同事、智能体一起把事做完。' : '还没登录。现在可以先用 AI 干活，登录后能拉同事一起。'}</p>
           </div>
           <div className="day">{date}</div>
@@ -120,10 +122,10 @@ export default function Home({
             <div className="qt">新建智能体</div>
             <div className="qd">人设 + 模型 + 擅长</div>
           </button>
-          <button className="quick" onClick={userName ? onFindColleagues : onInvite}>
+          <button className="quick" onClick={onFindColleagues}>
             <div className="qi">👥</div>
-            <div className="qt">{userName ? '找同事' : '邀请同事'}</div>
-            <div className="qd">{userName ? '搜索在线 / 离线同事' : '登录后可用'}</div>
+            <div className="qt">找同事</div>
+            <div className="qd">内网发现 · 本地 · 云端</div>
           </button>
         </div>
 

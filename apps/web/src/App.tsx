@@ -56,6 +56,7 @@ import {
   ContextMenu,
   GroupDrawer,
   LoginDialog,
+  type LocalProfile,
   NewGroupDialog,
   PermissionDialog,
   RenameDialog,
@@ -390,6 +391,40 @@ function memberOf(conv: Conversation | null, id: string | null, agents: Agent[])
   return agents.find((a) => a.id === id) ?? null;
 }
 
+function loadLocalProfile(): LocalProfile {
+  try {
+    const raw = localStorage.getItem('sbot.profile');
+    if (raw) {
+      const p = JSON.parse(raw) as Partial<LocalProfile>;
+      if (p.name) {
+        return {
+          name: String(p.name),
+          role: String(p.role ?? ''),
+          color: String(p.color ?? '#5B8CFF'),
+          initial: String(p.initial ?? String(p.name).slice(0, 1)),
+          status: p.status === 'busy' || p.status === 'away' ? p.status : 'online',
+        };
+      }
+    }
+    const savedUser = localStorage.getItem('sbot.userInfo');
+    if (savedUser) {
+      const u = JSON.parse(savedUser) as { name?: string; role?: string; initial?: string };
+      if (u.name) {
+        return {
+          name: u.name,
+          role: u.role ?? '',
+          color: '#5B8CFF',
+          initial: u.initial ?? u.name.slice(0, 1),
+          status: 'online',
+        };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return { name: '我', role: '同事', color: '#5B8CFF', initial: '我', status: 'online' };
+}
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [humans, setHumans] = useState<HumanInfo[]>([]);
@@ -449,6 +484,7 @@ export default function App() {
   const [waitReply, setWaitReply] = useState('');
   const [waitBusy, setWaitBusy] = useState(false);
   const [user, setUser] = useState<{ id?: string; name: string; role: string; initial: string } | null>(null);
+  const [profile, setProfile] = useState<LocalProfile>(loadLocalProfile);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [mention, setMention] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -629,15 +665,15 @@ export default function App() {
     };
   }, [user?.id]);
 
-  // 把当前身份广播到局域网，其他 S-BOT 客户端会自动发现
+  // 把当前本地身份广播到局域网，其他 S-BOT 客户端会自动发现
   useEffect(() => {
     void setLanIdentity({
-      name: user?.name ?? 'S-BOT 用户',
-      role: user?.role ?? '',
-      color: '#5B8CFF',
-      initial: user?.initial ?? '人',
+      name: profile.name,
+      role: profile.role,
+      color: profile.color,
+      initial: profile.initial,
     }).catch(() => {});
-  }, [user?.name, user?.role, user?.initial]);
+  }, [profile.name, profile.role, profile.color, profile.initial]);
 
   // 软等待倒计时
   useEffect(() => {
@@ -812,6 +848,18 @@ export default function App() {
   function showToast(msg: string) {
     setToast(msg);
     window.setTimeout(() => setToast((t) => (t === msg ? '' : t)), 2200);
+  }
+
+  function saveLocalProfile(next: LocalProfile) {
+    setProfile(next);
+    try { localStorage.setItem('sbot.profile', JSON.stringify(next)); } catch { /* ignore */ }
+    void setLanIdentity({
+      name: next.name,
+      role: next.role,
+      color: next.color,
+      initial: next.initial,
+    }).catch(() => {});
+    showToast('个人资料已保存');
   }
 
   /** Electron 通知：带上当前主题，主进程用同色系自绘提醒 */
@@ -1487,9 +1535,11 @@ export default function App() {
           <button className={`rail-btn ${view === 'settings' ? 'active' : ''}`} title="设置" onClick={() => setView('settings')}>
             <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" /></svg>
           </button>
-          <div className="me" title={user ? `${user.name} · 点击管理账号` : '点击登录'} onClick={() => setLoginOpen(true)}>
-            {user ? user.initial : '我'}
-            {user ? <span className="online-dot" /> : <span className="badge">未</span>}
+          <div className="me" title={`${profile.name} · 个人资料 / 账号`} onClick={() => setLoginOpen(true)}>
+            {profile.initial || profile.name.slice(0, 1)}
+            {profile.status === 'online'
+              ? <span className="online-dot" />
+              : <span className="badge">{profile.status === 'busy' ? '忙' : '离'}</span>}
           </div>
         </nav>
 
@@ -1653,8 +1703,8 @@ export default function App() {
                   </svg>
                 </div>
                 <div>
-                  <div className="t">登录后发现同事</div>
-                  <div className="s">和真人单聊、拉群协作</div>
+                  <div className="t">登录享受更多服务</div>
+                  <div className="s">云端智能体 · 跨设备同步 · 团队通讯录</div>
                 </div>
               </div>
             )}
@@ -1696,6 +1746,7 @@ export default function App() {
               conversations={conversations}
               tasks={tasks}
               userName={user?.name ?? null}
+              localName={profile.name}
               onOpenConv={openTaskConv}
               onOpenAgent={openAgentDm}
               onGoAgents={() => setView('agents')}
@@ -2064,23 +2115,31 @@ export default function App() {
       {loginOpen && (
         <LoginDialog
           user={user}
+          profile={profile}
+          onSaveProfile={saveLocalProfile}
           onClose={() => setLoginOpen(false)}
-          onLogin={async () => {
+          onLogin={async (name, role) => {
             try {
-              const human = await loginHuman('张伟', '前端工程师');
+              const human = await loginHuman(name, role);
               localStorage.setItem('sbot.user', human.id);
               localStorage.setItem('sbot.userInfo', JSON.stringify({ id: human.id, name: human.name, role: human.role, initial: human.initial }));
               setUser({ id: human.id, name: human.name, role: human.role, initial: human.initial });
               setLoginOpen(false);
+              if (profile.name === '我') {
+                const nextProfile = { ...profile, name: human.name, role: human.role, initial: human.initial };
+                setProfile(nextProfile);
+                localStorage.setItem('sbot.profile', JSON.stringify(nextProfile));
+              }
               // 重新拉一次智能体（私有智能体按身份过滤）
               setAgents(await fetchAgents());
               setConversations(await fetchConversations());
               const hs = await fetchHumans();
               setHumans(hs);
               const onlineOthers = hs.filter((h) => h.online && h.id !== human.id).length;
-              showToast(onlineOthers ? `欢迎回来，张伟 · ${onlineOthers} 位同事在线` : '欢迎回来，张伟');
+              showToast(onlineOthers ? `欢迎回来，${human.name} · ${onlineOthers} 位同事在线` : `欢迎回来，${human.name}`);
             } catch (e) {
               showToast(String(e));
+              throw e;
             }
           }}
           onLogout={() => {
@@ -2088,7 +2147,7 @@ export default function App() {
             localStorage.removeItem('sbot.userInfo');
             setUser(null);
             setLoginOpen(false);
-            showToast('已退出登录，回到本地模式');
+            showToast('已退出登录，本地身份和内网发现继续可用');
           }}
         />
       )}
