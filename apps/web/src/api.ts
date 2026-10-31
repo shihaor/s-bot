@@ -660,6 +660,35 @@ export async function fetchLanPeers(): Promise<LanPeer[]> {
   return r.data;
 }
 
+export interface LanSelf {
+  id: string;
+  name: string;
+  role: string;
+  color: string;
+  initial: string;
+  port: number;
+  addrs: string[];
+}
+
+/** 本机身份与局域网地址（用于展示「本机地址」给同事手动互通） */
+export async function fetchLanSelf(): Promise<LanSelf> {
+  const r = await getJson<{ data: LanPeer[]; self: LanSelf }>('/api/lan/peers');
+  return r.self;
+}
+
+/** 手动添加内网同事（广播/组播被屏蔽时输入对方 IP:端口） */
+export async function addLanPeer(host: string, port: number): Promise<LanPeer> {
+  const res = await apiFetch('/api/lan/peers', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ host, port }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { data?: LanPeer; error?: string };
+  if (!res.ok) throw new Error(body.error ?? `添加失败 ${res.status}`);
+  if (!body.data) throw new Error('添加失败');
+  return body.data;
+}
+
 /** 把自己的名字/角色广播到局域网 */
 export async function setLanIdentity(input: { name?: string; role?: string; color?: string; initial?: string }): Promise<void> {
   await apiFetch('/api/lan/identity', {

@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import {
+  addLanPeer,
   fetchColleagues,
   fetchLanPeers,
+  fetchLanSelf,
   fetchMattermostStatus,
   inviteMattermostUser,
   type Colleague,
   type LanPeer,
+  type LanSelf,
   type MattermostMeta,
 } from './api';
 
@@ -35,6 +38,10 @@ export function ColleagueSearchDialog({
   const [rows, setRows] = useState<Colleague[]>([]);
   const [mm, setMm] = useState<MattermostMeta | null>(null);
   const [lanPeers, setLanPeers] = useState<LanPeer[]>([]);
+  const [lanSelf, setLanSelf] = useState<LanSelf | null>(null);
+  const [manualAddr, setManualAddr] = useState('');
+  const [manualBusy, setManualBusy] = useState(false);
+  const [manualError, setManualError] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -50,6 +57,9 @@ export function ColleagueSearchDialog({
       void fetchLanPeers()
         .then((list) => { if (alive) setLanPeers(list); })
         .catch(() => { /* 本地服务不支持时忽略 */ });
+      void fetchLanSelf()
+        .then((self) => { if (alive) setLanSelf(self); })
+        .catch(() => { /* ignore */ });
     };
     load();
     const timer = window.setInterval(load, 4000);
@@ -58,6 +68,34 @@ export function ColleagueSearchDialog({
       window.clearInterval(timer);
     };
   }, []);
+
+  async function addManualPeer() {
+    const raw = manualAddr.trim();
+    if (!raw || manualBusy) return;
+    // 支持「10.201.2.5:8787」或「10.201.2.5 8787」
+    const m = raw.match(/^([0-9a-zA-Z.\-]+?)[\s:：]+(\d{2,5})$/);
+    if (!m) {
+      setManualError('格式：IP:端口，例如 10.201.2.5:8787');
+      return;
+    }
+    const host = m[1]!;
+    const port = Number(m[2]);
+    setManualBusy(true);
+    setManualError('');
+    try {
+      const peer = await addLanPeer(host, port);
+      onToast(`已添加 ${peer.name}（${host}）`);
+      setManualAddr('');
+      setLanPeers((prev) => {
+        const next = prev.filter((p) => p.id !== peer.id);
+        return [...next, peer];
+      });
+    } catch (e) {
+      setManualError(String((e as Error).message ?? e));
+    } finally {
+      setManualBusy(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -125,6 +163,33 @@ export function ColleagueSearchDialog({
             <div className="colleague-note warn">Mattermost 连接失败：{mm.error ?? '请检查地址和 Token'}</div>
           )}
           {error && <div className="colleague-note warn">{error}</div>}
+
+          <div className="lan-manual">
+            <div className="colleague-count">手动添加同事 <span className="lan-tag">内网互通</span></div>
+            {lanSelf && lanSelf.addrs.length > 0 && (
+              <div className="lan-self">
+                本机地址：<b>{lanSelf.addrs.map((a) => `${a}:${lanSelf.port}`).join('　')}</b>
+              </div>
+            )}
+            <div className="lan-manual-row">
+              <input
+                className="input"
+                value={manualAddr}
+                onChange={(e) => setManualAddr(e.target.value)}
+                placeholder="对方 IP:端口，如 10.201.2.5:8787"
+                onKeyDown={(e) => { if (e.key === 'Enter') void addManualPeer(); }}
+              />
+              <button className="btn" disabled={manualBusy || !manualAddr.trim()} onClick={() => void addManualPeer()}>
+                {manualBusy ? '添加中…' : '添加'}
+              </button>
+            </div>
+            {manualError && <div className="colleague-note warn">{manualError}</div>}
+            {lanPeers.length === 0 && (
+              <div className="colleague-note">
+                没自动发现到同事？如果公司网络屏蔽了广播/组播，把上面的「本机地址」告诉对方，让对方在这里手动添加即可。
+              </div>
+            )}
+          </div>
 
           {lanPeers.length > 0 && (
             <div className="lan-peers">

@@ -75,7 +75,7 @@ import {
   syncModelConfig,
 } from './opencode.js';
 import { listDatasets, ragflowStatus, retrieve } from './ragflow.js';
-import { getLanIdentity, getLanPeers, setLanIdentity, setLanPort } from './lan.js';
+import { getLanIdentity, getLanPeers, registerPeer, setLanIdentity, setLanPort } from './lan.js';
 import {
   getMattermostStatus,
   getMockMattermostPosts,
@@ -408,6 +408,9 @@ app.get('/api/humans', (c) => c.json({ data: humansWithPresence() }));
 /* ---------- 局域网发现（飞秋式） ---------- */
 app.get('/api/lan/peers', (c) => c.json({ data: getLanPeers(), self: getLanIdentity() }));
 
+/** 供「手动添加同事」握手：对方通过 http://ip:port/api/lan/hello 确认身份 */
+app.get('/api/lan/hello', (c) => c.json({ data: getLanIdentity() }));
+
 app.post('/api/lan/identity', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   setLanIdentity({
@@ -417,6 +420,40 @@ app.post('/api/lan/identity', async (c) => {
     initial: typeof b?.initial === 'string' ? b.initial : undefined,
   });
   return c.json({ data: getLanIdentity() });
+});
+
+/**
+ * 手动添加内网同事：广播/组播被内网屏蔽时，用户输入对方 IP:端口即可。
+ * 先握手确认对方是 S-BOT，再注册进发现列表。
+ */
+app.post('/api/lan/peers', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const host = String(b?.host ?? '').trim().replace(/^https?:\/\//, '').split('/')[0];
+  const port = Number(b?.port ?? b?.port);
+  if (!host || !Number.isFinite(port) || port <= 0) {
+    return c.json({ error: '请填写对方 IP 和端口' }, 400);
+  }
+  const url = `http://${host}:${port}/api/lan/hello`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+    if (!res.ok) return c.json({ error: `对方返回 ${res.status}` }, 400);
+    const body = (await res.json().catch(() => ({}))) as { data?: any };
+    const self = body.data;
+    if (!self?.id) return c.json({ error: '对方不是 S-BOT' }, 400);
+    const peer = registerPeer({
+      id: String(self.id),
+      name: String(self.name ?? 'S-BOT 用户'),
+      role: String(self.role ?? ''),
+      color: String(self.color ?? '#5B8CFF'),
+      initial: String(self.initial ?? ''),
+      host,
+      port,
+      manual: true,
+    });
+    return c.json({ data: peer });
+  } catch (e) {
+    return c.json({ error: `连不上 ${host}:${port}（${String((e as Error).message ?? e).slice(0, 80)}）` }, 400);
+  }
 });
 
 /* ---------- P2P 邀请 / 接受（局域网直连） ---------- */

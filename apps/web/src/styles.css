@@ -938,6 +938,12 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 .colleague-empty { padding: 26px 0; text-align: center; color: var(--text-faint); font-size: 11.5px; }
 .lan-peers { margin-top: 10px; padding-top: 6px; border-top: 1px dashed var(--border-soft); }
 .lan-tag { margin-left: 6px; padding: 0 4px; border: 1px solid rgba(91, 140, 255, 0.3); border-radius: 4px; font-size: 9.5px; color: var(--accent); }
+.lan-manual { margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--bg-soft); border: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 8px; }
+.lan-self { font-size: 11px; color: var(--text-dim); line-height: 1.5; word-break: break-all; }
+.lan-self b { color: var(--accent); font-weight: 600; }
+.lan-manual-row { display: flex; gap: 8px; }
+.lan-manual-row .input { flex: 1; font-size: 12px; }
+.lan-manual .colleague-note { margin-top: 2px; }
 
 /* ---------- 亮色主题：覆盖少量硬编码深色 ---------- */
 [data-theme="light"] ::-webkit-scrollbar-thumb { background: #c6cedd; }
