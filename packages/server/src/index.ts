@@ -1132,7 +1132,7 @@ app.get('/api/agents', (c) => {
   });
 });
 
-const AGENT_COACH_PROMPT = `你是 S-BOT 的智能体教练，帮用户设计一个 AI 同事。用中文多轮对话，先弄清：
+const AGENT_COACH_PROMPT = `你是 S-BOT 的智能体教练，帮用户设计 AI 同事。用中文多轮对话，先弄清：
 1. 这个智能体负责什么工作、给谁用
 2. 它的性格和说话风格（直接、严格、温和、简洁……）
 3. 边界：只做什么、不做什么
@@ -1140,13 +1140,20 @@ const AGENT_COACH_PROMPT = `你是 S-BOT 的智能体教练，帮用户设计一
 
 工作方式：
 - 每次最多问 2~3 个关键问题，不要一次列一长串清单，也不要编造用户没提供的信息。
-- 信息足够时，输出一个完整草案。草案必须放在一个 \`\`\`agent 代码块里，内容必须是合法 JSON：
+- 信息足够时，输出完整草案。草案必须放在 \`\`\`agent 代码块里，内容必须是合法 JSON：
 \`\`\`agent
 {"name":"老周","role":"产品经理","description":"只谈用户价值、场景和优先级","skills":["需求拆解","优先级排序","用户价值判断"],"systemPrompt":"你是老周，产品经理。只谈用户价值、场景和优先级，不写代码。说话简短口语化，一次不超过 120 字。","color":"#5B8CFF"}
 \`\`\`
 - systemPrompt 写成第二人称「你是……」，明确角色、只谈什么、说话风格、不要做什么，控制在 120 字以内。
 - color 只能从这些里选：#5B8CFF、#3DDC97、#F5A524、#C77DFF、#FF7A9C、#37C3D6、#A0E85C、#FF9F5A。
-- 输出草案后，用一句话请用户确认；确认后设定会填入表单，由用户自己创建，不要声称已经创建或会直接替用户创建。
+
+批量模式：
+- 当用户描述的是一个「场景 / 团队 / 一组角色」（比如「做一个电商系统，需要产品、前端、后端、测试」「给我配一支数据团队」），不要只给一个智能体，而是输出一个 \`\`\`agents 代码块，内容是 JSON 数组，每个元素同上面的单智能体格式，外加可选 group 和 tags 字段：
+\`\`\`agents
+[{"name":"产品经理","role":"产品","group":"电商团队","tags":["产品"],"description":"...","skills":["需求"],"systemPrompt":"你是...","color":"#5B8CFF"},{"name":"前端开发","role":"前端","group":"电商团队","tags":["前端"],"description":"...","skills":["React"],"systemPrompt":"你是...","color":"#3DDC97"}]
+\`\`\`
+- 批量时把同一个场景的智能体放进同一个 group（比如「电商团队」），给每个智能体打 1~3 个 tags。
+- 输出后，用一句话复述你生成了哪几个智能体，并请用户确认；确认后由用户自己创建，不要声称已经创建。
 - 普通回复保持简洁，不要重复整份 JSON，除非用户要求修改。
 
 当前环境：${process.platform}。`;
@@ -1158,18 +1165,22 @@ function parseAgentDraft(reply: string): {
   skills: string[];
   systemPrompt: string;
   color: string;
+  group?: string;
+  tags?: string[];
 } | null {
   const block = reply.match(/```(?:agent|json:agent)\s*\r?\n([\s\S]*?)```/i);
   if (!block) return null;
-  try {
-    const raw = JSON.parse(block[1]!.trim()) as Record<string, unknown>;
+  const palette = ['#5B8CFF', '#3DDC97', '#F5A524', '#C77DFF', '#FF7A9C', '#37C3D6', '#A0E85C', '#FF9F5A'];
+  const mapOne = (raw: Record<string, unknown>) => {
     const name = String(raw.name ?? '').trim();
     const role = String(raw.role ?? '').trim();
     if (!name || !role) return null;
     const skills = Array.isArray(raw.skills)
       ? raw.skills.map((s) => String(s).trim()).filter(Boolean).slice(0, 6)
       : String(raw.skills ?? '').split(/[,，]/).map((s) => s.trim()).filter(Boolean).slice(0, 6);
-    const palette = ['#5B8CFF', '#3DDC97', '#F5A524', '#C77DFF', '#FF7A9C', '#37C3D6', '#A0E85C', '#FF9F5A'];
+    const tags = Array.isArray(raw.tags)
+      ? raw.tags.map((s) => String(s).trim()).filter(Boolean).slice(0, 8)
+      : [];
     const color = palette.includes(String(raw.color)) ? String(raw.color) : palette[0]!;
     return {
       name,
@@ -1178,10 +1189,28 @@ function parseAgentDraft(reply: string): {
       skills,
       systemPrompt: String(raw.systemPrompt ?? '').trim().slice(0, 1200),
       color,
+      group: String(raw.group ?? '').trim().slice(0, 40),
+      tags,
     };
+  };
+  try {
+    return mapOne(JSON.parse(block[1]!.trim()) as Record<string, unknown>);
   } catch {
     return null;
   }
+}
+
+/** 解析单个或批量（```agents 数组）草案 */
+function parseAgentDrafts(reply: string): ReturnType<typeof parseAgentDraft>[] {
+  const batch = reply.match(/```agents\s*\r?\n([\s\S]*?)```/i);
+  if (batch) {
+    try {
+      const arr = JSON.parse(batch[1]!.trim()) as Record<string, unknown>[];
+      if (Array.isArray(arr)) return arr.map((x) => parseAgentDraft('```agent\n' + JSON.stringify(x) + '\n```')).filter(Boolean) as any[];
+    } catch { /* ignore */ }
+  }
+  const single = parseAgentDraft(reply);
+  return single ? [single] : [];
 }
 
 /** 对话式创建智能体：多轮对话，信息够了返回结构化草案 */
@@ -1206,8 +1235,9 @@ app.post('/api/agents/coach', async (c) => {
     const reply = await completeChat(cfg, [
       { role: 'system', content: AGENT_COACH_PROMPT },
       ...turns,
-    ], { temperature: 0.55, maxTokens: 1800 });
-    return c.json({ data: { reply, draft: parseAgentDraft(reply) } });
+    ], { temperature: 0.55, maxTokens: 2400 });
+    const drafts = parseAgentDrafts(reply);
+    return c.json({ data: { reply, draft: drafts[0] ?? null, drafts } });
   } catch (e) {
     return c.json({ error: String((e as Error).message ?? e) }, 502);
   }
@@ -1237,6 +1267,8 @@ app.post('/api/agents', async (c) => {
           .filter(Boolean),
     kbIds: Array.isArray(b?.kbIds) ? b.kbIds.map((s: unknown) => String(s)) : [],
     ownerId: c.req.header('x-sbot-user') || null,
+    group: String(b?.group ?? '').trim(),
+    tags: Array.isArray(b?.tags) ? b.tags.map((s: unknown) => String(s).trim()).filter(Boolean) : [],
   });
   return c.json({ data: agent }, 201);
 });
@@ -1257,6 +1289,8 @@ app.patch('/api/agents/:id', async (c) => {
     modelId: b?.modelId === null ? null : typeof b?.modelId === 'string' ? b.modelId : undefined,
     skills: Array.isArray(b?.skills) ? b.skills.map((s: unknown) => String(s)) : undefined,
     kbIds: Array.isArray(b?.kbIds) ? b.kbIds.map((s: unknown) => String(s)) : undefined,
+    group: typeof b?.group === 'string' ? b.group.trim() : undefined,
+    tags: Array.isArray(b?.tags) ? b.tags.map((s: unknown) => String(s).trim()).filter(Boolean) : undefined,
   });
   return c.json({ data: getAgent(id) });
 });
@@ -1532,6 +1566,10 @@ app.post('/api/workflows/coach', async (c) => {
     '5. 如果用户要求评审不通过要修订，必须单独加一个 agent 修订节点，并加 review→revise（when=changes）和 revise→review（when=always, maxLoops=2）两条边。',
     '6. 不要发明智能体，不要用群外的 id。',
     '7. 如果用户没有指定成员，根据需求从列表里推荐最合适的成员；ready 时除了 graph，还要输出 memberIds（这些成员用到的 id 数组）。',
+    '8. 支持两种额外节点：',
+    '   - 并行节点 type=parallel：让多个智能体同时开工。结构 {"id":"p1","type":"parallel","label":"并行实施","children":[{"id":"c1","agentId":"id","label":"前端开发","prompt":"做什么"},{"id":"c2","agentId":"id","label":"后端开发","prompt":"做什么"}]}。',
+    '   - 验收节点 type=accept：读产物文件给通过/打回。结构 {"id":"ac1","type":"accept","label":"验收产物","agentId":"id","prompt":"验收要求"}，其后接 pass（通过）和 changes（要改）两条边。',
+    '9. 用户说「前端/后端/设计并行实施」「分工实施」「验收」这类需求时，用 parallel + accept 节点表达。',
     '',
     '对话规则：',
     '- 信息不足（谁先做、要不要评审、改几轮、要不要真人确认、要哪些成员）时，只问一个最关键的问题，status 用 question。',
@@ -1545,7 +1583,7 @@ app.post('/api/workflows/coach', async (c) => {
     const reply = await completeChat(
       cfg,
       [{ role: 'system', content: system }, ...history, { role: 'user', content: text }],
-      { temperature: 0.2, maxTokens: 1400 },
+      { temperature: 0.2, maxTokens: 4000 },
     );
     const raw = reply.match(/\{[\s\S]*\}/);
     const json = raw ? JSON.parse(raw[0]) : null;
@@ -1567,8 +1605,15 @@ app.post('/api/workflows/coach', async (c) => {
       const graph = json.graph;
       const checked = validateWorkflow(graph);
       const memberSet = new Set(agents.map((a) => a.id));
+      const outsiderIds = (n: any): string[] => {
+        const ids = Array.isArray(n.agentIds) && n.agentIds.length ? n.agentIds : (n.agentId ? [n.agentId] : []);
+        return ids.filter((id: string) => !memberSet.has(id));
+      };
       const bad = Array.isArray(graph.nodes)
-        ? graph.nodes.find((n: any) => n.type === 'agent' && (!n.agentId || !memberSet.has(n.agentId)))
+        ? graph.nodes.find((n: any) =>
+            ((n.type === 'agent' || n.type === 'accept') && outsiderIds(n).length > 0) ||
+            (n.type === 'parallel' && Array.isArray(n.children) && n.children.some((c: any) => outsiderIds(c).length > 0))
+          )
         : true;
 
       const usedIds = Array.isArray(json.memberIds)

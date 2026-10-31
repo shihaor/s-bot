@@ -16,11 +16,14 @@ export interface AgentInput {
   visibility: 'team' | 'private';
   tools: { read?: boolean; web?: boolean; shell?: boolean };
   kbIds: string[];
+  group?: string;
+  tags?: string[];
 }
 
 interface FormState extends AgentInput {
   id?: string;
   skillsText: string;
+  tagsText: string;
 }
 
 const EMPTY: FormState = {
@@ -30,11 +33,14 @@ const EMPTY: FormState = {
   description: '',
   skills: [],
   skillsText: '',
+  tags: [],
+  tagsText: '',
   systemPrompt: '',
   modelId: null,
   visibility: 'team',
   tools: { read: true, web: false, shell: false },
   kbIds: [],
+  group: '',
 };
 
 interface Props {
@@ -44,15 +50,26 @@ interface Props {
   userId?: string;
   onOpen: (id: string) => void;
   onCreate: (input: AgentInput) => Promise<void>;
+  onCreateBatch: (inputs: AgentInput[]) => Promise<void>;
   onUpdate: (id: string, input: AgentInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onDuplicate: (agent: Agent) => Promise<void>;
 }
 
-export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCreate, onUpdate, onDelete, onDuplicate }: Props) {
+export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCreate, onCreateBatch, onUpdate, onDelete, onDuplicate }: Props) {
   const [form, setForm] = useState<FormState | null>(null);
   const [busy, setBusy] = useState(false);
   const [coachOpen, setCoachOpen] = useState(false);
+  const [groupFilter, setGroupFilter] = useState('');
+  const [tagFilter, setTagFilter] = useState('');
+
+  const groups = Array.from(new Set(agents.map((a) => a.group ?? '').filter(Boolean)));
+  const allTags = Array.from(new Set(agents.flatMap((a) => a.tags ?? [])));
+  const visibleAgents = agents.filter((a) => {
+    if (groupFilter && (a.group ?? '') !== groupFilter) return false;
+    if (tagFilter && !(a.tags ?? []).includes(tagFilter)) return false;
+    return true;
+  });
 
   function useCoachDraft(draft: AgentCoachDraft) {
     const color = COLORS.includes(draft.color) ? draft.color : COLORS[0]!;
@@ -65,8 +82,34 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
       skills: draft.skills,
       skillsText: draft.skills.join('，'),
       systemPrompt: draft.systemPrompt,
+      group: draft.group ?? '',
+      tags: draft.tags ?? [],
+      tagsText: (draft.tags ?? []).join('，'),
     });
     setCoachOpen(false);
+  }
+
+  /** 教练产出：单个走表单，多个直接批量创建 */
+  function useCoachDrafts(drafts: AgentCoachDraft[]) {
+    setCoachOpen(false);
+    if (drafts.length <= 1) {
+      if (drafts[0]) useCoachDraft(drafts[0]);
+      return;
+    }
+    void onCreateBatch(drafts.map((d) => ({
+      name: d.name,
+      role: d.role,
+      color: COLORS.includes(d.color) ? d.color : COLORS[0]!,
+      description: d.description,
+      skills: d.skills,
+      systemPrompt: d.systemPrompt,
+      modelId: null,
+      visibility: 'team' as const,
+      tools: { read: true, web: false, shell: false },
+      kbIds: [],
+      group: d.group ?? '',
+      tags: d.tags ?? [],
+    })));
   }
 
   function edit(a: Agent) {
@@ -83,6 +126,9 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
       visibility: a.visibility,
       tools: a.tools ?? {},
       kbIds: a.kbIds ?? [],
+      group: a.group ?? '',
+      tags: a.tags ?? [],
+      tagsText: (a.tags ?? []).join('，'),
     });
   }
 
@@ -101,6 +147,8 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
       visibility: form.visibility,
       tools: form.tools,
       kbIds: form.kbIds,
+      group: form.group?.trim() ?? '',
+      tags: form.tagsText.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
     };
     try {
       if (form.id) await onUpdate(form.id, payload);
@@ -126,8 +174,31 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
         </div>
       </div>
 
+      {(groups.length > 0 || allTags.length > 0) && (
+        <div className="agent-filters">
+          {groups.length > 0 && (
+            <div className="filter-group">
+              <span className="filter-label">分组</span>
+              <button className={`chip ${groupFilter === '' ? 'on' : ''}`} onClick={() => setGroupFilter('')}>全部</button>
+              {groups.map((g) => (
+                <button key={g} className={`chip ${groupFilter === g ? 'on' : ''}`} onClick={() => setGroupFilter(groupFilter === g ? '' : g)}>{g}</button>
+              ))}
+            </div>
+          )}
+          {allTags.length > 0 && (
+            <div className="filter-group">
+              <span className="filter-label">标签</span>
+              <button className={`chip ${tagFilter === '' ? 'on' : ''}`} onClick={() => setTagFilter('')}>全部</button>
+              {allTags.map((t) => (
+                <button key={t} className={`chip ${tagFilter === t ? 'on' : ''}`} onClick={() => setTagFilter(tagFilter === t ? '' : t)}>{t}</button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="agent-grid">
-        {agents.map((a) => (
+        {visibleAgents.map((a) => (
           <div key={a.id} className="card" onClick={() => edit(a)}>
             <div className="card-actions" onClick={(e) => e.stopPropagation()}>
               <button className="mini" title="编辑" onClick={() => edit(a)}>
@@ -149,11 +220,13 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
             </div>
             <p>{a.description || '还没有简介'}</p>
             <div className="kb-tags">
+              {(a.tags ?? []).slice(0, 4).map((t) => <span key={t} className="tag-tag">{t}</span>)}
               {a.skills.slice(0, 3).map((s) => <span key={s} className="skill-tag">{s}</span>)}
               {a.kbIds.length > 0 && <span className="kb-tag">{a.kbIds.length} 个知识库</span>}
             </div>
             <div className="card-foot">
               <span className="tag">{modelName(a.modelId)}</span>
+              {a.group && <span className="group-tag">{a.group}</span>}
               <span className="visibility">{a.ownerId && a.ownerId === userId ? '我创建的' : a.visibility === 'private' ? '仅自己' : '团队可见'}</span>
             </div>
           </div>
@@ -163,7 +236,7 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
       {coachOpen && (
         <AgentCoach
           onClose={() => setCoachOpen(false)}
-          onUse={useCoachDraft}
+          onUse={useCoachDrafts}
         />
       )}
 
@@ -184,6 +257,10 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
                 </div>
               </label>
               <label className="field"><span>一句话简介</span><input className="input" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="它会怎么参与讨论" /></label>
+              <div className="two">
+                <label className="field"><span>分组</span><input className="input" value={form.group ?? ''} onChange={(e) => setForm({ ...form, group: e.target.value })} placeholder="比如 电商团队（留空=未分组）" /></label>
+                <label className="field"><span>标签（逗号分隔）</span><input className="input" value={form.tagsText} onChange={(e) => setForm({ ...form, tagsText: e.target.value })} placeholder="前端，后端" /></label>
+              </div>
               <label className="field"><span>擅长（逗号分隔）</span><input className="input" value={form.skillsText} onChange={(e) => setForm({ ...form, skillsText: e.target.value })} placeholder="需求拆解，优先级排序" /></label>
               <label className="field"><span>人设 / system prompt</span><textarea className="input" rows={4} value={form.systemPrompt} onChange={(e) => setForm({ ...form, systemPrompt: e.target.value })} placeholder="你是老周，产品经理。只谈用户价值、场景和优先级。" /></label>
               <div className="two">

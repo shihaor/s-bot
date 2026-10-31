@@ -20,6 +20,16 @@ const configHome = join(runtimeDir, 'config');
 const opencodeDb = join(runtimeDir, 'opencode.db');
 const pidFile = join(runtimeDir, 'sidecar.json');
 
+/** 某个会话的工作区目录（群聊/单聊共享目录，智能体的文件都落在这里） */
+export function workspaceDirFor(conversationId: string): string {
+  return join(workspaceRoot, conversationId);
+}
+
+/** 某个智能体在会话里的独立记忆目录（每个智能体一个，互不干扰） */
+export function agentWorkspaceDir(conversationId: string, agentId: string): string {
+  return join(workspaceRoot, conversationId, agentId);
+}
+
 export interface OpencodeStatus {
   available: boolean;
   running: boolean;
@@ -749,7 +759,7 @@ export async function ensureSession(conversationId: string, agent: Agent): Promi
     return { sessionId: existing.sessionId, workspace: existing.workspace };
   }
 
-  const workspace = existing?.workspace ?? join(workspaceRoot, conversationId);
+  const workspace = existing?.workspace ?? agentWorkspaceDir(conversationId, agent.id);
   mkdirSync(workspace, { recursive: true });
   const session = await client.session.create({
     location: { directory: workspace },
@@ -774,7 +784,7 @@ export async function resetSession(conversationId: string, agentId: string): Pro
     conversationId,
     agentId,
     sessionId: `pending_${Date.now()}`,
-    workspace: existing?.workspace ?? join(workspaceRoot, conversationId),
+    workspace: existing?.workspace ?? agentWorkspaceDir(conversationId, agentId),
   });
 }
 

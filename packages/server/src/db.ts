@@ -163,6 +163,8 @@ ensureColumn('messages', 'author_name', 'author_name TEXT');
 ensureColumn('messages', 'author_color', 'author_color TEXT');
 ensureColumn('messages', 'author_initial', 'author_initial TEXT');
 ensureColumn('agents', 'owner_id', 'owner_id TEXT');
+ensureColumn('agents', 'agent_group', "agent_group TEXT NOT NULL DEFAULT ''");
+ensureColumn('agents', 'tags', "tags TEXT NOT NULL DEFAULT '[]'");
 ensureColumn('humans', 'simulated', 'simulated INTEGER NOT NULL DEFAULT 0');
 ensureColumn('conversations', 'workflow_done', 'workflow_done INTEGER NOT NULL DEFAULT 0');
 

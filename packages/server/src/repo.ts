@@ -16,6 +16,8 @@ const mapAgent = (r: any): Agent => ({
   tools: JSON.parse(r.tools || '{}'),
   skills: JSON.parse(r.skills || '[]'),
   kbIds: JSON.parse(r.kb_ids || '[]'),
+  group: r.agent_group ?? '',
+  tags: JSON.parse(r.tags || '[]'),
   createdAt: r.created_at,
 });
 
@@ -214,11 +216,13 @@ export function createAgent(input: {
   skills: string[];
   kbIds?: string[];
   ownerId?: string | null;
+  group?: string;
+  tags?: string[];
 }): Agent {
   const id = `ag_${Date.now().toString(36)}`;
   const createdAt = Date.now();
   db.prepare(
-    'INSERT INTO agents (id, name, role, color, initial, model_id, system_prompt, description, visibility, tools, skills, kb_ids, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO agents (id, name, role, color, initial, model_id, system_prompt, description, visibility, tools, skills, kb_ids, owner_id, agent_group, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).run(
     id,
     input.name,
@@ -233,6 +237,8 @@ export function createAgent(input: {
     JSON.stringify(input.skills),
     JSON.stringify(input.kbIds ?? []),
     input.ownerId ?? null,
+    input.group ?? '',
+    JSON.stringify(input.tags ?? []),
     createdAt,
   );
   return getAgent(id)!;
@@ -252,6 +258,8 @@ export function updateAgent(
     modelId?: string | null;
     skills?: string[];
     kbIds?: string[];
+    group?: string;
+    tags?: string[];
   },
 ): void {
   const map: Record<string, unknown> = {
@@ -266,6 +274,8 @@ export function updateAgent(
     model_id: patch.modelId,
     skills: patch.skills === undefined ? undefined : JSON.stringify(patch.skills),
     kb_ids: patch.kbIds === undefined ? undefined : JSON.stringify(patch.kbIds),
+    agent_group: patch.group,
+    tags: patch.tags === undefined ? undefined : JSON.stringify(patch.tags),
   };
   const fields: string[] = [];
   const values: Array<string | number | null> = [];

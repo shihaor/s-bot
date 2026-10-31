@@ -7,8 +7,8 @@ function textOf(a: Agent): string {
   return [a.name, a.role, a.description, ...(a.skills ?? [])].join(' ');
 }
 
-function pick(agents: Agent[], re: RegExp): Agent | null {
-  return agents.find((a) => re.test(textOf(a))) ?? null;
+function pick(agents: Agent[], re: RegExp, exclude?: Set<string>): Agent | null {
+  return agents.find((a) => !exclude?.has(a.id) && re.test(textOf(a))) ?? null;
 }
 
 let seq = 0;
@@ -36,8 +36,8 @@ export function generateWorkflow(options: GenerateOptions): GroupWorkflow {
   seq = 0;
   const agents = options.memberIds.map((id) => getAgent(id)).filter(Boolean) as Agent[];
   const arch = pick(agents, /架构|方案|技术选型|系统设计|数据仓库|数仓/i);
-  const reviewer = pick(agents, /评审|风险|验收|质量/i);
-  const diagrammer = pick(agents, /绘图|可视化|drawio|图表|架构图/i);
+  const reviewer = pick(agents, /评审|风险|验收|质量/i, new Set(arch ? [arch.id] : []));
+  const diagrammer = pick(agents, /绘图|可视化|drawio|图表|架构图/i, new Set([arch?.id, reviewer?.id].filter((x): x is string => !!x)));
   const others = agents.filter((a) => ![arch?.id, reviewer?.id, diagrammer?.id].includes(a.id));
 
   const nodes: WorkflowNode[] = [];
@@ -172,7 +172,16 @@ export function validateWorkflow(graph: GroupWorkflow): { ok: boolean; errors: s
     if (!ids.has(e.to)) errors.push(`连线终点不存在：${e.to}`);
   }
   for (const n of graph.nodes) {
-    if (n.type === 'agent' && !n.agentId) errors.push(`节点「${n.label}」没有绑定智能体`);
+    if ((n.type === 'agent' || n.type === 'accept') && !n.agentId && !(n.agentIds?.length)) {
+      errors.push(`节点「${n.label}」没有绑定智能体`);
+    }
+    if (n.type === 'parallel') {
+      const children = n.children ?? [];
+      if (!children.length) errors.push(`并行节点「${n.label}」没有子任务`);
+      for (const c of children) {
+        if (!c.agentId) errors.push(`并行节点「${n.label}」的子任务「${c.label}」没有绑定智能体`);
+      }
+    }
   }
 
   if (starts[0]) {

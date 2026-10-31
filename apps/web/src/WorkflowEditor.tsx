@@ -26,12 +26,19 @@ const WHEN_LABEL: Record<WorkflowWhen, string> = {
 };
 
 function WfNode({ data, selected }: { data: any; selected?: boolean }) {
+  const names: string[] = Array.isArray(data.agentNames) && data.agentNames.length
+    ? data.agentNames
+    : (data.agentName ? [data.agentName] : []);
   return (
     <div className={`wf-node ${data.kind} ${selected ? 'sel' : ''}`}>
       <Handle type="target" position={Position.Left} />
       <div className="wf-node-kicker">{data.kicker}</div>
       <div className="wf-node-label">{data.label}</div>
-      {data.agentName && <div className="wf-node-sub">{data.agentName}</div>}
+      {names.length > 0 && <div className="wf-node-sub">{names.join('、')}</div>}
+      {data.withHuman && <div className="wf-node-sub wf-node-human">+ 真人</div>}
+      {data.kind === 'parallel' && (
+        <div className="wf-node-sub">{(Array.isArray(data.children) ? data.children : []).length} 个子任务</div>
+      )}
       <Handle type="source" position={Position.Right} />
     </div>
   );
@@ -69,20 +76,28 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
   }
 
   useEffect(() => {
-    let rfNodes: Node[] = graph.nodes.map((n) => ({
-      id: n.id,
-      type: 'wf',
-      position: { x: n.x ?? 0, y: n.y ?? 0 },
-      data: {
-        label: n.label,
-        kind: n.type,
-        agentId: n.agentId ?? null,
-        agentName: n.agentId ? agents.find((a) => a.id === n.agentId)?.name ?? '未绑定' : '',
-        prompt: n.prompt ?? '',
-        producesVerdict: !!n.producesVerdict,
-        kicker: n.type === 'start' ? '开始' : n.type === 'end' ? '结束' : n.type === 'human' ? '真人确认' : '智能体',
-      },
-    }));
+    let rfNodes: Node[] = graph.nodes.map((n) => {
+      const ids = (n.agentIds && n.agentIds.length ? n.agentIds : (n.agentId ? [n.agentId] : [])) as string[];
+      const names = ids.map((id) => agents.find((a) => a.id === id)?.name ?? '未绑定');
+      return {
+        id: n.id,
+        type: 'wf',
+        position: { x: n.x ?? 0, y: n.y ?? 0 },
+        data: {
+          label: n.label,
+          kind: n.type,
+          agentId: ids[0] ?? null,
+          agentIds: ids,
+          agentName: names[0] ?? '',
+          agentNames: names,
+          withHuman: !!n.withHuman,
+          prompt: n.prompt ?? '',
+          producesVerdict: !!n.producesVerdict,
+          children: n.children ?? [],
+          kicker: n.type === 'start' ? '开始' : n.type === 'end' ? '结束' : n.type === 'human' ? '真人确认' : n.type === 'parallel' ? '并行' : n.type === 'accept' ? '验收' : '智能体',
+        },
+      };
+    });
     const rfEdges: Edge[] = graph.edges.map((e) => ({
       id: e.id,
       source: e.from,
@@ -142,6 +157,19 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
     setEdges((prev) => prev.map((e) => (e.id === selectedEdge ? { ...e, data: { ...e.data, ...patch } } : e)));
   }
 
+  /** 节点当前绑定的智能体 id 列表（兼容旧的单 agentId 字段） */
+  function nodeAgentIds(d: any): string[] {
+    return Array.isArray(d.agentIds) && d.agentIds.length ? d.agentIds : (d.agentId ? [d.agentId] : []);
+  }
+
+  function toggleNodeAgent(agentId: string) {
+    if (!current) return;
+    const cur = nodeAgentIds(current.data);
+    const next = cur.includes(agentId) ? cur.filter((x) => x !== agentId) : [...cur, agentId];
+    const names = next.map((id) => agents.find((a) => a.id === id)?.name ?? '未绑定');
+    patchNode({ agentIds: next, agentId: next[0] ?? null, agentName: names[0] ?? '', agentNames: names });
+  }
+
   function removeSelected() {
     if (selectedNode) {
       const n = nodes.find((x) => x.id === selectedNode);
@@ -158,12 +186,16 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
     }
   }
 
-  function addNode(kind: 'agent' | 'human' | 'end') {
+  function addNode(kind: 'agent' | 'human' | 'end' | 'accept' | 'parallel') {
     const id = `n_${Date.now().toString(36)}`;
     const agent = agents.find((a) => a.id === addAgentId);
     const data = kind === 'agent'
-      ? { label: '新的发言', kind, agentId: agent?.id ?? null, agentName: agent?.name ?? '未绑定', prompt: '', producesVerdict: false, kicker: '智能体' }
-      : { label: kind === 'human' ? '真人确认' : '结束', kind, prompt: '', kicker: kind === 'human' ? '真人确认' : '结束' };
+      ? { label: '新的发言', kind, agentId: agent?.id ?? null, agentIds: agent ? [agent.id] : [], agentName: agent?.name ?? '未绑定', agentNames: agent ? [agent.name] : [], withHuman: false, prompt: '', producesVerdict: false, kicker: '智能体' }
+      : kind === 'accept'
+        ? { label: '验收产物', kind, agentId: agent?.id ?? null, agentIds: agent ? [agent.id] : [], agentName: agent?.name ?? '未绑定', agentNames: agent ? [agent.name] : [], withHuman: false, prompt: '', producesVerdict: true, kicker: '验收' }
+        : kind === 'parallel'
+          ? { label: '并行实施', kind, children: [], kicker: '并行' }
+          : { label: kind === 'human' ? '真人确认' : '结束', kind, prompt: '', kicker: kind === 'human' ? '真人确认' : '结束' };
     setNodes((prev) => [...prev, {
       id,
       type: 'wf',
@@ -178,8 +210,10 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
     const ends = nodes.filter((n) => n.data.kind === 'end');
     if (starts.length !== 1) return setError('需要有且只有一个开始节点');
     if (!ends.length) return setError('至少需要一个结束节点');
-    const bad = nodes.find((n) => n.data.kind === 'agent' && !n.data.agentId);
+    const bad = nodes.find((n) => (n.data.kind === 'agent' || n.data.kind === 'accept') && !(Array.isArray(n.data.agentIds) && n.data.agentIds.length) && !n.data.agentId);
     if (bad) return setError(`节点「${String(bad.data.label ?? '')}」还没有绑定智能体`);
+    const badParallel = nodes.find((n) => n.data.kind === 'parallel' && (!Array.isArray(n.data.children) || !n.data.children.length));
+    if (badParallel) return setError(`并行节点「${String(badParallel.data.label ?? '')}」还没有子任务`);
     const ids = new Set(nodes.map((n) => n.id));
     const badEdge = edges.find((e) => !ids.has(e.source) || !ids.has(e.target));
     if (badEdge) return setError('有连线指向不存在的节点');
@@ -188,16 +222,22 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
       version: graph.version,
       enabled: true,
       maxLoops: graph.maxLoops || 3,
-      nodes: nodes.map<WorkflowNode>((n) => ({
-        id: n.id,
-        type: n.data.kind,
-        label: String(n.data.label ?? ''),
-        agentId: n.data.agentId ?? undefined,
-        prompt: n.data.prompt ?? undefined,
-        producesVerdict: !!n.data.producesVerdict,
-        x: Math.round(n.position.x),
-        y: Math.round(n.position.y),
-      })),
+      nodes: nodes.map<WorkflowNode>((n) => {
+        const ids = (Array.isArray(n.data.agentIds) && n.data.agentIds.length ? n.data.agentIds : (n.data.agentId ? [n.data.agentId] : [])) as string[];
+        return {
+          id: n.id,
+          type: n.data.kind,
+          label: String(n.data.label ?? ''),
+          agentId: ids[0] ?? undefined,
+          agentIds: ids.length > 1 ? ids : undefined,
+          withHuman: (n.data.kind === 'agent' || n.data.kind === 'accept') ? !!n.data.withHuman : undefined,
+          prompt: n.data.prompt ?? undefined,
+          producesVerdict: !!n.data.producesVerdict,
+          children: n.data.kind === 'parallel' ? (Array.isArray(n.data.children) ? n.data.children : []) : undefined,
+          x: Math.round(n.position.x),
+          y: Math.round(n.position.y),
+        };
+      }),
       edges: edges.map<WorkflowEdge>((e) => ({
         id: e.id,
         from: e.source,
@@ -232,6 +272,8 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
               {agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.role}</option>)}
             </select>
             <button className="btn" onClick={() => addNode('agent')}>+ 发言</button>
+            <button className="btn" onClick={() => addNode('parallel')}>+ 并行</button>
+            <button className="btn" onClick={() => addNode('accept')}>+ 验收</button>
             <button className="btn" onClick={() => addNode('human')}>+ 真人确认</button>
             <button className="btn" onClick={() => addNode('end')}>+ 结束</button>
             {(selectedNode || selectedEdge) && <button className="btn danger" onClick={removeSelected}>删除选中</button>}
@@ -266,18 +308,16 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
               </label>
               {current.data.kind === 'agent' && (
                 <>
-                  <label className="field"><span>智能体</span>
-                    <select
-                      className="input"
-                      value={current.data.agentId ?? ''}
-                      onChange={(e) => {
-                        const a = agents.find((x) => x.id === e.target.value);
-                        patchNode({ agentId: e.target.value || null, agentName: a?.name ?? '未绑定' });
-                      }}
-                    >
-                      <option value="">未绑定</option>
-                      {agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.role}</option>)}
-                    </select>
+                  <label className="field"><span>智能体（可多选，依次发言）</span>
+                    <div className="wf-agent-check-list">
+                      {agents.map((a) => (
+                        <label key={a.id} className="wf-agent-check">
+                          <input type="checkbox" checked={nodeAgentIds(current.data).includes(a.id)} onChange={() => toggleNodeAgent(a.id)} />
+                          <span>{a.name}</span>
+                          <span className="wf-agent-role">{a.role}</span>
+                        </label>
+                      ))}
+                    </div>
                   </label>
                   <label className="field"><span>这一步要做什么</span>
                     <textarea className="input" rows={4} value={String(current.data.prompt ?? '')} onChange={(e) => patchNode({ prompt: e.target.value })} placeholder="比如：先复述目标和约束，再给方案" />
@@ -286,6 +326,76 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
                     <input type="checkbox" checked={!!current.data.producesVerdict} onChange={(e) => patchNode({ producesVerdict: e.target.checked })} />
                     这一步会给出 pass / changes 结论（用于分支）
                   </label>
+                  <label className="wf-check">
+                    <input type="checkbox" checked={!!current.data.withHuman} onChange={(e) => patchNode({ withHuman: e.target.checked })} />
+                    这个节点还需要真人拍板（智能体说完后暂停，等群里真人确认）
+                  </label>
+                </>
+              )}
+              {current.data.kind === 'accept' && (
+                <>
+                  <label className="field"><span>验收智能体（可多选，依次验收）</span>
+                    <div className="wf-agent-check-list">
+                      {agents.map((a) => (
+                        <label key={a.id} className="wf-agent-check">
+                          <input type="checkbox" checked={nodeAgentIds(current.data).includes(a.id)} onChange={() => toggleNodeAgent(a.id)} />
+                          <span>{a.name}</span>
+                          <span className="wf-agent-role">{a.role}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </label>
+                  <label className="field"><span>验收要求</span>
+                    <textarea className="input" rows={3} value={String(current.data.prompt ?? '')} onChange={(e) => patchNode({ prompt: e.target.value })} placeholder="对照需求验收工作区里的产物" />
+                  </label>
+                  <label className="wf-check">
+                    <input type="checkbox" checked={!!current.data.withHuman} onChange={(e) => patchNode({ withHuman: e.target.checked })} />
+                    验收后还需要真人拍板
+                  </label>
+                  <p className="wf-hint">会读取前面智能体落地的工作区文件，对照需求给「通过 / 要改」。</p>
+                </>
+              )}
+              {current.data.kind === 'parallel' && (
+                <>
+                  <div className="wf-parallel-head">
+                    <span>子任务（同时执行）</span>
+                    <button className="btn mini-btn" onClick={() => {
+                      const children = Array.isArray(current.data.children) ? [...current.data.children] : [];
+                      const childAgent = agents.find((a) => a.id === addAgentId);
+                      children.push({ id: `c_${Date.now().toString(36)}`, agentId: childAgent?.id ?? '', label: childAgent?.name ?? '子任务', prompt: '' });
+                      patchNode({ children });
+                    }}>+ 添加</button>
+                  </div>
+                  {(Array.isArray(current.data.children) ? current.data.children : []).map((c: any, i: number) => (
+                    <div key={c.id} className="wf-child">
+                      <select
+                        className="input"
+                        value={c.agentId ?? ''}
+                        onChange={(e) => {
+                          const children = [...(current.data.children ?? [])];
+                          children[i] = { ...children[i], agentId: e.target.value };
+                          patchNode({ children });
+                        }}
+                      >
+                        <option value="">未绑定</option>
+                        {agents.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.role}</option>)}
+                      </select>
+                      <input className="input" value={c.label ?? ''} placeholder="任务名" onChange={(e) => {
+                        const children = [...(current.data.children ?? [])];
+                        children[i] = { ...children[i], label: e.target.value };
+                        patchNode({ children });
+                      }} />
+                      <textarea className="input" rows={2} value={c.prompt ?? ''} placeholder="这一步要做什么" onChange={(e) => {
+                        const children = [...(current.data.children ?? [])];
+                        children[i] = { ...children[i], prompt: e.target.value };
+                        patchNode({ children });
+                      }} />
+                      <button className="btn mini-btn danger" onClick={() => {
+                        const children = (current.data.children ?? []).filter((_: any, j: number) => j !== i);
+                        patchNode({ children });
+                      }}>删除</button>
+                    </div>
+                  ))}
                 </>
               )}
               {current.data.kind === 'human' && <p className="wf-hint">走到这里会暂停，等群里真人点「通过 / 要改」；120 秒不处理按超时走。</p>}

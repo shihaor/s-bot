@@ -93,11 +93,14 @@ export interface AgentCoachDraft {
   skills: string[];
   systemPrompt: string;
   color: string;
+  group?: string;
+  tags?: string[];
 }
 
 export async function coachAgent(messages: { role: 'user' | 'assistant'; content: string }[]): Promise<{
   reply: string;
   draft: AgentCoachDraft | null;
+  drafts: AgentCoachDraft[];
 }> {
   const res = await apiFetch('/api/agents/coach', {
     method: 'POST',
@@ -105,11 +108,11 @@ export async function coachAgent(messages: { role: 'user' | 'assistant'; content
     body: JSON.stringify({ messages }),
   });
   const body = (await res.json().catch(() => ({}))) as {
-    data?: { reply: string; draft: AgentCoachDraft | null };
+    data?: { reply: string; draft: AgentCoachDraft | null; drafts: AgentCoachDraft[] };
     error?: string;
   };
   if (!res.ok || !body.data) throw new Error(body.error ?? `智能体教练不可用（${res.status}）`);
-  return body.data;
+  return { reply: body.data.reply, draft: body.data.draft, drafts: body.data.drafts ?? (body.data.draft ? [body.data.draft] : []) };
 }
 
 export interface ExecutionPlan {
@@ -146,6 +149,8 @@ export async function createAgent(input: {
   visibility: 'team' | 'private';
   tools: { read?: boolean; web?: boolean; shell?: boolean };
   kbIds?: string[];
+  group?: string;
+  tags?: string[];
 }): Promise<Agent> {
   const res = await apiFetch('/api/agents', {
     method: 'POST',

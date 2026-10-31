@@ -8,14 +8,14 @@ interface Turn {
 
 interface Props {
   onClose: () => void;
-  onUse: (draft: AgentCoachDraft) => void;
+  onUse: (drafts: AgentCoachDraft[]) => void;
 }
 
 const STARTERS = [
   '帮我做一个偏技术的架构师，说话直接一点',
+  '帮我配一支电商系统团队：产品、前端、后端、测试',
   '我要一个严格的需求评审员，专门挑阻塞问题',
-  '做一个负责写发布说明的文案，风格简洁',
-  '我需要一个数据分析师，先问口径再下结论',
+  '做一个数据团队：数据分析、数仓、报表',
 ];
 
 function stripAgentBlock(text: string): string {
@@ -30,7 +30,7 @@ export default function AgentCoach({ onClose, onUse }: Props) {
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [draft, setDraft] = useState<AgentCoachDraft | null>(null);
+  const [drafts, setDrafts] = useState<AgentCoachDraft[]>([]);
   const bodyRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -43,7 +43,7 @@ export default function AgentCoach({ onClose, onUse }: Props) {
     try {
       const r = await coachAgent(next);
       setMessages([...next, { role: 'assistant', content: r.reply }]);
-      if (r.draft) setDraft(r.draft);
+      if (r.drafts.length) setDrafts(r.drafts);
     } catch (e) {
       setError(String((e as Error).message ?? e));
     } finally {
@@ -97,9 +97,9 @@ export default function AgentCoach({ onClose, onUse }: Props) {
               <div key={i} className="coach-msg assistant">
                 <div className="coach-avatar">S</div>
                 <div className="coach-bubble">
-                  {text || '草稿已经生成，见下方。'}
-                  {draft && i === messages.length - 1 && (
-                    <div className="coach-draft-tag">✓ 已生成智能体草案</div>
+                  {text || '草案已经生成，见下方。'}
+                  {drafts.length > 0 && i === messages.length - 1 && (
+                    <div className="coach-draft-tag">✓ 已生成 {drafts.length} 个智能体草案</div>
                   )}
                 </div>
               </div>
@@ -121,35 +121,32 @@ export default function AgentCoach({ onClose, onUse }: Props) {
           )}
         </div>
 
-        {draft && (
+        {drafts.length > 0 && (
           <div className="coach-draft">
             <div className="coach-draft-head">
-              <b>智能体草案</b>
-              <span>确认后会填入表单，还能继续改模型、知识库和权限</span>
+              <b>智能体草案（{drafts.length} 个）</b>
+              <span>确认后会{ drafts.length > 1 ? '批量创建，之后还能逐个改模型、知识库和权限' : '填入表单，还能继续改模型、知识库和权限' }</span>
             </div>
-            <div className="agent-draft-grid">
-              <div className="agent-draft-item">
-                <span>名字</span>
-                <b>{draft.name}</b>
+            {drafts.map((draft, di) => (
+              <div key={di} className="coach-draft-card">
+                <div className="coach-draft-card-head">
+                  <span className="av" style={{ background: `${draft.color}22`, border: `2px solid ${draft.color}`, color: draft.color }}>{draft.name.slice(0, 1)}</span>
+                  <div>
+                    <b>{draft.name}</b>
+                    <span>{draft.role}{draft.group ? ` · ${draft.group}` : ''}</span>
+                  </div>
+                </div>
+                <div className="agent-draft-tags">
+                  {(draft.tags ?? []).map((t) => <span key={t} className="tag-tag">{t}</span>)}
+                  {draft.skills.map((s) => <span key={s} className="skill-tag">{s}</span>)}
+                </div>
+                <div className="agent-draft-prompt">
+                  <p>{draft.description || draft.systemPrompt}</p>
+                </div>
               </div>
-              <div className="agent-draft-item">
-                <span>职位</span>
-                <b>{draft.role}</b>
-              </div>
-              <div className="agent-draft-item">
-                <span>一句话简介</span>
-                <b>{draft.description || '—'}</b>
-              </div>
-            </div>
-            <div className="agent-draft-tags">
-              {draft.skills.map((s) => <span key={s} className="skill-tag">{s}</span>)}
-            </div>
-            <div className="agent-draft-prompt">
-              <span>人设 / system prompt</span>
-              <p>{draft.systemPrompt}</p>
-            </div>
+            ))}
             <div className="coach-actions">
-              <button className="btn primary" onClick={() => onUse(draft)}>用这个设定</button>
+              <button className="btn primary" onClick={() => onUse(drafts)}>{drafts.length > 1 ? `创建这 ${drafts.length} 个智能体` : '用这个设定'}</button>
             </div>
           </div>
         )}
@@ -159,7 +156,7 @@ export default function AgentCoach({ onClose, onUse }: Props) {
             className="coach-input"
             value={input}
             disabled={busy}
-            placeholder={messages.length ? '继续补充，或者说“可以，生成草案”' : '例如：我要一个严格的架构师，关注技术风险和长期维护成本'}
+            placeholder={messages.length ? '继续补充，或者说“可以，生成草案”' : '例如：帮我配一支电商团队（产品、前端、后端、测试），或一个严格的架构师'}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -175,9 +172,9 @@ export default function AgentCoach({ onClose, onUse }: Props) {
         </div>
 
         <div className="coach-foot">
-          <span>教练只负责生成设定，不会自动创建；你确认后还能在表单里继续调整。</span>
+          <span>教练只负责生成设定，不会自动创建；你确认后还能逐个在表单里调整。</span>
           <div>
-            {messages.length > 0 && !draft && (
+            {messages.length > 0 && drafts.length === 0 && (
               <button className="btn" disabled={busy} onClick={() => void send('信息够了，请现在输出完整的智能体草案。')}>
                 生成草案
               </button>

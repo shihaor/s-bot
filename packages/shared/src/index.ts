@@ -16,6 +16,10 @@ export interface Agent {
   tools: { read?: boolean; web?: boolean; shell?: boolean };
   skills: string[];
   kbIds: string[];
+  /** 分组（用于智能体库组织，如「开发组」「产品组」） */
+  group?: string;
+  /** 标签（如「前端」「后端」「评审」） */
+  tags?: string[];
   createdAt: number;
 }
 
@@ -120,16 +124,29 @@ export interface ModelInfo {
 export type TaskStatus = 'todo' | 'awaiting' | 'done';
 
 /** 群聊的聊天逻辑图：节点 + 条件连线 */
-export type WorkflowNodeType = 'start' | 'agent' | 'human' | 'end';
+export type WorkflowNodeType = 'start' | 'agent' | 'human' | 'parallel' | 'accept' | 'end';
 export type WorkflowWhen = 'always' | 'pass' | 'changes' | 'timeout';
+
+export interface WorkflowParallelChild {
+  id: string;
+  agentId: string;
+  label: string;
+  prompt?: string;
+}
 
 export interface WorkflowNode {
   id: string;
   type: WorkflowNodeType;
   label: string;
   agentId?: string;
+  /** 同一节点里多个智能体（依次发言，任一评审说「要改」即整体要改） */
+  agentIds?: string[];
+  /** 勾选后该节点额外需要真人拍板 */
+  withHuman?: boolean;
   prompt?: string;
   producesVerdict?: boolean;
+  /** 并行节点下的子任务（各由一个智能体同时执行） */
+  children?: WorkflowParallelChild[];
   x?: number;
   y?: number;
 }

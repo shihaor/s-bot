@@ -1145,6 +1145,8 @@ export default function App() {
     visibility: 'team' | 'private';
     tools: { read?: boolean; web?: boolean; shell?: boolean };
     kbIds: string[];
+    group?: string;
+    tags?: string[];
   }) {
     try {
       const agent = await createAgentApi(input);
@@ -1155,6 +1157,20 @@ export default function App() {
       showToast(`已创建「${agent.name}」，已为你打开单聊`);
       setActiveId(conv.id);
       setView('chat');
+    } catch (e) {
+      showToast(String(e));
+    }
+  }
+
+  /** 批量创建：不逐个开单聊，只进智能体库 */
+  async function handleCreateAgents(inputs: Array<Parameters<typeof handleCreateAgent>[0]>) {
+    try {
+      const created: Agent[] = [];
+      for (const input of inputs) {
+        created.push(await createAgentApi(input));
+      }
+      setAgents((prev) => [...prev, ...created]);
+      showToast(`已批量创建 ${created.length} 个智能体`);
     } catch (e) {
       showToast(String(e));
     }
@@ -2154,6 +2170,7 @@ export default function App() {
               userId={user?.id}
               onOpen={openAgentDm}
               onCreate={handleCreateAgent}
+              onCreateBatch={handleCreateAgents}
               onUpdate={handleUpdateAgent}
               onDelete={handleDeleteAgent}
               onDuplicate={handleDuplicateAgent}
