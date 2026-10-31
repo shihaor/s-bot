@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   addEdge,
   Background,
@@ -53,9 +53,23 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [addAgentId, setAddAgentId] = useState(agents[0]?.id ?? '');
+  const rfRef = useRef<any>(null);
+
+  function layoutNodes(ns: any[], es: any[]): any[] {
+    const g = new dagre.graphlib.Graph();
+    g.setDefaultEdgeLabel(() => ({}));
+    g.setGraph({ rankdir: 'LR', nodesep: 46, ranksep: 110, marginx: 20, marginy: 20 });
+    ns.forEach((n) => g.setNode(n.id, { width: 190, height: 72 }));
+    es.forEach((e) => g.setEdge(e.source, e.target));
+    dagre.layout(g);
+    return ns.map((n) => {
+      const pos = g.node(n.id);
+      return pos ? { ...n, position: { x: pos.x - 95, y: pos.y - 36 } } : n;
+    });
+  }
 
   useEffect(() => {
-    const rfNodes: Node[] = graph.nodes.map((n) => ({
+    let rfNodes: Node[] = graph.nodes.map((n) => ({
       id: n.id,
       type: 'wf',
       position: { x: n.x ?? 0, y: n.y ?? 0 },
@@ -78,26 +92,26 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
       markerEnd: { type: MarkerType.ArrowClosed },
       data: { when: e.when ?? 'always', maxLoops: e.maxLoops ?? 0 },
     }));
+
+    // 对话式生成的图没有坐标，或都堆在 (0,0)，这里自动排布
+    const needLayout = rfNodes.some((n) => n.position.x === undefined || n.position.y === undefined)
+      || rfNodes.every((n) => (n.position.x === 0 && n.position.y === 0));
+    if (needLayout && rfNodes.length) rfNodes = layoutNodes(rfNodes, rfEdges);
+
     setNodes(rfNodes);
     setEdges(rfEdges);
     setSelectedNode(null);
     setSelectedEdge(null);
     setError('');
+
+    const timer = window.setTimeout(() => {
+      rfRef.current?.fitView?.({ padding: 0.18 });
+    }, 160);
+    return () => window.clearTimeout(timer);
   }, [graph]);
 
   function layout(ns = nodes, es = edges) {
-    const g = new dagre.graphlib.Graph();
-    g.setDefaultEdgeLabel(() => ({}));
-    g.setGraph({ rankdir: 'LR', nodesep: 46, ranksep: 110, marginx: 20, marginy: 20 });
-    ns.forEach((n) => g.setNode(n.id, { width: 190, height: 72 }));
-    es.forEach((e) => g.setEdge(e.source, e.target));
-    dagre.layout(g);
-    setNodes(
-      ns.map((n) => {
-        const pos = g.node(n.id);
-        return pos ? { ...n, position: { x: pos.x - 95, y: pos.y - 36 } } : n;
-      }),
-    );
+    setNodes(layoutNodes(ns, es));
   }
 
   const onConnect = useCallback(
@@ -232,7 +246,7 @@ export default function WorkflowEditor({ graph, agents, onClose, onSave }: Props
             onConnect={onConnect}
             onNodeClick={(_, n) => { setSelectedNode(n.id); setSelectedEdge(null); }}
             onEdgeClick={(_, e) => { setSelectedEdge(e.id); setSelectedNode(null); }}
-            onInit={(instance) => { setTimeout(() => instance.fitView({ padding: 0.18 }), 80); }}
+            onInit={(instance) => { rfRef.current = instance; setTimeout(() => instance.fitView({ padding: 0.18 }), 80); }}
             fitView
             proOptions={{ hideAttribution: true }}
           >
