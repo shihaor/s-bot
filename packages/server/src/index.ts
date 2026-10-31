@@ -1244,7 +1244,8 @@ app.get('/api/conversations/:id/workflow', (c) => {
 
 app.put('/api/conversations/:id/workflow', async (c) => {
   const id = c.req.param('id');
-  if (!getConversation(id)) return c.json({ error: 'conversation not found' }, 404);
+  const conv = getConversation(id);
+  if (!conv) return c.json({ error: 'conversation not found' }, 404);
   const b = await c.req.json().catch(() => ({} as any));
   const graph = b?.graph ?? b;
   if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
@@ -1252,6 +1253,9 @@ app.put('/api/conversations/:id/workflow', async (c) => {
   }
   const checked = validateWorkflow(graph);
   if (!checked.ok) return c.json({ error: checked.errors.join('；'), errors: checked.errors }, 400);
+  const memberIds = new Set(conv.members.filter((m) => m.memberType === 'agent').map((m) => m.memberId));
+  const outsider = graph.nodes.find((n: any) => n.type === 'agent' && n.agentId && !memberIds.has(n.agentId));
+  if (outsider) return c.json({ error: `节点「${outsider.label}」绑定的智能体不在这个群里` }, 400);
   return c.json({ data: saveWorkflow(id, graph) });
 });
 
@@ -1582,8 +1586,62 @@ app.post('/api/conversations/:id/import', async (c) => {
 
 /* ---------- 发言 ---------- */
 
-async function judgeTaskDone(task: { id: string; title: string; conversationId: string | null; createdAt: number }, model: ReturnType<typeof getDefaultModel>): Promise<boolean> {
-  if (!task.conversationId) return false;
+/** 群聊第一个议题：让模型判断它是不是一个任务，并绑定到群里 */
+async function inferTaskFromTopic(
+  conversationId: string,
+  text: string,
+  creatorName: string,
+): Promise<ReturnType<typeof createTask> | null> {
+  const trimmed = text.trim();
+  if (trimmed.length < 10) return null;
+  const fallback = () => {
+    const title = trimmed.split(/\r?\n/)[0]!.trim().slice(0, 40);
+    return title ? createTask({ title, description: '', conversationId, creatorName, priority: 'mid' }) : null;
+  };
+
+  const cfg = toConfig(getDefaultModel());
+  if (!cfg?.apiKey) {
+    const t = fallback();
+    if (t) broadcast('task', t, conversationId);
+    return t;
+  }
+
+  try {
+    const reply = await completeChat(
+      cfg,
+      [
+        {
+          role: 'system',
+          content:
+            '判断用户这句话是不是一个可以交给团队做的任务。如果是，总结成一句标题（不超过 20 字）和一句描述。只输出 JSON：{"is_task":true,"title":"...","description":"...","priority":"high|mid|low"}。寒暄、单纯提问、确认类不算任务，is_task 为 false，其余字段留空。',
+        },
+        { role: 'user', content: trimmed.slice(0, 1500) },
+      ],
+      { temperature: 0, maxTokens: 160 },
+    );
+    const raw = reply.match(/\{[\s\S]*\}/);
+    const json = raw ? JSON.parse(raw[0]) : null;
+    if (!json?.is_task) return null;
+    const title = String(json.title ?? '').trim().slice(0, 60);
+    if (!title) return null;
+    const priority = ['high', 'mid', 'low'].includes(json.priority) ? json.priority : 'mid';
+    const task = createTask({
+      title,
+      description: String(json.description ?? '').slice(0, 500),
+      conversationId,
+      creatorName,
+      priority,
+    });
+    broadcast('task', task, conversationId);
+    return task;
+  } catch {
+    const t = fallback();
+    if (t) broadcast('task', t, conversationId);
+    return t;
+  }
+}
+
+async function judgeTaskDone(task: { id: string; title: string; conversationId: string | null; createdAt: number }, model: ReturnType<typeof getDefaultModel>): Promise<boolean> {  if (!task.conversationId) return false;
   const recent = listMessages(task.conversationId, 50).filter(
     (m) => m.createdAt >= task.createdAt && m.authorType === 'agent',
   );
@@ -2829,6 +2887,20 @@ app.post('/api/conversations/:id/messages', async (c) => {
   }
 
   const targets = suppressRun ? [] : pickTargets(conv, text);
+  // 群聊还没有任务时，把第一个议题理解成任务并绑定
+  let autoTask: ReturnType<typeof createTask> | null = null;
+  if (conv.type === 'group' && !suppressRun && text.trim()) {
+    const existing = tasksForConversation(id).length;
+    const prior = listMessages(id, 100).filter((m) => m.authorType !== 'system').length;
+    if (!existing && prior <= 3) {
+      try {
+        autoTask = await inferTaskFromTopic(id, textWithAttachments(text, parts), author?.name ?? '我');
+      } catch {
+        autoTask = null;
+      }
+    }
+  }
+
   const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const promptText = textWithAttachments(text, parts);
   const defaultModel = getDefaultModel();
@@ -2870,6 +2942,13 @@ app.post('/api/conversations/:id/messages', async (c) => {
     });
 
     // 群聊如果配了聊天逻辑图，按图执行
+    if (autoTask) {
+      await stream.writeSSE({
+        event: 'task.bound',
+        data: JSON.stringify({ task: autoTask }),
+      });
+    }
+
     const workflow = conv.type === 'group' && !suppressRun ? getWorkflow(id) : null;
     if (workflow?.enabled) {
       await runWorkflow({

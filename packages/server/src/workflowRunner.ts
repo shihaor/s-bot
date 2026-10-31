@@ -166,6 +166,12 @@ export async function runWorkflow(input: WorkflowRunInput): Promise<{ produced: 
         current = next ? graph.nodes.find((n) => n.id === next.to) ?? null : fallbackNode(graph);
         continue;
       }
+      if (!conv.members.some((m) => m.memberType === 'agent' && m.memberId === agent.id)) {
+        // 已经不在群里了：跳过这个节点
+        const next = pickEdge(current, graph, 'pass', visits);
+        current = next ? graph.nodes.find((n) => n.id === next.to) ?? null : fallbackNode(graph);
+        continue;
+      }
 
       const messageId = `tmp_${agent.id}_${Date.now().toString(36)}`;
       const picked =

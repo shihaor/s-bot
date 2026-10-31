@@ -1570,6 +1570,9 @@ export default function App() {
             else setUnread((prev) => ({ ...prev, [runConv]: (prev[runConv] ?? 0) + 1 }));
             void refreshTasks();
             showToast('有任务等你确认');
+          } else if (e.type === 'task.bound') {
+            void refreshTasks();
+            showToast(`已把这次议题绑定为任务：${e.task.title}`);
           } else if (e.type === 'execution.plan') {
             if (activeIdRef.current === runConv) {
               setMessages((prev) => (prev.some((m) => m.id === e.message.id) ? prev : [...prev, e.message]));
@@ -2408,7 +2411,7 @@ export default function App() {
         <div className="overlay wf-editor-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setWorkflowEditor(null); }}>
           <WorkflowEditor
             graph={workflowEditor.graph}
-            agents={agents}
+            agents={agents.filter((a) => conversations.find((c) => c.id === workflowEditor.conversationId)?.members.some((m) => m.memberId === a.id))}
             onClose={() => setWorkflowEditor(null)}
             onSave={(g) => void saveWorkflowGraph(workflowEditor.conversationId, g)}
           />

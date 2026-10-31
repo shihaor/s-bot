@@ -378,7 +378,7 @@ export function NewGroupDialog({
         <div className="overlay wf-editor-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setEditorOpen(false); }}>
           <WorkflowEditor
             graph={graph}
-            agents={agents}
+            agents={agents.filter((a) => picked.has(a.id))}
             onClose={() => setEditorOpen(false)}
             onSave={(g) => { setGraph(g); setEditorOpen(false); }}
           />

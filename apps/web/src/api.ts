@@ -885,6 +885,7 @@ export type ChatEvent =
   | { type: 'workflow.approval'; runId: string; nodeId: string; title: string }
   | { type: 'workflow.done'; runId: string; interrupted: boolean }
   | { type: 'task.confirm'; message: Message; task: Task }
+  | { type: 'task.bound'; task: Task }
   | { type: 'execution.plan'; message: Message }
   | { type: 'run.end' };
 
