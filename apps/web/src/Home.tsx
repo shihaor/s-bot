@@ -95,7 +95,7 @@ export default function Home({
       <div className="home-inner">
         <div className="greet">
           <div>
-            <h1>{greet}，{userName ?? (localName && localName !== '我' ? localName : '朋友')}</h1>
+            <h1>{greet}，{userName ?? (localName && localName !== '未知' ? localName : '朋友')}</h1>
             <p>{userName ? '和同事、智能体一起把事做完。' : '还没登录。现在可以先用 AI 干活，登录后能拉同事一起。'}</p>
           </div>
           <div className="day">{date}</div>

@@ -463,6 +463,44 @@ export async function replyPermission(requestID: string, decision: 'once' | 'alw
   if (!res.ok) throw new Error('审批回复失败');
 }
 
+export interface FormField {
+  key: string;
+  title?: string;
+  description?: string;
+  type: string;
+  options?: Array<{ value: string; label: string; description?: string }>;
+  default?: string | number | boolean;
+  placeholder?: string;
+}
+
+/** 回答 opencode 弹出的提问表单 */
+export async function replyForm(formID: string, answer: Record<string, unknown>): Promise<void> {
+  const res = await apiFetch(`/api/forms/${formID}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ answer }),
+  });
+  if (!res.ok) throw new Error('表单回复失败');
+}
+
+/** 预览文件内容 */
+export async function previewFile(path: string): Promise<{ name: string; path: string; size: number; content?: string; truncated?: boolean; binary?: boolean }> {
+  const r = await getJson<{ data: { name: string; path: string; size: number; content?: string; truncated?: boolean; binary?: boolean } }>(
+    `/api/files/preview?path=${encodeURIComponent(path)}`,
+  );
+  return r.data;
+}
+
+/** 在文件管理器里打开文件所在目录 */
+export async function revealFile(path: string): Promise<void> {
+  const res = await apiFetch('/api/files/reveal', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!res.ok) throw new Error('打开目录失败');
+}
+
 export interface OpencodeStatusData {
   available: boolean;
   running: boolean;
@@ -727,6 +765,12 @@ export async function openLanDm(peer: {
   return r.data;
 }
 
+/** 使用手册内容 */
+export async function fetchManual(): Promise<{ title: string; content: string }> {
+  const r = await getJson<{ data: { title: string; content: string } }>('/api/manual');
+  return r.data;
+}
+
 export interface Colleague {
   source: 'local' | 'mattermost';
   id: string;
@@ -875,6 +919,21 @@ export async function fetchImportableModels(): Promise<ImportableModel[]> {
   return r.data;
 }
 
+export interface OpencodeModel {
+  providerID: string;
+  modelID: string;
+  name: string;
+  free: boolean;
+  limit: number;
+  status: string;
+}
+
+/** opencode 内置模型目录（含免费模型，如 zen） */
+export async function fetchOpencodeModels(): Promise<OpencodeModel[]> {
+  const r = await getJson<{ data: OpencodeModel[] }>('/api/opencode/models');
+  return r.data;
+}
+
 export interface KbDataset {
   id: string;
   name: string;
@@ -960,6 +1019,7 @@ export type ChatEvent =
   | { type: 'retrieval.start'; agentId: string }
   | { type: 'retrieval.done'; agentId: string; count: number }
   | { type: 'permission.ask'; agentId: string; messageId: string; requestID: string; action: string; resources: string[] }
+  | { type: 'form.ask'; agentId: string; messageId: string; formID: string; title: string; fields: FormField[] }
   | { type: 'workflow.start'; runId: string; conversationId: string; graph: GroupWorkflow }
   | { type: 'workflow.node'; runId: string; node: { id: string; type: string; label: string; agentId: string | null } }
   | { type: 'workflow.node.end'; runId: string; nodeId: string; status: string; verdict: string | null }

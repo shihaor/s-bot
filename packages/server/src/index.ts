@@ -1,6 +1,7 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { createConnection } from 'node:net';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { Hono } from 'hono';
@@ -67,10 +68,12 @@ import {
   getStatus as getOpencodeStatus,
   importableModels,
   installFromZip,
+  listOpencodeModels,
   listSkills,
   openDataDir,
   resetBinaryCache,
   resetSkillInventory,
+  resolveForm,
   resolvePermission,
   runAgent,
   scanBinaryCandidates,
@@ -88,6 +91,7 @@ import {
 import { broadcast, bus } from './events.js';
 import { generateWorkflow, validateWorkflow } from './workflow.js';
 import { resolveWorkflowApproval, runWorkflow } from './workflowRunner.js';
+import { S_BOT_MANUAL } from './manual.js';
 
 const app = new Hono();
 app.use('*', cors());
@@ -101,13 +105,16 @@ const toConfig = (m: ReturnType<typeof getModel>): ModelConfig | null =>
 
 app.get('/api/health', (c) => c.json({ ok: true }));
 
+/** 使用手册：给界面上的「使用手册」查看 */
+app.get('/api/manual', (c) => c.json({ data: { title: 'S-BOT 使用手册', content: S_BOT_MANUAL } }));
+
 app.get('/api/runtime', (c) => {
   const d = getDefaultModel();
   const ready = !!(d && d.baseUrl && d.apiKey);
   const oc = getOpencodeStatus();
   const mode = process.env.SBOT_RUNTIME?.toLowerCase();
   if (ready && oc.available && mode !== 'llm' && mode !== 'mock') {
-    return c.json({ mode: 'opencode', label: `opencode · ${d!.name}` });
+    return c.json({ mode: 'opencode', label: d!.name });
   }
   return c.json({ mode: ready ? 'llm' : 'unset', label: ready ? d!.name : '未配置模型' });
 });
@@ -130,7 +137,7 @@ app.post('/api/opencode/detect', async (c) => {
       ok: candidates.length > 0,
       candidates,
       status: getOpencodeStatus(),
-      error: candidates.length ? undefined : path ? '这个位置没找到可用的 opencode' : '常见位置都没找到 opencode',
+      error: candidates.length ? undefined : path ? '这个位置没找到可用的执行引擎' : '常见位置都没找到执行引擎',
     },
   });
 });
@@ -139,9 +146,19 @@ app.post('/api/opencode/open-data', (c) => c.json(openDataDir()));
 
 app.get('/api/opencode/importable', (c) => c.json({ data: importableModels() }));
 
+/** opencode 内置模型目录（含免费模型，如 zen）：用于「模型服务」展示和导入 */
+app.get('/api/opencode/models', async (c) => {
+  try {
+    const list = await listOpencodeModels();
+    return c.json({ data: list });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 500);
+  }
+});
+
 /* ---------- 技能 ---------- */
 
-const SKILL_COACH_PROMPT = `你是 S-BOT 的技能教练，负责帮用户把一段可重复的操作流程整理成 opencode 技能（SKILL.md）。
+const SKILL_COACH_PROMPT = `你是 S-BOT 的技能教练，负责帮用户把一段可重复的操作流程整理成技能（SKILL.md）。
 
 工作方式：
 1. 用中文多轮对话。先弄清目标、触发场景、前置条件、具体步骤、验证成功的方法、失败处理。
@@ -301,7 +318,7 @@ app.get('/api/skills', async (c) => {
   const ok = await ensureOpencode(model ?? null).catch(() => false);
   if (!ok) {
     const status = getOpencodeStatus();
-    return c.json({ data: [], error: status.error ?? 'opencode 不可用', status }, 503);
+    return c.json({ data: [], error: status.error ?? '执行引擎不可用', status }, 503);
   }
   try {
     const data = await listSkills();
@@ -316,6 +333,14 @@ app.post('/api/permissions/:requestID', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   const decision = b?.decision === 'once' || b?.decision === 'always' || b?.decision === 'reject' ? b.decision : 'reject';
   const ok = resolvePermission(c.req.param('requestID'), decision);
+  return c.json({ ok });
+});
+
+/** 前端回答 opencode 弹出的提问表单 */
+app.post('/api/forms/:formID', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const answer = b?.answer && typeof b.answer === 'object' ? b.answer : {};
+  const ok = resolveForm(c.req.param('formID'), answer);
   return c.json({ ok });
 });
 
@@ -511,6 +536,46 @@ app.post('/api/p2p/receive-dm', async (c) => {
   return c.json({ ok: true });
 });
 
+/* ---------- P2P 群消息同步（局域网直连） ---------- */
+
+/** 收到远端真人在群里的发言：落到本地对应群，推给界面 */
+app.post('/api/p2p/receive-message', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const groupId = String(b?.groupId ?? '');
+  const token = String(b?.token ?? '');
+  const from = b?.from as { id?: string; name?: string } | undefined;
+  const msg = b?.message as {
+    authorType?: string; authorId?: string | null; authorName?: string | null; authorColor?: string | null; authorInitial?: string | null;
+    role?: string; text?: string; parts?: unknown[]; createdAt?: number;
+  } | undefined;
+  if (!groupId || !from?.id || !msg?.text) return c.json({ ok: false, error: '消息格式不对' }, 400);
+
+  const conv = findConversationByP2PGroup(groupId);
+  if (!conv) return c.json({ ok: false, error: '群不存在' }, 404);
+  const state = getP2PState(conv.id);
+  if (!state || state.token !== token) return c.json({ ok: false, error: '群 token 不匹配' }, 403);
+
+  // 把发送方的本地成员 id 映射到本地的影子成员（p_<peerId>_<memberId>）
+  const peerId = String(from.id);
+  const authorLocalId = String(msg.authorId ?? '');
+  const shadowId = authorLocalId ? `p_${peerId}_${authorLocalId}` : null;
+  const shadow = shadowId ? (getAgent(shadowId) ?? getHuman(shadowId)) : null;
+
+  addMessage({
+    conversationId: conv.id,
+    authorType: msg.authorType === 'agent' ? 'agent' : msg.authorType === 'human' ? 'human' : 'user',
+    authorId: shadowId,
+    authorName: shadow?.name ?? msg.authorName ?? String(from.name ?? '内网同事'),
+    authorColor: shadow?.color ?? msg.authorColor ?? null,
+    authorInitial: shadow?.initial ?? msg.authorInitial ?? null,
+    role: msg.role === 'assistant' ? 'assistant' : 'user',
+    text: String(msg.text),
+    parts: Array.isArray(msg.parts) ? msg.parts : [],
+    createdAt: Number(msg.createdAt ?? Date.now()),
+  });
+  return c.json({ ok: true });
+});
+
 /* ---------- P2P 邀请 / 接受（局域网直连） ---------- */
 
 interface P2PMemberCard {
@@ -560,6 +625,38 @@ async function p2pPost(host: string, port: number, path: string, body: unknown, 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`对方 P2P 请求失败 ${res.status}${text ? `：${text.slice(0, 160)}` : ''}`);
+  }
+}
+
+/** 把群里的一条消息转发给所有远端真人（失败忽略，不阻塞主流程） */
+async function forwardGroupMessage(
+  conv: Conversation,
+  msg: { authorType: string; authorId: string | null; authorName?: string | null; authorColor?: string | null; authorInitial?: string | null; role: string; text: string; parts?: unknown[]; createdAt: number },
+): Promise<void> {
+  const state = getP2PState(conv.id);
+  if (!state || !state.peers.length) return;
+  const own = getLanIdentity();
+  const payload = {
+    groupId: state.groupId,
+    token: state.token,
+    from: { id: own.id, name: own.name },
+    message: {
+      authorType: msg.authorType,
+      authorId: msg.authorId,
+      authorName: msg.authorName ?? null,
+      authorColor: msg.authorColor ?? null,
+      authorInitial: msg.authorInitial ?? null,
+      role: msg.role,
+      text: msg.text,
+      parts: msg.parts ?? [],
+      createdAt: msg.createdAt,
+    },
+  };
+  for (const peer of state.peers) {
+    if (!peer.host || !peer.port) continue;
+    try {
+      await p2pPost(peer.host, peer.port, '/api/p2p/receive-message', payload, state.token);
+    } catch { /* 对方暂时不可达 */ }
   }
 }
 
@@ -1183,7 +1280,7 @@ app.post('/api/tasks', async (c) => {
     title,
     description: String(b?.description ?? ''),
     conversationId: b?.conversationId ? String(b.conversationId) : null,
-    creatorName: String(b?.creatorName ?? '我'),
+    creatorName: String(b?.creatorName ?? '未知'),
     priority: ['high', 'mid', 'low'].includes(b?.priority) ? b.priority : 'mid',
   });
   broadcast('task', task, task.conversationId ?? undefined);
@@ -1581,7 +1678,7 @@ function buildGreeting(conv: Conversation): string {
     if (m && !a) {
       return `这是你和${m.name}${m.role ? `（${m.role}）` : ''}的私聊。直接说事就行。`;
     }
-    const name = a?.name ?? m?.name ?? '我';
+    const name = a?.name ?? m?.name ?? '未知';
     const role = a?.role ?? m?.role ?? '';
     const skills = (a?.skills ?? []).slice(0, 3);
     const desc = (a?.description ?? '').trim().replace(/[。.]$/, '');
@@ -1691,7 +1788,7 @@ app.get('/api/conversations/:id/export', (c) => {
       const person = conv.members.find((x) => x.memberId === m.authorId);
       return {
         authorType: m.authorType,
-        authorName: person?.name ?? m.authorName ?? (m.authorType === 'user' ? '我' : null),
+        authorName: person?.name ?? m.authorName ?? (m.authorType === 'user' ? '未知' : null),
         authorColor: person?.color ?? m.authorColor ?? null,
         authorInitial: person?.initial ?? m.authorInitial ?? null,
         role: m.role,
@@ -1785,7 +1882,7 @@ app.post('/api/conversations/:id/import', async (c) => {
       title,
       description: String(t?.description ?? ''),
       conversationId: id,
-      creatorName: String(t?.creatorName ?? '我'),
+      creatorName: String(t?.creatorName ?? '未知'),
       priority: ['high', 'mid', 'low'].includes(t?.priority) ? t.priority : 'mid',
     });
     // 旧群里已完成的保持完成；未完成 / 待确认的重新变成待办
@@ -2871,12 +2968,12 @@ async function runExecution(plan: ExecutionPlanPart, allowTools: boolean): Promi
         const file = findGeneratedHtml(session.workspace, startedAt);
         if (file) html = readFileSync(file, 'utf8');
         changedFiles = collectChangedFiles(session.workspace, startedAt);
-        if (!html) modeNote = 'opencode 没有找到新生成的 HTML，已回退到模型产物。';
+        if (!html) modeNote = '执行引擎没有找到新生成的 HTML，已回退到模型产物。';
       } catch {
-        modeNote = 'opencode 执行失败，已回退到模型产物。';
+        modeNote = '执行引擎执行失败，已回退到模型产物。';
       }
     } else {
-      modeNote = 'opencode 不可用，已改用模型产物。';
+      modeNote = '执行引擎不可用，已改用模型产物。';
     }
   }
 
@@ -2887,7 +2984,7 @@ async function runExecution(plan: ExecutionPlanPart, allowTools: boolean): Promi
         authorType: 'agent',
         authorId: agent.id,
         role: 'assistant',
-        text: '没有可用的模型，无法生成实现产物。请先在设置里配置模型，或开启 opencode。',
+        text: '没有可用的模型，无法生成实现产物。请先在设置里配置模型，或开启执行引擎。',
       });
       executionRuns.set(plan.planId, 'failed');
       return;
@@ -3054,6 +3151,54 @@ app.get('/api/artifacts/:convId/:file', (c) => {
   return c.html(readFileSync(path, 'utf8'));
 });
 
+/** 预览智能体操作过的文件内容（文本文件） */
+app.get('/api/files/preview', (c) => {
+  const path = String(c.req.query('path') ?? '').trim();
+  if (!path) return c.json({ error: 'path required' }, 400);
+  try {
+    const full = resolve(path);
+    if (!existsSync(full) || !statSync(full).isFile()) return c.json({ error: '文件不存在' }, 404);
+    const stat = statSync(full);
+    if (stat.size > 512 * 1024) return c.json({ data: { name: basename(full), path: full, size: stat.size, binary: true } });
+    const raw = readFileSync(full);
+    const text = raw.toString('utf8');
+    if (text.includes('\uFFFD')) return c.json({ data: { name: basename(full), path: full, size: stat.size, binary: true } });
+    const clipped = text.slice(0, 50_000);
+    return c.json({ data: { name: basename(full), path: full, size: stat.size, content: clipped, truncated: text.length > clipped.length } });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 500);
+  }
+});
+
+/** 在文件管理器里打开文件所在目录（文件则定位到该文件） */
+app.post('/api/files/reveal', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const path = String(b?.path ?? '').trim();
+  if (!path) return c.json({ ok: false, error: 'path required' }, 400);
+  try {
+    const isWin = process.platform === 'win32';
+    const full = resolve(path);
+    if (existsSync(full) && statSync(full).isFile()) {
+      if (isWin) {
+        spawn('explorer.exe', ['/select,', full], { detached: true, stdio: 'ignore' }).unref();
+        return c.json({ ok: true });
+      }
+      const cmd = process.platform === 'darwin' ? 'open' : 'xdg-open';
+      spawn(cmd, [dirname(full)], { detached: true, stdio: 'ignore' }).unref();
+      return c.json({ ok: true });
+    }
+    if (isWin) {
+      spawn('explorer.exe', [full], { detached: true, stdio: 'ignore' }).unref();
+    } else {
+      const cmd = process.platform === 'darwin' ? 'open' : 'xdg-open';
+      spawn(cmd, [full], { detached: true, stdio: 'ignore' }).unref();
+    }
+    return c.json({ ok: true });
+  } catch (e) {
+    return c.json({ ok: false, error: String((e as Error).message ?? e) }, 500);
+  }
+});
+
 app.post('/api/conversations/:id/messages', async (c) => {
   const id = c.req.param('id');
   const conv = getConversation(id);
@@ -3117,6 +3262,9 @@ app.post('/api/conversations/:id/messages', async (c) => {
     parts,
   });
 
+  // P2P 群：把用户发言转发给远端真人
+  void forwardGroupMessage(conv, userMessage);
+
   // 真人回复正在软等待的那条发言：让原来的 run 继续，避免再起一轮重复回复
   const pendingWait = findHumanWaitForConversation(id);
   const isWaitedHuman = !!pendingWait && !!uid && pendingWait.humanId === uid;
@@ -3144,7 +3292,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
     const prior = listMessages(id, 100).filter((m) => m.authorType !== 'system').length;
     if (!existing && prior <= 3) {
       try {
-        autoTask = await inferTaskFromTopic(id, textWithAttachments(text, parts), author?.name ?? '我');
+        autoTask = await inferTaskFromTopic(id, textWithAttachments(text, parts), author?.name ?? '未知');
       } catch {
         autoTask = null;
       }
@@ -3159,8 +3307,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
   const wantsOpencode =
     runtimeMode !== 'llm' &&
     runtimeMode !== 'mock' &&
-    !!defaultModel?.apiKey &&
-    !!defaultModel?.baseUrl;
+    !!defaultModel?.baseUrl &&
+    (defaultModel.baseUrl === 'opencode://' || !!defaultModel.apiKey);
 
   return streamSSE(c, async (stream) => {
     let aborted = false;
@@ -3191,6 +3339,13 @@ app.post('/api/conversations/:id/messages', async (c) => {
       }),
     });
 
+    // P2P 群且本机不是群主：只把发言转发给群主，由群主跑讨论，避免双端重复回复
+    const p2pGroup = conv.type === 'group' ? getP2PState(id) : null;
+    if (p2pGroup && p2pGroup.hostId && p2pGroup.hostId !== getLanIdentity().id) {
+      await stream.writeSSE({ event: 'run.end', data: '{}' });
+      return;
+    }
+
     // 群聊如果配了聊天逻辑图，按图执行
     if (autoTask) {
       await stream.writeSSE({
@@ -3202,7 +3357,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
     // 流程已跑完（已出结论）的群，后续消息走自由对话，不再按聊天逻辑重跑
     const workflow = conv.type === 'group' && !suppressRun && !conv.workflowDone ? getWorkflow(id) : null;
     if (workflow?.enabled) {
-      await runWorkflow({
+      const wfResult = await runWorkflow({
         conv,
         graph: workflow,
         text: promptText,
@@ -3216,6 +3371,11 @@ app.post('/api/conversations/:id/messages', async (c) => {
         stream,
       });
 
+      // P2P 群：把流程里产生的智能体发言转发给远端真人
+      for (const wmsg of wfResult.produced) {
+        void forwardGroupMessage(conv, wmsg);
+      }
+
       if (!aborted) {
         const pendingTask = tasksForConversation(id, 'todo')[0];
         if (pendingTask) {
@@ -3228,7 +3388,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
                 authorType: 'agent',
                 authorId,
                 role: 'assistant',
-                text: `任务「${pendingTask.title}」看起来已经完成，@${pendingTask.creatorName === '我' ? '你' : pendingTask.creatorName} 确认一下？`,
+                text: `任务「${pendingTask.title}」看起来已经完成，@${pendingTask.creatorName === '我' || pendingTask.creatorName === '未知' ? '你' : pendingTask.creatorName} 确认一下？`,
                 parts: [{ type: 'task-confirm', taskId: pendingTask.id, title: pendingTask.title }],
               });
               await stream.writeSSE({
@@ -3247,15 +3407,23 @@ app.post('/api/conversations/:id/messages', async (c) => {
     }
 
     const produced: Array<ReturnType<typeof addMessage>> = [];
-    const maxRounds = conv.maxTurns === 0 ? 2 : 1;
+    // 单聊只有一个智能体，一轮即可；群聊在「不限制」模式下多轮讨论
+    const maxRounds = conv.type === 'dm' ? 1 : (conv.maxTurns === 0 ? 2 : 1);
     let stopDiscussion = false;
+    // @ 了智能体时：第一轮只让被 @ 的先说，后续轮次让其他智能体也参与进来
+    const hasMention = /@([^\s@，,。.！!？?]+)/.test(text);
+    const allAgentIds = conv.members.filter((m) => m.memberType === 'agent' && !m.muted).map((m) => m.memberId);
 
     for (let round = 0; round < maxRounds && !stopDiscussion; round++) {
       const roundText = round === 0
         ? promptText
         : `${promptText}\n\n这是第 ${round + 1} 轮讨论。请直接回应其他智能体的观点：同意什么、反对什么、补充依据，不要重复上一轮。`;
+      // 有 @ 且已命中（targets 是子集）时，第二轮换成「其他智能体」参与讨论
+      const roundTargets = round === 0 || !hasMention || !targets.length || targets.length >= allAgentIds.length
+        ? targets
+        : allAgentIds.filter((id) => !targets.includes(id));
 
-      for (const agentId of targets) {
+      for (const agentId of roundTargets) {
         if (aborted || stopDiscussion) break;
         const agent = getAgent(agentId);
         if (!agent) continue;
@@ -3283,14 +3451,14 @@ app.post('/api/conversations/:id/messages', async (c) => {
           role: agent.role,
           color: agent.color,
           initial: agent.initial,
-          model: opencodeOn ? `opencode · ${picked?.name ?? ''}` : (picked?.name ?? 'mock'),
+          model: opencodeOn ? (picked?.name ?? '执行引擎') : (picked?.name ?? 'mock'),
         }),
       });
 
       let full = '';
       let failed = false;
       let usedOpencode = false;
-      const tools: Array<{ type: 'tool'; toolId: string; name: string; detail: string; status: string }> = [];
+      const tools: Array<{ type: 'tool'; toolId: string; name: string; detail: string; file?: string | null; status: string }> = [];
 
       if (opencodeOn) {
         try {
@@ -3308,8 +3476,9 @@ app.post('/api/conversations/:id/messages', async (c) => {
               if (existing) {
                 if (ev.name) existing.name = ev.name;
                 if (ev.detail) existing.detail = ev.detail;
+                if (ev.file) existing.file = ev.file;
               } else {
-                tools.push({ type: 'tool', toolId: ev.id, name: ev.name, detail: ev.detail ?? '', status: 'running' });
+                tools.push({ type: 'tool', toolId: ev.id, name: ev.name, detail: ev.detail ?? '', file: ev.file ?? null, status: 'running' });
               }
               await stream.writeSSE({
                 event: 'tool',
@@ -3318,6 +3487,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
                   toolId: ev.id,
                   name: ev.name,
                   detail: ev.detail ?? '',
+                  file: ev.file ?? null,
                   status: 'running',
                 }),
               });
@@ -3337,6 +3507,17 @@ app.post('/api/conversations/:id/messages', async (c) => {
                   requestID: ev.requestID,
                   action: ev.action,
                   resources: ev.resources,
+                }),
+              });
+            } else if (ev.type === 'form') {
+              await stream.writeSSE({
+                event: 'form.ask',
+                data: JSON.stringify({
+                  agentId,
+                  messageId,
+                  formID: ev.formID,
+                  title: ev.title,
+                  fields: ev.fields,
                 }),
               });
             } else if (ev.type === 'error') {
@@ -3380,7 +3561,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
               references: citations.length
                 ? citations.map((c) => `[${c.n}] ${c.doc}：${c.text}`).join('\n')
                 : undefined,
-              humanNames: targets.indexOf(agentId) === 0
+              humanNames: roundTargets.indexOf(agentId) === 0
                 ? conv.members
                     .filter((m) => m.memberType === 'human')
                     .map((m) => ({ name: m.name, simulated: !!getHuman(m.memberId)?.simulated }))
@@ -3429,6 +3610,9 @@ app.post('/api/conversations/:id/messages', async (c) => {
       produced.push(saved);
       if (!failed) history.push({ role: 'assistant', content: full });
 
+      // P2P 群：把智能体发言转发给远端真人
+      void forwardGroupMessage(conv, saved);
+
       await stream.writeSSE({
         event: 'message.end',
         data: JSON.stringify({
@@ -3444,7 +3628,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
 
       // 智能体 @ 到真人：暂停后面的智能体，等真人回复 / 继续 / 跳过
       if (!aborted) {
-        const decision = await maybeWaitForHuman(runId, conv, full, targets.length - targets.indexOf(agentId) - 1);
+        const decision = await maybeWaitForHuman(runId, conv, full, roundTargets.length - roundTargets.indexOf(agentId) - 1);
         if (decision === 'skip') {
           stopDiscussion = true;
           break;
@@ -3486,7 +3670,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
               authorType: 'agent',
               authorId,
               role: 'assistant',
-              text: `任务「${pendingTask.title}」看起来已经完成，@${pendingTask.creatorName === '我' ? '你' : pendingTask.creatorName} 确认一下？`,
+              text: `任务「${pendingTask.title}」看起来已经完成，@${pendingTask.creatorName === '我' || pendingTask.creatorName === '未知' ? '你' : pendingTask.creatorName} 确认一下？`,
               parts: [{ type: 'task-confirm', taskId: pendingTask.id, title: pendingTask.title }],
             });
             await stream.writeSSE({

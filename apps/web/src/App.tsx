@@ -39,6 +39,9 @@ import {
   removeMember as removeMemberApi,
   replyHumanWait,
   replyPermission,
+  replyForm,
+  previewFile,
+  revealFile,
   resumeHumanWait,
   saveGroupWorkflow,
   restartGroupWorkflow,
@@ -51,6 +54,7 @@ import {
   updateTask as updateTaskApi,
   type ExecutionPlan,
   type KbDataset,
+  type FormField,
   type HumanInfo,
   type LanPeer,
 } from './api';
@@ -62,10 +66,12 @@ import SkillsPage from './SkillsPage';
 import SettingsPage from './SettingsPage';
 import WorkflowEditor from './WorkflowEditor';
 import WorkflowCoach from './WorkflowCoach';
+import ManualDialog from './ManualDialog';
 import { ColleagueSearchDialog, MattermostInviteDialog } from './Colleagues';
 import { animateDrawer, animateIntro, animateOverlay, animatePanel, animateToast } from './anim';
 import {
   ContextMenu,
+  FormDialog,
   GroupDrawer,
   LoginDialog,
   type LocalProfile,
@@ -149,16 +155,80 @@ function toolLabel(name: string, detail?: string) {
   return detail ? `${label} ${detail}` : label;
 }
 
-function ToolRow({ tools }: { tools: Array<{ toolId: string; name: string; detail?: string; status: 'running' | 'ok' | 'failed' }> }) {
+type ToolChip = { toolId: string; name: string; detail?: string; file?: string | null; status: 'running' | 'ok' | 'failed' };
+
+function FileToolChip({ tool }: { tool: ToolChip }) {
+  const [preview, setPreview] = useState<{ name: string; path: string; content?: string; truncated?: boolean; binary?: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const file = tool.file!;
+  const fileName = file.replace(/\\/g, '/').split('/').pop() || file;
+
+  async function doPreview() {
+    setBusy(true);
+    setError('');
+    try {
+      setPreview(await previewFile(file));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doReveal() {
+    setError('');
+    try {
+      await revealFile(file);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  return (
+    <>
+      <span className={`tool-chip file ${tool.status}`} title={file}>
+        <span className="dot" />
+        📄 {fileName}
+        <button className="tc-act" disabled={busy} onClick={(e) => { e.stopPropagation(); void doPreview(); }}>预览</button>
+        <button className="tc-act" onClick={(e) => { e.stopPropagation(); void doReveal(); }}>打开目录</button>
+      </span>
+      {error && <span className="tool-error">{error}</span>}
+      {preview && (
+        <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setPreview(null); }}>
+          <div className="sheet file-preview-sheet">
+            <div className="sheet-head">
+              <h3>{preview.name}</h3>
+              <p>{preview.path}</p>
+            </div>
+            <div className="sheet-body">
+              {preview.binary
+                ? <div className="perm-hint">二进制文件，无法预览内容。</div>
+                : <pre className="file-preview">{preview.content}{preview.truncated ? '\n\n…（内容已截断）' : ''}</pre>}
+            </div>
+            <div className="sheet-foot">
+              <button className="btn" onClick={() => void doReveal()}>打开所在目录</button>
+              <button className="btn primary" onClick={() => setPreview(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function ToolRow({ tools }: { tools: ToolChip[] }) {
   if (!tools.length) return null;
   return (
     <div className="tool-row">
-      {tools.map((t) => (
+      {tools.map((t) => (t.file ? (
+        <FileToolChip key={t.toolId} tool={t} />
+      ) : (
         <span key={t.toolId} className={`tool-chip ${t.status}`} title={t.name}>
           <span className="dot" />
           {toolLabel(t.name, t.detail)}
         </span>
-      ))}
+      )))}
     </div>
   );
 }
@@ -281,7 +351,7 @@ function renderParts(
 
   const files: any[] = [];
   const cards: any[] = [];
-  const tools: Array<{ toolId: string; name: string; detail?: string; status: 'running' | 'ok' | 'failed' }> = [];
+  const tools: Array<{ toolId: string; name: string; detail?: string; file?: string | null; status: 'running' | 'ok' | 'failed' }> = [];
   const citations: Array<{ n: number; kb: string; doc: string; score: number; text: string }> = [];
 
   m.parts.forEach((p, i) => {
@@ -294,6 +364,7 @@ function renderParts(
       title?: string;
       toolId?: string;
       detail?: string;
+      file?: string | null;
       status?: 'running' | 'ok' | 'failed';
       url?: string;
       files?: Array<{ name: string; path: string; size: number; content?: string; truncated?: boolean }>;
@@ -321,6 +392,7 @@ function renderParts(
         toolId: part.toolId,
         name: part.name ?? 'tool',
         detail: part.detail,
+        file: part.file,
         status: part.status ?? 'ok',
       });
     } else if (part.type === 'citation' && part.n) {
@@ -435,7 +507,7 @@ function loadLocalProfile(): LocalProfile {
   } catch {
     /* ignore */
   }
-  return { name: '我', role: '同事', color: '#5B8CFF', initial: '我', status: 'online' };
+  return { name: '未知', role: '同事', color: '#5B8CFF', initial: '未', status: 'online' };
 }
 
 export default function App() {
@@ -476,12 +548,20 @@ export default function App() {
   const [inviteExternalOpen, setInviteExternalOpen] = useState(false);
   const [inviteExternalUser, setInviteExternalUser] = useState('');
   const [lanPeers, setLanPeers] = useState<LanPeer[]>([]);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [closePromptOpen, setClosePromptOpen] = useState(false);
   const [intro, setIntro] = useState<ChatIntro | null>(null);
   const [introLoading, setIntroLoading] = useState(false);
   const [permissionReq, setPermissionReq] = useState<{
     requestID: string;
     action: string;
     resources: string[];
+    agentId: string;
+  } | null>(null);
+  const [formReq, setFormReq] = useState<{
+    formID: string;
+    title: string;
+    fields: FormField[];
     agentId: string;
   } | null>(null);
   const [retrievingAgent, setRetrievingAgent] = useState<string | null>(null);
@@ -757,8 +837,15 @@ export default function App() {
     });
   }, []);
 
+  // 点 X 关闭窗口时，弹出符合页面风格的确认框（在 Electron 里）
+  useEffect(() => {
+    const sbot = (window as any).sbot;
+    if (!sbot?.onCloseQuery) return;
+    return sbot.onCloseQuery(() => setClosePromptOpen(true));
+  }, []);
+
   // GSAP：弹窗渐显、抽屉滑入、开场白、toast
-  const dialogKey = `${loginOpen}|${newGroupOpen}|${findColleaguesOpen}|${inviteExternalOpen}|${!!taskDialog}|${!!permissionReq}|${!!renameTarget}|${!!selectedCitation}|${!!ocSetup}`;
+  const dialogKey = `${loginOpen}|${newGroupOpen}|${findColleaguesOpen}|${inviteExternalOpen}|${!!taskDialog}|${!!permissionReq}|${!!formReq}|${!!renameTarget}|${!!selectedCitation}|${!!ocSetup}|${manualOpen}|${closePromptOpen}`;
   useEffect(() => {
     const overlays = document.querySelectorAll('.overlay');
     animateOverlay((overlays[overlays.length - 1] as HTMLElement) ?? null);
@@ -930,13 +1017,14 @@ export default function App() {
     }
   }
 
-  async function handleInviteLan(peer: LanPeer) {
-    if (!active || active.type !== 'group') {
-      showToast('先打开一个群聊，再邀请内网同事');
+  async function handleInviteLan(peer: LanPeer, convId?: string) {
+    const targetId = convId ?? (active?.type === 'group' ? active.id : null);
+    if (!targetId) {
+      showToast('先打开一个群聊，再邀请真人');
       return;
     }
     try {
-      await inviteLanPeer(active.id, { id: peer.id, name: peer.name, host: peer.host, port: peer.port });
+      await inviteLanPeer(targetId, { id: peer.id, name: peer.name, host: peer.host, port: peer.port });
       showToast(`邀请已发送给 ${peer.name}`);
     } catch (e) {
       showToast(String(e));
@@ -1028,6 +1116,11 @@ export default function App() {
   function notifyDesktop(title: string, body: string) {
     const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
     (window as any).sbot?.notify?.(title, body, theme);
+  }
+
+  function decideClose(decision: 'tray' | 'quit' | 'cancel') {
+    setClosePromptOpen(false);
+    (window as any).sbot?.closeDecision?.(decision);
   }
 
   async function openAgentDm(agentId: string) {
@@ -1372,6 +1465,12 @@ export default function App() {
         return;
       }
     } else {
+      // 真人可能是局域网远程同事（真人列表里的 peer）：走 P2P 邀请
+      const lanPeer = lanPeers.find((p) => p.id === payload.id);
+      if (lanPeer) {
+        await handleInviteLan(lanPeer, convId);
+        return;
+      }
       const human = humans.find((h) => h.id === payload.id);
       const name = human?.name ?? payload.name;
       if (!name) return;
@@ -1590,6 +1689,13 @@ export default function App() {
               resources: e.resources,
               agentId: e.agentId,
             });
+          } else if (e.type === 'form.ask') {
+            setFormReq({
+              formID: e.formID,
+              title: e.title,
+              fields: Array.isArray(e.fields) ? e.fields : [],
+              agentId: e.agentId,
+            });
           } else if (e.type === 'human.wait') {
             setHumanWait({
               runId: e.runId,
@@ -1677,6 +1783,7 @@ export default function App() {
       runningRef.current = false;
       setStreaming(null);
       setPermissionReq(null);
+      setFormReq(null);
       setHumanWait(null);
       abortRef.current = null;
       refreshConversations();
@@ -1725,6 +1832,7 @@ export default function App() {
           >
             {runtime || '本地'}
           </span>
+          <button className="help-btn" title="使用手册" onClick={() => setManualOpen(true)}>?</button>
         </div>
         {!isElectron && <div className="winbtns"><i>–</i><i>□</i><i>×</i></div>}
       </div>
@@ -1887,6 +1995,7 @@ export default function App() {
                         <span className="conv-name">{h.name}</span>
                         <span className="conv-right">
                           <span className={`conv-time ${h.online ? 'online-text' : ''}`}>{h.online ? '在线' : '离线'}</span>
+                          {conv && (unread[conv.id] ?? 0) > 0 && <span className="cb-unread">{unread[conv.id]}</span>}
                         </span>
                       </div>
                       <div className="conv-sub">
@@ -1907,7 +2016,14 @@ export default function App() {
                   <div
                     key={p.id}
                     className={`conv human ${conv && activeId === conv.id ? 'active' : ''}`}
-                    title={`${p.host} · 点击开始聊天`}
+                    title={`${p.host} · 点击聊天，拖到群聊可邀请`}
+                    draggable
+                    onDragStart={(e) => {
+                      const payload: MemberPayload = { kind: 'human', id: p.id, name: p.name };
+                      setMemberDrag(e, payload);
+                      setDraggingMember(payload);
+                    }}
+                    onDragEnd={() => { setDraggingMember(null); setDropTargetId(null); }}
                     onClick={() => (conv ? (setActiveId(conv.id), setView('chat'), setDrawerOpen(false), setSearchOpen(false)) : openLanPeerDm(p))}
                   >
                     <span className="av-online-wrap">
@@ -1919,6 +2035,7 @@ export default function App() {
                         <span className="conv-name">{p.name}</span>
                         <span className="conv-right">
                           <span className="conv-time online-text">在线</span>
+                          {conv && (unread[conv.id] ?? 0) > 0 && <span className="cb-unread">{unread[conv.id]}</span>}
                         </span>
                       </div>
                       <div className="conv-sub">
@@ -1944,6 +2061,7 @@ export default function App() {
                           <span className="conv-name">{m?.name ?? c.title}</span>
                           <span className="conv-right">
                             <span className="conv-time">{c.lastMessage ? fmtTime(c.lastMessage.at) : '离线'}</span>
+                            {(unread[c.id] ?? 0) > 0 && <span className="cb-unread">{unread[c.id]}</span>}
                           </span>
                         </div>
                         <div className="conv-sub">
@@ -2458,6 +2576,25 @@ export default function App() {
           onToast={showToast}
         />
       )}
+      {manualOpen && <ManualDialog onClose={() => setManualOpen(false)} />}
+      {closePromptOpen && (
+        <div className="overlay">
+          <div className="sheet close-sheet">
+            <div className="sheet-head">
+              <h3>关闭 S-BOT</h3>
+              <p>要最小化到托盘，还是直接退出？</p>
+            </div>
+            <div className="sheet-body">
+              <p className="close-hint">退出会中断当前正在生成的回复；最小化后可以从托盘重新打开。</p>
+            </div>
+            <div className="sheet-foot">
+              <button className="btn" onClick={() => decideClose('cancel')}>取消</button>
+              <button className="btn" onClick={() => decideClose('quit')}>退出 S-BOT</button>
+              <button className="btn primary" onClick={() => decideClose('tray')}>最小化到托盘</button>
+            </div>
+          </div>
+        </div>
+      )}
       {inviteExternalOpen && (
         <MattermostInviteDialog
           username={inviteExternalUser}
@@ -2497,6 +2634,22 @@ export default function App() {
           }}
         />
       )}
+      {formReq && (
+        <FormDialog
+          title={formReq.title}
+          fields={formReq.fields}
+          agentName={agents.find((a) => a.id === formReq.agentId)?.name ?? '智能体'}
+          onCancel={() => {
+            setFormReq(null);
+            replyForm(formReq.formID, {}).catch(() => { /* 忽略 */ });
+          }}
+          onSubmit={(answer) => {
+            const id = formReq.formID;
+            setFormReq(null);
+            replyForm(id, answer).catch((e) => showToast(String(e)));
+          }}
+        />
+      )}
       {selectedCitation && (
         <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setSelectedCitation(null); }}>
           <div className="sheet">
@@ -2518,7 +2671,7 @@ export default function App() {
         <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setOcSetup(null); }}>
           <div className="sheet">
             <div className="sheet-head">
-              <h3>还差一个 opencode 运行时</h3>
+              <h3>还差一个执行引擎</h3>
               <p>装上之后智能体才能读写文件、跑命令；不装也能正常聊天。</p>
             </div>
             <div className="sheet-body">
@@ -2534,7 +2687,7 @@ export default function App() {
                 <p className="sub" style={{ color: 'var(--warn)', margin: '4px 0 0' }}>{ocSetup.error}</p>
               )}
               <p className="sub" style={{ margin: '10px 0 0' }}>
-                已经装了 opencode 桌面版？去「设置 → opencode 运行时」点自动扫描，或直接填它的安装目录。
+                已经装了执行引擎桌面版？去「设置 → 执行引擎」点自动扫描，或直接填它的安装目录。
                 内网下载不通时，让管理员把离线包放到上面的地址。
               </p>
             </div>
@@ -2548,7 +2701,7 @@ export default function App() {
                   setOcSetup({ ...ocSetup, busy: true, error: undefined });
                   const r = await installOpencodeRuntime(ocSetup.url.trim());
                   if (r.ok) {
-                    showToast(`opencode ${r.version ?? ''} 安装完成`);
+                    showToast(`执行引擎 ${r.version ?? ''} 安装完成`);
                     setOcSetup(null);
                   } else {
                     setOcSetup({ ...ocSetup, busy: false, error: r.error ?? '安装失败，可以在设置里手动指定安装目录' });

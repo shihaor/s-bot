@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray } from 'electron';
 import path from 'node:path';
 import net from 'node:net';
 import { createRequire } from 'node:module';
@@ -13,6 +13,7 @@ const trayIconPath = path.join(__dirname, '../assets/tray.png');
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+let closePromptPending = false;
 
 app.setAppUserModelId('com.sbot.desktop');
 
@@ -112,25 +113,13 @@ function createWindow(url: string) {
     return { action: 'deny' };
   });
 
-  win.on('close', async (event) => {
+  win.on('close', (event) => {
     if (isQuitting) return;
-    // 托盘模式下：关窗口只是收起来；这里让用户明确选
+    // 关窗口改为让前端弹「符合页面风格」的确认框，不再用系统默认对话框
     event.preventDefault();
-    const { response } = await dialog.showMessageBox(win, {
-      type: 'question',
-      buttons: ['最小化到托盘', '退出 S-BOT', '取消'],
-      defaultId: 0,
-      cancelId: 2,
-      noLink: true,
-      title: '关闭 S-BOT',
-      message: '要最小化到托盘，还是直接退出？',
-      detail: '退出会中断当前正在生成的回复；最小化后可以从托盘重新打开。',
-    });
-    if (response === 0) {
-      win.hide();
-    } else if (response === 1) {
-      quitApp();
-    }
+    if (closePromptPending) return;
+    closePromptPending = true;
+    win.webContents.send('app:close-query');
   });
 
   win.on('closed', () => {
@@ -139,6 +128,16 @@ function createWindow(url: string) {
 
   void win.loadURL(url);
 }
+
+ipcMain.on('close-decision', (_event, decision: 'tray' | 'quit' | 'cancel') => {
+  closePromptPending = false;
+  if (decision === 'tray') {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+  } else if (decision === 'quit') {
+    quitApp();
+  }
+  // 'cancel' → 什么都不做，窗口保持打开
+});
 
 let notifyWindow: BrowserWindow | null = null;
 let notifyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -170,7 +169,7 @@ function showThemedNotification(payload: { title?: string; body?: string; theme?
     notifyWindow = new BrowserWindow({
       width,
       height,
-      x: area.x + area.width - width - 20,
+      x: area.x + 20,
       y: area.y + area.height - height - 20,
       frame: false,
       transparent: true,

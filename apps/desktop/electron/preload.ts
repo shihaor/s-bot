@@ -9,4 +9,10 @@ contextBridge.exposeInMainWorld('sbot', {
     ipcRenderer.on('app:abort', handler);
     return () => ipcRenderer.removeListener('app:abort', handler);
   },
+  onCloseQuery: (cb: () => void) => {
+    const handler = () => cb();
+    ipcRenderer.on('app:close-query', handler);
+    return () => ipcRenderer.removeListener('app:close-query', handler);
+  },
+  closeDecision: (decision: 'tray' | 'quit' | 'cancel') => ipcRenderer.send('close-decision', decision),
 });

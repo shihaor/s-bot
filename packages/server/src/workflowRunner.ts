@@ -190,7 +190,7 @@ export async function runWorkflow(input: WorkflowRunInput): Promise<{ produced: 
           role: agent.role,
           color: agent.color,
           initial: agent.initial,
-          model: input.opencodeOn ? `opencode · ${picked?.name ?? ''}` : (picked?.name ?? 'mock'),
+          model: input.opencodeOn ? (picked?.name ?? '执行引擎') : (picked?.name ?? 'mock'),
         }),
       });
 
@@ -204,7 +204,7 @@ export async function runWorkflow(input: WorkflowRunInput): Promise<{ produced: 
       let full = '';
       let failed = false;
       let usedOpencode = false;
-      const tools: Array<{ type: 'tool'; toolId: string; name: string; detail: string; status: string }> = [];
+      const tools: Array<{ type: 'tool'; toolId: string; name: string; detail: string; file?: string | null; status: string }> = [];
 
       if (input.opencodeOn) {
         try {
@@ -237,12 +237,13 @@ export async function runWorkflow(input: WorkflowRunInput): Promise<{ produced: 
               if (existing) {
                 if (ev.name) existing.name = ev.name;
                 if (ev.detail) existing.detail = ev.detail;
+                if (ev.file) existing.file = ev.file;
               } else {
-                tools.push({ type: 'tool', toolId: ev.id, name: ev.name, detail: ev.detail ?? '', status: 'running' });
+                tools.push({ type: 'tool', toolId: ev.id, name: ev.name, detail: ev.detail ?? '', file: ev.file ?? null, status: 'running' });
               }
               await stream.writeSSE({
                 event: 'tool',
-                data: JSON.stringify({ id: messageId, toolId: ev.id, name: ev.name, detail: ev.detail ?? '', status: 'running' }),
+                data: JSON.stringify({ id: messageId, toolId: ev.id, name: ev.name, detail: ev.detail ?? '', file: ev.file ?? null, status: 'running' }),
               });
             } else if (ev.type === 'tool-end') {
               const existing = tools.find((t) => t.toolId === ev.id);
@@ -260,6 +261,17 @@ export async function runWorkflow(input: WorkflowRunInput): Promise<{ produced: 
                   requestID: ev.requestID,
                   action: ev.action,
                   resources: ev.resources,
+                }),
+              });
+            } else if (ev.type === 'form') {
+              await stream.writeSSE({
+                event: 'form.ask',
+                data: JSON.stringify({
+                  agentId: agent.id,
+                  messageId,
+                  formID: ev.formID,
+                  title: ev.title,
+                  fields: ev.fields,
                 }),
               });
             } else if (ev.type === 'error') {

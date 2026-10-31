@@ -114,7 +114,7 @@ export function SearchPanel({
           {results.length === 0 && <div className="search-empty">没有找到匹配的消息</div>}
           {results.map((m) => {
             const p = personOf(m.authorId);
-            const name = m.authorType === 'user' ? '我' : p?.name ?? '系统';
+            const name = m.authorType === 'user' ? '未知' : p?.name ?? '系统';
             return (
               <button key={m.id} className="search-row" onClick={() => { onJump(m.id); onClose(); }}>
                 <span className="who" style={{ color: p?.color }}>{name}</span>
@@ -169,7 +169,7 @@ export function LoginDialog({
       ...draft,
       name,
       role: draft.role.trim(),
-      initial: name.slice(0, 1) || '我',
+      initial: name.slice(0, 1) || '未',
     });
     setEditing(false);
     setError('');
@@ -757,6 +757,90 @@ export function PermissionDialog({
           <button className="btn" onClick={() => onDecide('reject')}>拒绝</button>
           <button className="btn" onClick={() => onDecide('always')}>总是允许</button>
           <button className="btn primary" onClick={() => onDecide('once')}>允许一次</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- opencode 提问表单 ---------- */
+
+export interface FormFieldDef {
+  key: string;
+  title?: string;
+  description?: string;
+  type: string;
+  options?: Array<{ value: string; label: string; description?: string }>;
+  default?: string | number | boolean;
+  placeholder?: string;
+}
+
+export function FormDialog({
+  title,
+  fields,
+  agentName,
+  onSubmit,
+  onCancel,
+}: {
+  title: string;
+  fields: FormFieldDef[];
+  agentName: string;
+  onSubmit: (answer: Record<string, unknown>) => void;
+  onCancel: () => void;
+}) {
+  const [answers, setAnswers] = useState<Record<string, unknown>>(() => {
+    const init: Record<string, unknown> = {};
+    for (const f of fields) {
+      if (f.type === 'multiselect') init[f.key] = f.options?.length ? [f.options[0]!.value] : [];
+      else if (f.type === 'boolean') init[f.key] = f.default ?? true;
+      else if (f.type === 'number' || f.type === 'integer') init[f.key] = f.default ?? 0;
+      else init[f.key] = f.options?.length ? f.options[0]!.value : (f.default ?? '');
+    }
+    return init;
+  });
+
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="sheet form-sheet">
+        <div className="sheet-head">
+          <h3>{title || '需要你回答'}</h3>
+          <p>{agentName} 在继续之前想确认几件事。</p>
+        </div>
+        <div className="sheet-body form-body">
+          {fields.map((f) => (
+            <div key={f.key} className="form-field">
+              <div className="form-q">{f.title || f.key}</div>
+              {f.description && <div className="form-desc">{f.description}</div>}
+              {f.options?.length ? (
+                <div className="form-opts">
+                  {f.options.map((o) => (
+                    <label key={o.value} className={`form-opt ${answers[f.key] === o.value ? 'on' : ''}`}>
+                      <input
+                        type="radio"
+                        name={f.key}
+                        value={o.value}
+                        checked={answers[f.key] === o.value}
+                        onChange={() => setAnswers((p) => ({ ...p, [f.key]: o.value }))}
+                      />
+                      <span>{o.label}</span>
+                      {o.description && <em>{o.description}</em>}
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <input
+                  className="input"
+                  value={String(answers[f.key] ?? '')}
+                  placeholder={f.placeholder ?? '…'}
+                  onChange={(e) => setAnswers((p) => ({ ...p, [f.key]: e.target.value }))}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="sheet-foot">
+          <button className="btn" onClick={onCancel}>取消</button>
+          <button className="btn primary" onClick={() => onSubmit(answers)}>提交</button>
         </div>
       </div>
     </div>

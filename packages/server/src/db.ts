@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   conversation_id TEXT,
-  creator_name TEXT NOT NULL DEFAULT '我',
+  creator_name TEXT NOT NULL DEFAULT '未知',
   status TEXT NOT NULL DEFAULT 'todo',
   priority TEXT NOT NULL DEFAULT 'mid',
   created_at INTEGER NOT NULL,

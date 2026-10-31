@@ -6,7 +6,7 @@ const GROUP_ORDER = ['内置', '全局', 'Claude 兼容', 'Agents 兼容', '项�
 
 function sourceOf(path: string): { label: string; hint: string } {
   const p = path.replace(/\\/g, '/');
-  if (p.startsWith('/builtin/')) return { label: '内置', hint: 'opencode 自带' };
+  if (p.startsWith('/builtin/')) return { label: '内置', hint: '执行引擎自带' };
   if (p.includes('/.config/opencode/skills/')) return { label: '全局', hint: '~/.config/opencode/skills' };
   if (p.includes('/.claude/skills/')) return { label: 'Claude 兼容', hint: '~/.claude/skills' };
   if (p.includes('/.agents/skills/')) return { label: 'Agents 兼容', hint: '~/.agents/skills' };
@@ -109,7 +109,7 @@ export default function SkillsPage() {
       {loading && skills.length === 0 ? (
         <div className="skill-loading">
           <div className="skill-loading-dot" />
-          正在读取 opencode 技能（首次会启动 sidecar，可能要几秒）
+          正在读取技能（首次会启动引擎，可能要几秒）
         </div>
       ) : groups.length === 0 ? (
         <div className="skill-empty">
@@ -186,7 +186,7 @@ export default function SkillsPage() {
           onToast={(m) => setNotice(m)}
           onSaved={(name) => {
             setCoachOpen(false);
-            setNotice(`技能「${name}」已写入，正在刷新 opencode…`);
+            setNotice(`技能「${name}」已写入，正在刷新…`);
             void load().then(() => {
               window.setTimeout(() => setNotice(''), 4000);
             });

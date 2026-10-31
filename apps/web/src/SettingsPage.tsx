@@ -10,6 +10,7 @@ import {
   fetchImportableModels,
   fetchMattermostStatus,
   fetchModels,
+  fetchOpencodeModels,
   fetchOpencodeStatus,
   fetchSettings,
   installOpencodeRuntime,
@@ -25,6 +26,7 @@ import {
   type KbDataset,
   type MattermostMeta,
   type OpencodeCandidate,
+  type OpencodeModel,
   type OpencodeStatusData,
 } from './api';
 
@@ -68,6 +70,9 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   const [importables, setImportables] = useState<ImportableModel[]>([]);
   const [importOpen, setImportOpen] = useState(false);
   const [importPicked, setImportPicked] = useState<Set<string>>(new Set());
+  const [ocModels, setOcModels] = useState<OpencodeModel[]>([]);
+  const [ocModelsBusy, setOcModelsBusy] = useState(false);
+  const [ocModelsOpen, setOcModelsOpen] = useState(false);
   const [serverUrl, setServerUrl] = useState(localStorage.getItem('sbot.server') ?? '');
   const [theme, setTheme] = useState<ThemeMode>(getThemeMode());
   const [mmUrl, setMmUrl] = useState('');
@@ -89,6 +94,31 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
     } catch (e) {
       if (showToast) onToast(String(e));
     }
+  }
+
+  /** opencode 内置模型目录（含免费模型） */
+  async function loadOpencodeModels() {
+    setOcModelsBusy(true);
+    try {
+      setOcModels(await fetchOpencodeModels());
+    } catch (e) {
+      onToast(`读不到执行引擎模型：${String((e as Error).message ?? e)}`);
+    } finally {
+      setOcModelsBusy(false);
+    }
+  }
+
+  /** 导入一个 opencode 内置模型（免费模型走 opencode 鉴权，无需 Key） */
+  async function importOpencodeModel(m: OpencodeModel) {
+    const model = `${m.providerID}/${m.modelID}`;
+    if (models.some((x) => x.baseUrl === 'opencode://' && x.model === model)) {
+      onToast(`${m.name} 已经在列表里了`);
+      return;
+    }
+    await createModel({ name: m.name, model, baseUrl: 'opencode://', apiKey: '', tools: true, stream: true });
+    await refresh();
+    onSaved();
+    onToast(`已导入 ${m.name}${m.free ? '（免费）' : ''}`);
   }
 
   /** 把 opencode 配置里的模型导入 S-BOT；所有智能体共用这份模型列表 */
@@ -142,8 +172,8 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
       const r = await detectOpencode(ocBin.trim() || undefined);
       setOcCandidates(r.candidates);
       setOcStatus(r.status);
-      if (!r.candidates.length) onToast(r.error ?? '没找到 opencode');
-      else onToast(`找到 ${r.candidates.length} 个可用的 opencode`);
+      if (!r.candidates.length) onToast(r.error ?? '没找到执行引擎');
+      else onToast(`找到 ${r.candidates.length} 个可用的执行引擎`);
     } catch (e) {
       onToast(String(e));
     } finally {
@@ -160,7 +190,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
       if (r.ok) {
         setOcBin(path);
         setOcCandidates(r.candidates);
-        onToast(`已使用 opencode ${r.status.version ?? ''}`.trim());
+        onToast(`已使用执行引擎 ${r.status.version ?? ''}`.trim());
       } else {
         onToast(r.error ?? '还是没找到，请检查路径');
       }
@@ -242,6 +272,10 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   }
 
   async function runTest(m: ModelInfo) {
+    if (m.baseUrl === 'opencode://') {
+      setTestMsg((s) => ({ ...s, [m.id]: '走执行引擎，无需测试' }));
+      return;
+    }
     setTestMsg((s) => ({ ...s, [m.id]: '测试中…' }));
     const r = await testModel(m.id);
     setTestMsg((s) => ({ ...s, [m.id]: r.ok ? `连接成功 · ${r.ms}ms` : `失败：${r.error ?? r.status}` }));
@@ -332,17 +366,17 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
           <div style={{ display: 'flex', gap: 8, flex: '0 0 auto' }}>
             <button
               className="btn"
-              title="把所有 S-BOT 模型写进 opencode 运行时配置"
+              title="把所有模型写进执行引擎配置"
               onClick={async () => {
                 try {
                   const r = await syncModelsToOpencode();
-                  onToast(`已同步 ${r.count} 个模型到 opencode 运行时`);
+                  onToast(`已同步 ${r.count} 个模型到执行引擎`);
                 } catch (e) {
                   onToast(String(e));
                 }
               }}
             >
-              同步到 opencode
+              同步到执行引擎
             </button>
             <button
               className="btn"
@@ -352,13 +386,23 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
                   setImportables(list);
                   setImportPicked(new Set(list.map((m) => `${m.provider}/${m.model}`)));
                   setImportOpen(true);
-                  if (!list.length) onToast('没读到本机 opencode 的自定义模型');
+                  if (!list.length) onToast('没读到本机执行引擎的自定义模型');
                 } catch (e) {
                   onToast(String(e));
                 }
               }}
             >
-              从 opencode 导入
+              从执行引擎导入
+            </button>
+            <button
+              className="btn"
+              onClick={async () => {
+                setOcModelsOpen(true);
+                setOcModels([]);
+                await loadOpencodeModels();
+              }}
+            >
+              内置模型
             </button>
             <button className="btn primary" onClick={() => setForm({ ...EMPTY_MODEL })}>+ 添加模型</button>
           </div>
@@ -371,12 +415,13 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
                   {m.name}
                   {m.isDefault && <span className="def">默认</span>}
                 </div>
-                <div className="model-sub">{m.model} · {m.baseUrl}</div>
+                <div className="model-sub">{m.model} · {m.baseUrl === 'opencode://' ? '执行引擎' : m.baseUrl}</div>
               </div>
               <div className="model-tags">
+                {m.baseUrl === 'opencode://' && <span className="mtag free">执行引擎</span>}
                 {m.tools && <span className="mtag">tools</span>}
                 {m.stream && <span className="mtag">stream</span>}
-                {!m.apiKey && <span className="mtag warn">no-key</span>}
+                {m.baseUrl !== 'opencode://' && !m.apiKey && <span className="mtag warn">no-key</span>}
               </div>
               <span className="test-inline">{testMsg[m.id] ?? ''}</span>
               <button className="mini" title="测试" onClick={() => void runTest(m)}>◌</button>
@@ -390,8 +435,8 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
         <div className="oc-models">
           <div className="oc-models-head">
             <div>
-              <b>opencode 配置里的模型</b>
-              <span>读自本机 opencode 配置；导入后所有智能体都能复用。</span>
+              <b>执行引擎里的模型</b>
+              <span>读自本机执行引擎配置；导入后所有智能体都能复用。</span>
             </div>
             <div className="oc-models-actions">
               <button className="mini" title="重新读取" onClick={() => void loadImportables(true)}>刷新</button>
@@ -405,7 +450,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
             </div>
           </div>
           {importables.length === 0 ? (
-            <div className="oc-models-empty">没读到本机 opencode 的自定义模型。你可以直接在上面添加，再点「同步到 opencode」。</div>
+            <div className="oc-models-empty">没读到本机执行引擎的自定义模型。你可以直接在上面添加，再点「同步到执行引擎」。</div>
           ) : (
             importables.map((m) => {
               const imported = models.some((x) => x.model === m.model && x.baseUrl === m.baseUrl);
@@ -432,7 +477,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
       <div className="set-card">
         <div className="card-head">
           <div>
-            <h3>opencode 运行时</h3>
+            <h3>执行引擎</h3>
             <p className="sub" style={{ marginBottom: 0 }}>让智能体能读写文件、跑命令。没有它也能聊天，只是没有工具。</p>
           </div>
           <b className={ocStatus?.available ? 'ok-text' : 'warn-text'}>
@@ -443,7 +488,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
         <div className="oc-current">
           <div className="oc-current-main">
             <span>当前使用</span>
-            <code title={ocStatus?.bin}>{ocStatus?.bin ?? '还没找到 opencode，点下面的「自动扫描」'}</code>
+            <code title={ocStatus?.bin}>{ocStatus?.bin ?? '还没找到执行引擎，点下面的「自动扫描」'}</code>
           </div>
           {ocStatus?.bin && (
             <button className="mini" onClick={() => void copyText(ocStatus.bin)}>复制</button>
@@ -451,7 +496,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
         </div>
 
         <label className="field" style={{ marginTop: 12 }}>
-          <span>安装目录或 opencode.exe 路径（填目录会自动找里面的 CLI）</span>
+          <span>安装目录或执行引擎程序路径（填目录会自动找里面的程序）</span>
           <div className="oc-path-row">
             <input
               className="input"
@@ -481,7 +526,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
                 className={`oc-candidate ${ocStatus?.bin === c.bin ? 'on' : ''}`}
                 onClick={() => void useOpencodePath(c.bin)}
               >
-                <b>opencode {c.version}</b>
+                <b>执行引擎 {c.version}</b>
                 <code>{c.bin}</code>
                 <span>{ocStatus?.bin === c.bin ? '使用中' : '使用'}</span>
               </button>
@@ -529,7 +574,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
         <details className="oc-advanced">
           <summary>内网离线包 / 覆盖安装</summary>
           <label className="field" style={{ marginTop: 10 }}>
-            <span>离线包地址（zip，里面包含 opencode.exe）</span>
+            <span>离线包地址（zip）</span>
             <input
               className="input"
               value={ocUrl}
@@ -547,7 +592,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
                   const r = await installOpencodeRuntime(ocUrl.trim());
                   if (r.ok) {
                     setOcStatus(r.status ?? ocStatus);
-                    onToast(`opencode ${r.version ?? ''} 安装完成`);
+                    onToast(`执行引擎 ${r.version ?? ''} 安装完成`);
                   } else {
                     if (r.status) setOcStatus(r.status);
                     onToast(r.error ?? '安装失败，检查离线包地址或手动指定安装目录');
@@ -563,12 +608,12 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
             </button>
           </div>
           <p className="sub" style={{ margin: '8px 0 0' }}>
-            安装会解压到上面的 sidecar 目录。内网下载不通时，让管理员把离线包放到这个地址，或者直接把 opencode.exe 放进 sidecar 目录。
+            安装会解压到上面的 sidecar 目录。内网下载不通时，让管理员把离线包放到这个地址，或者直接把执行引擎程序放进 sidecar 目录。
           </p>
         </details>
 
         <p className="sub" style={{ margin: '10px 0 0' }}>
-          没检测到？先装一次 opencode 桌面版，S-BOT 会自动找它自带的 CLI；已经装了但没识别，就把安装目录填到上面
+          没检测到？先装一次执行引擎桌面版，S-BOT 会自动找它自带的 CLI；已经装了但没识别，就把安装目录填到上面
           （例如 <code>C:\Users\你\AppData\Local\Programs\ai.opencode.desktop</code>），点「使用这个位置」。
         </p>
       </div>
@@ -759,12 +804,45 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
         </p>
       </div>
 
+      {ocModelsOpen && (
+        <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setOcModelsOpen(false); }}>
+          <div className="sheet oc-models-sheet">
+            <div className="sheet-head">
+              <h3>内置可用模型</h3>
+              <p>来自执行引擎内置模型目录。免费模型无需 Key 即可用。</p>
+            </div>
+            <div className="sheet-body">
+              {ocModelsBusy && <div className="kb-empty">读取中…</div>}
+              {!ocModelsBusy && ocModels.length === 0 && <div className="kb-empty">没读到模型，确认执行引擎已启动</div>}
+              <div className="kb-list">
+                {ocModels.map((m) => (
+                  <div key={`${m.providerID}/${m.modelID}`} className="kb-item row">
+                    <span className="kb-meta">
+                      <span className="kb-name">
+                        {m.name}
+                        {m.free && <span className="mtag free">免费</span>}
+                      </span>
+                      <span className="kb-sub">{m.providerID} / {m.modelID}{m.limit ? ` · ${Math.round(m.limit / 1000)}k ctx` : ''}</span>
+                    </span>
+                    <button className="mini" onClick={async () => { await importOpencodeModel(m); }}>导入</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="sheet-foot">
+              <span className="foot-note">只显示目录里的模型；实际能否免费以执行引擎为准。</span>
+              <button className="btn primary" onClick={() => setOcModelsOpen(false)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {importOpen && (
         <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setImportOpen(false); }}>
           <div className="sheet">
             <div className="sheet-head">
-              <h3>从 opencode 导入模型</h3>
-              <p>读本机 ~/.config/opencode 里的 providers 配置；API Key 不会带过来，导入后补填。</p>
+              <h3>从执行引擎导入模型</h3>
+              <p>读本机执行引擎配置里的 providers；API Key 不会带过来，导入后补填。</p>
             </div>
             <div className="sheet-body">
               {importables.length === 0 && <div className="kb-empty">没有读到自定义模型</div>}

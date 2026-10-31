@@ -236,7 +236,7 @@ export function applyBinaryPath(input: string): { ok: boolean; bin?: string; err
       }
     }
     if (!foundBin) {
-      return { ok: false, error: '这个目录里没找到 opencode.exe / opencode-cli.exe', status: getStatus() };
+      return { ok: false, error: '这个目录里没找到执行引擎程序', status: getStatus() };
     }
     bin = foundBin;
   } else if (!isFile(value)) {
@@ -318,7 +318,7 @@ function providerConfigFor(models: ModelInfo[], preferred: ModelInfo | null) {
   const buckets = new Map<string, { baseUrl: string; apiKey: string; models: Record<string, { name: string }> }>();
   for (const m of models) {
     const baseUrl = m.baseUrl.trim();
-    if (!baseUrl) continue;
+    if (!baseUrl || baseUrl === 'opencode://') continue;
     const key = baseUrl.replace(/\/+$/, '');
     let bucket = buckets.get(key);
     if (!bucket) {
@@ -376,7 +376,12 @@ function writeConfig(preferred?: ModelInfo | null) {
     ?? null;
   const { providers, providerIdByUrl } = providerConfigFor(allModels, def);
 
-  if (Object.keys(providers).length) {
+  if (def?.baseUrl === 'opencode://') {
+    // 用 opencode 内置模型（如免费 zen）：直接引用 providerID/modelID，opencode 自己管鉴权
+    config.model = def.model;
+    if (!Object.keys(providers).length) delete config.providers;
+    else config.providers = providers;
+  } else if (Object.keys(providers).length) {
     config.providers = providers;
     if (def) {
       const key = def.baseUrl.trim().replace(/\/+$/, '');
@@ -528,6 +533,33 @@ export function importableModels(): ImportableModel[] {
   return [];
 }
 
+export interface OpencodeModel {
+  providerID: string;
+  modelID: string;
+  name: string;
+  /** cost 全为 0 即视为免费（如 opencode zen） */
+  free: boolean;
+  limit: number;
+  status: string;
+}
+
+/** 读 opencode 内置模型目录（含免费模型），用于在「模型服务」里展示和导入 */
+export async function listOpencodeModels(): Promise<OpencodeModel[]> {
+  if (!client) await ensureStarted();
+  if (!client) throw new Error('执行引擎还没启动');
+  const res = await client.model.list({ location: { directory: workspaceRoot } });
+  const data = (res as unknown as { data?: any[] }).data ?? [];
+  return data.map((m) => ({
+    providerID: String(m.providerID ?? ''),
+    modelID: String(m.modelID ?? ''),
+    name: String(m.name ?? m.modelID ?? ''),
+    // 免费：有明确的 cost 且 input/output 都为 0（opencode zen 系列）；没有 cost 信息的不算
+    free: Array.isArray(m.cost) && m.cost.length > 0 && m.cost.every((c: any) => (c?.input ?? 0) === 0 && (c?.output ?? 0) === 0),
+    limit: Number(m.limit?.context ?? 0),
+    status: String(m.status ?? 'active'),
+  }));
+}
+
 /** 从离线 zip 安装 sidecar（内网 Artifactory） */export async function installFromZip(url: string): Promise<{ ok: boolean; version?: string; error?: string }> {
   const target = join(sidecarDir, exeName);
   try {
@@ -571,7 +603,7 @@ export async function ensureStarted(model?: ModelInfo | null): Promise<boolean> 
   starting = (async () => {
     const bin = detectBinary(true);
     if (!bin) {
-      started = { available: false, running: false, error: '本机没有兼容的 opencode v2' };
+      started = { available: false, running: false, error: '本机没有兼容的执行引擎' };
       return false;
     }
 
@@ -711,7 +743,7 @@ export interface EnsureSessionResult {
 }
 
 export async function ensureSession(conversationId: string, agent: Agent): Promise<EnsureSessionResult> {
-  if (!client) throw new Error('opencode 还没启动');
+  if (!client) throw new Error('执行引擎还没启动');
   const existing = getAgentSession(conversationId, agent.id);
   if (existing && existsSync(existing.workspace)) {
     return { sessionId: existing.sessionId, workspace: existing.workspace };
@@ -764,7 +796,7 @@ export interface OpencodeSkill {
  */
 export async function listSkills(): Promise<OpencodeSkill[]> {
   const oc = client;
-  if (!oc) throw new Error('opencode 还没启动');
+  if (!oc) throw new Error('执行引擎还没启动');
   const directory = workspaceRoot;
 
   const fetchList = async () => {
@@ -904,6 +936,34 @@ function waitPermission(requestID: string, timeout = 60000): Promise<'once' | 'a
   });
 }
 
+/* ---------- 提问表单 ---------- */
+
+const pendingForms = new Map<string, { form: any; resolve: (answer: Record<string, any>) => void }>();
+
+export function resolveForm(formID: string, answer: Record<string, any>): boolean {
+  const entry = pendingForms.get(formID);
+  if (!entry) return false;
+  pendingForms.delete(formID);
+  entry.resolve(answer);
+  return true;
+}
+
+function waitForm(formID: string, form: any, timeout = 120000): Promise<Record<string, any>> {
+  return new Promise((res) => {
+    const timer = setTimeout(() => {
+      pendingForms.delete(formID);
+      res(buildFormAnswer(form)); // 超时：默认选第一个选项继续，不卡流程
+    }, timeout);
+    pendingForms.set(formID, {
+      form,
+      resolve: (answer) => {
+        clearTimeout(timer);
+        res(answer);
+      },
+    });
+  });
+}
+
 export async function interruptSession(sessionId: string): Promise<void> {
   if (!client) return;
   try { await client.session.interrupt({ sessionID: sessionId }); } catch { /* ignore */ }
@@ -913,9 +973,10 @@ export async function interruptSession(sessionId: string): Promise<void> {
 
 export type OpencodeEvent =
   | { type: 'delta'; text: string }
-  | { type: 'tool'; id: string; name: string; detail?: string }
+  | { type: 'tool'; id: string; name: string; detail?: string; file?: string | null }
   | { type: 'tool-end'; id: string; ok: boolean }
   | { type: 'permission'; requestID: string; action: string; resources: string[] }
+  | { type: 'form'; formID: string; title: string; fields: any[] }
   | { type: 'done'; interrupted?: boolean }
   | { type: 'error'; message: string };
 
@@ -927,8 +988,28 @@ interface RunInput {
   autoApprove?: boolean;
 }
 
+/** 自动回答 opencode 弹出的表单（question 工具）：每个字段取第一个选项/默认值 */
+function buildFormAnswer(form: any): Record<string, any> {
+  const answer: Record<string, any> = {};
+  for (const f of form?.fields ?? []) {
+    const key = f?.key;
+    if (!key) continue;
+    const options = Array.isArray(f?.options) ? f.options : [];
+    if (f?.type === 'multiselect') {
+      answer[key] = options.length ? [String(options[0]?.value ?? options[0]?.label ?? '')] : [];
+    } else if (f?.type === 'boolean') {
+      answer[key] = f?.default ?? true;
+    } else if (f?.type === 'number' || f?.type === 'integer') {
+      answer[key] = f?.default ?? 0;
+    } else {
+      answer[key] = options.length ? String(options[0]?.value ?? options[0]?.label ?? '') : (f?.default ?? '');
+    }
+  }
+  return answer;
+}
+
 export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> {
-  if (!client) throw new Error('opencode 还没启动');
+  if (!client) throw new Error('执行引擎还没启动');
   startPump();
   const { sessionId, prompt, signal } = input;
   const ch = channelOf(sessionId);
@@ -957,7 +1038,7 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
         yield { type: 'done', interrupted: true };
         return;
       }
-      if (raw.data?.sessionID !== sessionId) continue;
+      if (raw.data?.sessionID !== sessionId && raw.data?.form?.sessionID !== sessionId) continue;
 
       switch (raw.type) {
         case 'session.text.delta':
@@ -970,8 +1051,9 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
         }
         case 'session.tool.input.ended': {
           const detail = describeInput(String(raw.data.text ?? ''));
-          if (detail) {
-            yield { type: 'tool', id: String(raw.data.id), name: toolNames.get(String(raw.data.id)) ?? 'tool', detail };
+          const file = extractFile(String(raw.data.text ?? ''));
+          if (detail || file) {
+            yield { type: 'tool', id: String(raw.data.id), name: toolNames.get(String(raw.data.id)) ?? 'tool', detail, file };
           }
           break;
         }
@@ -1010,6 +1092,24 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
         case 'session.execution.failed':
           yield { type: 'error', message: String(raw.data?.error?.message ?? 'opencode 执行失败') };
           return;
+        case 'form.created': {
+          // 智能体弹了问题表单（question 工具）：把表单推到界面让用户回答
+          const form = raw.data?.form;
+          if (form?.id) {
+            const formID = String(form.id);
+            yield {
+              type: 'form',
+              formID,
+              title: String(form.title ?? ''),
+              fields: Array.isArray(form.fields) ? form.fields : [],
+            };
+            const answer = await waitForm(formID, form);
+            try {
+              await client.session.form.reply({ sessionID: sessionId, formID, answer });
+            } catch { /* 表单可能已被处理 */ }
+          }
+          break;
+        }
         default:
           break;
       }
@@ -1032,6 +1132,21 @@ function describeInput(text: string): string {
     return '';
   } catch {
     return text.slice(0, 60);
+  }
+}
+
+/** 从工具入参里提取文件路径（读/写/改文件类工具），不是文件返回 null */
+function extractFile(text: string): string | null {
+  if (!text) return null;
+  try {
+    const input = JSON.parse(text);
+    const file = input.filePath ?? input.path ?? input.file ?? input.target;
+    if (typeof file === 'string' && file.trim() && !/^https?:\/\//i.test(file.trim())) {
+      return file.trim();
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 

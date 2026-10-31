@@ -1,6 +1,6 @@
 {
   "name": "@sbot/desktop",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "type": "module",
   "main": "dist/main.js",
@@ -31,6 +31,12 @@
       "assets/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "resources/manual",
+        "to": "manual"
+      }
+    ],
     "asar": true,
     "win": {
       "target": [
@@ -46,7 +52,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh"
     }
   }
 }

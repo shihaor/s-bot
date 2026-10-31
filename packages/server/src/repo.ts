@@ -81,7 +81,7 @@ function lastMessageOf(conversationId: string) {
     )
     .get(conversationId) as any;
   if (!r || !r.text) return null;
-  let authorName = '我';
+  let authorName = '未知';
   if (r.author_type === 'agent' && r.author_id) authorName = getAgent(r.author_id)?.name ?? '智能体';
   else if (r.author_type === 'human') authorName = r.author_name ?? getHuman(r.author_id ?? '')?.name ?? '同事';
   else if (r.author_type === 'system') authorName = '系统';
@@ -414,7 +414,7 @@ const mapTask = (r: any): Task => ({
   title: r.title,
   description: r.description ?? '',
   conversationId: r.conversation_id ?? null,
-  creatorName: r.creator_name ?? '我',
+  creatorName: r.creator_name ?? '未知',
   status: r.status,
   priority: r.priority,
   createdAt: r.created_at,
@@ -448,7 +448,7 @@ export function createTask(input: {
     input.title,
     input.description ?? '',
     input.conversationId ?? null,
-    input.creatorName ?? '我',
+    input.creatorName ?? '未知',
     'todo',
     input.priority ?? 'mid',
     Date.now(),

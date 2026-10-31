@@ -168,7 +168,7 @@ export default function SkillCoach({ onClose, onSaved, onToast }: Props) {
       <div className="sheet coach-sheet">
         <div className="sheet-head">
           <h3>新增技能</h3>
-          <p>描述你的需求，技能教练会追问细节、做连通性验证，最后生成 SKILL.md 草案。你确认后才写入 opencode。</p>
+          <p>描述你的需求，技能教练会追问细节、做连通性验证，最后生成 SKILL.md 草案。你确认后才写入执行引擎。</p>
         </div>
 
         <div className="coach-body" ref={bodyRef}>
@@ -232,7 +232,7 @@ export default function SkillCoach({ onClose, onSaved, onToast }: Props) {
           <div className="coach-draft">
             <div className="coach-draft-head">
               <b>技能草案</b>
-              <span>确认后写入 opencode，智能体会自动发现它</span>
+              <span>确认后写入执行引擎，智能体会自动发现它</span>
             </div>
             <div className="coach-fields">
               <label className="field"><span>技能 ID</span>
@@ -274,7 +274,7 @@ export default function SkillCoach({ onClose, onSaved, onToast }: Props) {
                 {copied ? '已复制' : '复制正文'}
               </button>
               <button className="btn primary" disabled={saving} onClick={() => void save()}>
-                {saving ? '写入中…' : '确认并同步到 opencode'}
+                {saving ? '写入中…' : '确认并同步到执行引擎'}
               </button>
             </div>
           </div>
