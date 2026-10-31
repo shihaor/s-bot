@@ -978,7 +978,12 @@ export default function App() {
     try {
       const agent = await createAgentApi(input);
       setAgents((prev) => [...prev, agent]);
-      showToast(`已创建「${agent.name}」`);
+      // 新建后自动开一个单聊，让消息列表立刻出现这个智能体，方便直接聊天
+      const conv = await ensureDmApi(agent.id);
+      setConversations((prev) => (prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev]));
+      showToast(`已创建「${agent.name}」，已为你打开单聊`);
+      setActiveId(conv.id);
+      setView('chat');
     } catch (e) {
       showToast(String(e));
     }
@@ -1021,6 +1026,9 @@ export default function App() {
         kbIds: agent.kbIds,
       } as any);
       setAgents((prev) => [...prev, copy]);
+      // 复制的智能体也自动开一个单聊，方便直接在消息列表里找到
+      const conv = await ensureDmApi(copy.id);
+      setConversations((prev) => (prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev]));
       showToast(`已复制为「${copy.name}」`);
     } catch (e) {
       showToast(String(e));
