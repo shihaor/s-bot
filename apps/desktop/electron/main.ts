@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray } from 'electron';
 import path from 'node:path';
 import net from 'node:net';
 import { createRequire } from 'node:module';
@@ -14,6 +14,7 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
 let closePromptPending = false;
+let closePromptTimer: ReturnType<typeof setTimeout> | null = null;
 
 app.setAppUserModelId('com.sbot.desktop');
 
@@ -120,6 +121,25 @@ function createWindow(url: string) {
     if (closePromptPending) return;
     closePromptPending = true;
     win.webContents.send('app:close-query');
+    // 兜底：前端若未及时回 close-decision（窗口还没加载完 / 页面异常 / 重载），
+    // 几秒后自动复位，并退回系统原生对话框，保证关闭按钮永远有效
+    if (closePromptTimer) clearTimeout(closePromptTimer);
+    closePromptTimer = setTimeout(async () => {
+      closePromptPending = false;
+      closePromptTimer = null;
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['取消', '退出 S-BOT', '最小化到托盘'],
+        defaultId: 2,
+        cancelId: 0,
+        title: '关闭 S-BOT',
+        message: '关闭 S-BOT',
+        detail: '要最小化到托盘，还是直接退出？',
+      });
+      if (response === 1) quitApp();
+      else if (response === 2) mainWindow?.hide();
+    }, 4000);
   });
 
   win.on('closed', () => {
@@ -131,6 +151,10 @@ function createWindow(url: string) {
 
 ipcMain.on('close-decision', (_event, decision: 'tray' | 'quit' | 'cancel') => {
   closePromptPending = false;
+  if (closePromptTimer) {
+    clearTimeout(closePromptTimer);
+    closePromptTimer = null;
+  }
   if (decision === 'tray') {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
   } else if (decision === 'quit') {

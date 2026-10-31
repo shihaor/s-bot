@@ -579,6 +579,8 @@ export default function App() {
   const [unread, setUnread] = useState<Record<string, number>>({});
   const activeIdRef = useRef<string | null>(null);
   const runningRef = useRef(false);
+  const agentsRef = useRef<Agent[]>([]);
+  const conversationsRef = useRef<Conversation[]>([]);
   const [draggingMember, setDraggingMember] = useState<MemberPayload | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [chatDrop, setChatDrop] = useState(false);
@@ -638,6 +640,14 @@ export default function App() {
     }
   }, [activeId]);
 
+  // 让 EventSource 回调里能拿到最新的智能体/会话列表（避免闭包拿到初始空数组）
+  useEffect(() => {
+    agentsRef.current = agents;
+  }, [agents]);
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
   // 服务端推送：别的客户端发消息 / 任务变化时刷新
   useEffect(() => {
     const es = new EventSource(apiUrl('/api/events'));
@@ -659,6 +669,17 @@ export default function App() {
           };
           if (p.conversationId !== activeIdRef.current && (p.authorType === 'agent' || p.authorType === 'human')) {
             setUnread((prev) => ({ ...prev, [p.conversationId]: (prev[p.conversationId] ?? 0) + 1 }));
+          }
+          // 收到别人（同事/其他端的智能体）的消息：窗口缩到托盘或失焦时弹提醒。
+          // 自己的 run 已在 message.end 里提醒，这里用 runningRef 排除，避免重复弹。
+          const incoming = p.authorType === 'agent' || p.authorType === 'human';
+          const ownHuman = p.authorType === 'human' && !!p.authorId && p.authorId === localStorage.getItem('sbot.user');
+          if (incoming && !ownHuman && !runningRef.current && (document.hidden || !document.hasFocus())) {
+            const who = p.authorType === 'agent'
+              ? (agentsRef.current.find((a) => a.id === p.authorId)?.name ?? '智能体')
+              : (p.authorName ?? '同事');
+            const where = conversationsRef.current.find((c) => c.id === p.conversationId)?.title ?? 'S-BOT';
+            notifyDesktop(`${who} · ${where}`, (p.text ?? '').slice(0, 90));
           }
           if (p.conversationId === activeIdRef.current && !runningRef.current) {
             void fetchMessages(p.conversationId).then(setMessages).catch(() => {});
