@@ -2416,11 +2416,12 @@ export default function App() {
       {workflowCoach && (
         <WorkflowCoach
           agents={workflowCoach.agents}
+          memberIds={workflowCoach.agents.map((a) => a.id)}
           onClose={() => setWorkflowCoach(null)}
-          onReady={(g) => {
+          onReady={(r) => {
             const cid = workflowCoach.conversationId;
             setWorkflowCoach(null);
-            setWorkflowEditor({ conversationId: cid, graph: g });
+            setWorkflowEditor({ conversationId: cid, graph: r.graph });
           }}
         />
       )}

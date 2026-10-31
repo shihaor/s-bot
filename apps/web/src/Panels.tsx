@@ -367,7 +367,7 @@ export function NewGroupDialog({
                 </div>
               )}
               <button className="btn" disabled={!graph} onClick={() => setEditorOpen(true)}>编辑聊天逻辑</button>
-              <button className="btn" disabled={picked.size < 2} onClick={() => setCoachOpen(true)}>用对话生成</button>
+              <button className="btn" onClick={() => setCoachOpen(true)}>用对话生成</button>
             </div>
           </div>
         </div>
@@ -390,10 +390,12 @@ export function NewGroupDialog({
 
       {coachOpen && (
         <WorkflowCoach
-          agents={agents.filter((a) => picked.has(a.id))}
+          agents={agents}
+          memberIds={[...picked]}
           onClose={() => setCoachOpen(false)}
-          onReady={(g) => {
-            setGraph(g);
+          onReady={(r) => {
+            if (r.memberIds?.length) setPicked(new Set(r.memberIds));
+            setGraph(r.graph);
             setCoachOpen(false);
             setEditorOpen(true);
           }}

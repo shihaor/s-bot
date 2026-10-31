@@ -230,9 +230,11 @@ export interface WorkflowCoachResult {
   status: 'question' | 'ready';
   reply: string;
   graph?: GroupWorkflow;
+  memberIds?: string[];
 }
 
 export async function coachWorkflow(
+  agentIds: string[],
   memberIds: string[],
   messages: Array<{ role: 'user' | 'assistant'; content: string }>,
   text: string,
@@ -240,7 +242,7 @@ export async function coachWorkflow(
   const res = await apiFetch('/api/workflows/coach', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ memberIds, messages, text }),
+    body: JSON.stringify({ agentIds, memberIds, messages, text }),
   });
   const body = (await res.json().catch(() => ({}))) as { data?: WorkflowCoachResult; error?: string };
   if (!res.ok) throw new Error(body.error ?? '生成失败');

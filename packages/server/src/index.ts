@@ -1285,9 +1285,11 @@ app.post('/api/workflows/preview', async (c) => {
 
 app.post('/api/workflows/coach', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
-  const memberIds = Array.isArray(b?.memberIds) ? b.memberIds.map((x: unknown) => String(x)) : [];
-  const agents = memberIds.map((id: string) => getAgent(id)).filter(Boolean) as Array<NonNullable<ReturnType<typeof getAgent>>>;
-  if (!agents.length) return c.json({ error: 'memberIds required' }, 400);
+  const agentIds = (Array.isArray(b?.agentIds) ? b.agentIds : Array.isArray(b?.memberIds) ? b.memberIds : [])
+    .map((x: unknown) => String(x));
+  const hintIds = Array.isArray(b?.memberIds) ? b.memberIds.map((x: unknown) => String(x)) : [];
+  const agents = agentIds.map((id: string) => getAgent(id)).filter(Boolean) as Array<NonNullable<ReturnType<typeof getAgent>>>;
+  if (!agents.length) return c.json({ error: 'agentIds required' }, 400);
   const text = String(b?.text ?? '').trim();
   if (!text) return c.json({ error: 'text required' }, 400);
   const history = Array.isArray(b?.messages)
@@ -1300,7 +1302,8 @@ app.post('/api/workflows/coach', async (c) => {
   const fallback = () => ({
     status: 'ready' as const,
     reply: '没配置模型，我先按角色生成一版聊天逻辑，你可以再看图调整。',
-    graph: generateWorkflow({ memberIds, withHuman: true }),
+    graph: generateWorkflow({ memberIds: hintIds.length ? hintIds : agentIds, withHuman: true }),
+    memberIds: hintIds.length ? hintIds : agentIds,
   });
 
   const cfg = toConfig(getDefaultModel());
@@ -1309,12 +1312,17 @@ app.post('/api/workflows/coach', async (c) => {
   const roster = agents
     .map((a) => `- ${a.id} / ${a.name} / ${a.role}${a.skills?.length ? ` / 擅长：${a.skills.join('、')}` : ''}`)
     .join('\n');
+  const hintNames = hintIds
+    .map((id: string) => agents.find((a) => a.id === id)?.name)
+    .filter(Boolean)
+    .join('、');
 
   const system = [
     '你是 S-BOT 的群聊流程设计师，负责把用户用自然语言描述的聊天流程变成一张可执行的流程图。',
     '',
     '可用智能体（只能使用这些 id）：',
     roster,
+    hintNames ? `\n用户已经勾选的智能体（可参考，也可以按需求增删）：${hintNames}` : '',
     '',
     '图结构：',
     '{"nodes":[{"id":"start","type":"start","label":"开始"},{"id":"a1","type":"agent","label":"出方案","agentId":"上面的id","prompt":"这一步要做什么","producesVerdict":false},{"id":"h1","type":"human","label":"真人确认"},{"id":"end","type":"end","label":"结束"}],"edges":[{"id":"e1","from":"start","to":"a1","when":"always"},{"id":"e2","from":"a1","to":"h1","when":"pass"}],"maxLoops":3}',
@@ -1326,13 +1334,14 @@ app.post('/api/workflows/coach', async (c) => {
     '4. 除非用户明确说不要，最后加一个 human 真人确认节点。',
     '5. 如果用户要求评审不通过要修订，必须单独加一个 agent 修订节点，并加 review→revise（when=changes）和 revise→review（when=always, maxLoops=2）两条边。',
     '6. 不要发明智能体，不要用群外的 id。',
+    '7. 如果用户没有指定成员，根据需求从列表里推荐最合适的成员；ready 时除了 graph，还要输出 memberIds（这些成员用到的 id 数组）。',
     '',
     '对话规则：',
-    '- 信息不足（谁先做、要不要评审、改几轮、要不要真人确认）时，只问一个最关键的问题，status 用 question。',
-    '- 信息够了，先用一句话复述你的理解，并问用户是否确认，status 用 question，reply 里要出现「确认」。',
-    '- 只有用户明确确认后，才输出 status=ready 和 graph。',
+    '- 信息不足（谁先做、要不要评审、改几轮、要不要真人确认、要哪些成员）时，只问一个最关键的问题，status 用 question。',
+    '- 信息够了，先用一句话复述你的理解（包括你选了哪些成员），并问用户是否确认，status 用 question，reply 里要出现「确认」。',
+    '- 只有用户明确确认后，才输出 status=ready、graph 和 memberIds。',
     '',
-    '只输出 JSON，格式：{"status":"question" 或 "ready","reply":"给用户看的话","graph":{...}}。status 为 question 时不要输出 graph。',
+    '只输出 JSON，格式：{"status":"question" 或 "ready","reply":"给用户看的话","graph":{...},"memberIds":["id"]}。status 为 question 时不要输出 graph 和 memberIds。',
   ].join('\n');
 
   try {
@@ -1364,15 +1373,27 @@ app.post('/api/workflows/coach', async (c) => {
       const bad = Array.isArray(graph.nodes)
         ? graph.nodes.find((n: any) => n.type === 'agent' && (!n.agentId || !memberSet.has(n.agentId)))
         : true;
+
+      const usedIds = Array.isArray(json.memberIds)
+        ? json.memberIds.map((x: unknown) => String(x)).filter((id: string) => memberSet.has(id))
+        : [];
+      const finalIds = usedIds.length
+        ? usedIds
+        : Array.from(new Set((graph.nodes ?? []).filter((n: any) => n.type === 'agent').map((n: any) => n.agentId))).filter(Boolean);
+
       if (checked.ok && !bad) {
-        return c.json({ data: { status: 'ready', reply: String(json.reply ?? '已生成，打开流程图确认。'), graph } });
+        return c.json({
+          data: { status: 'ready', reply: String(json.reply ?? '已生成，打开流程图确认。'), graph, memberIds: finalIds },
+        });
       }
       // 图不合法：退回一版确定性的，避免卡住
+      const fb = generateWorkflow({ memberIds: hintIds.length ? hintIds : agentIds, withHuman: true });
       return c.json({
         data: {
           status: 'ready',
           reply: '模型生成的图有点问题，我先按角色生成一版，你在画布上再调。',
-          graph: generateWorkflow({ memberIds, withHuman: true }),
+          graph: fb,
+          memberIds: hintIds.length ? hintIds : agentIds,
         },
       });
     }

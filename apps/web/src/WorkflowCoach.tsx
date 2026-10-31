@@ -9,22 +9,26 @@ interface Msg {
 
 export default function WorkflowCoach({
   agents,
+  memberIds = [],
   onReady,
   onClose,
 }: {
   agents: Agent[];
-  onReady: (graph: GroupWorkflow) => void;
+  memberIds?: string[];
+  onReady: (result: { graph: GroupWorkflow; memberIds: string[] }) => void;
   onClose: () => void;
 }) {
   const [messages, setMessages] = useState<Msg[]>([
     {
       role: 'assistant',
-      content: `告诉我你希望这个群怎么聊：谁先做、要不要评审、改几轮、最后要不要你确认。\n可用成员：${agents.map((a) => `${a.name}（${a.role}）`).join('、')}`,
+      content: memberIds.length
+        ? `告诉我你希望这个群怎么聊：谁先做、要不要评审、改几轮、最后要不要你确认。\n当前成员：${agents.filter((a) => memberIds.includes(a.id)).map((a) => `${a.name}（${a.role}）`).join('、')}`
+        : `告诉我你想让这个群做什么、怎么做，我会帮你选合适的智能体并安排流程。\n可选智能体（${agents.length} 个）：${agents.map((a) => `${a.name}（${a.role}）`).join('、')}`,
     },
   ]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
-  const [readyGraph, setReadyGraph] = useState<GroupWorkflow | null>(null);
+  const [readyResult, setReadyResult] = useState<{ graph: GroupWorkflow; memberIds: string[] } | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -32,22 +36,24 @@ export default function WorkflowCoach({
   }, [messages, busy]);
 
   useEffect(() => {
-    if (!readyGraph) return;
-    const timer = window.setTimeout(() => onReady(readyGraph), 1100);
+    if (!readyResult) return;
+    const timer = window.setTimeout(() => onReady(readyResult), 1100);
     return () => window.clearTimeout(timer);
-  }, [readyGraph, onReady]);
+  }, [readyResult, onReady]);
 
   async function send() {
     const text = input.trim();
-    if (!text || busy || readyGraph) return;
+    if (!text || busy || readyResult) return;
     const history = messages.filter((m) => m.role === 'user' || m.role === 'assistant');
     setMessages((prev) => [...prev, { role: 'user', content: text }]);
     setInput('');
     setBusy(true);
     try {
-      const r = await coachWorkflow(agents.map((a) => a.id), history, text);
+      const r = await coachWorkflow(agents.map((a) => a.id), memberIds, history, text);
       setMessages((prev) => [...prev, { role: 'assistant', content: r.reply }]);
-      if (r.status === 'ready' && r.graph) setReadyGraph(r.graph);
+      if (r.status === 'ready' && r.graph) {
+        setReadyResult({ graph: r.graph, memberIds: r.memberIds ?? memberIds });
+      }
     } catch (e) {
       setMessages((prev) => [...prev, { role: 'assistant', content: `出错了：${String((e as Error).message ?? e)}` }]);
     } finally {
@@ -69,15 +75,15 @@ export default function WorkflowCoach({
             </div>
           ))}
           {busy && <div className="coach-msg assistant"><div className="coach-bubble coach-typing"><span className="dots"><i /><i /><i /></span></div></div>}
-          {readyGraph && <div className="coach-ready">流程已生成，正在打开画布…</div>}
+          {readyResult && <div className="coach-ready">流程已生成，正在打开画布…</div>}
         </div>
         <div className="coach-input">
           <textarea
             className="input"
             rows={2}
             value={input}
-            disabled={busy || !!readyGraph}
-            placeholder="比如：先让阿哲出方案，小柯评审，改两轮，然后图匠出图，最后我确认"
+            disabled={busy || !!readyResult}
+            placeholder="比如：帮我搭一个做数据仓库设计的小组，要有人出方案、评审、画图，改两轮，最后我确认"
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -86,7 +92,7 @@ export default function WorkflowCoach({
               }
             }}
           />
-          <button className="btn primary" disabled={!input.trim() || busy || !!readyGraph} onClick={() => void send()}>发送</button>
+          <button className="btn primary" disabled={!input.trim() || busy || !!readyResult} onClick={() => void send()}>发送</button>
         </div>
         <div className="sheet-foot">
           <span className="foot-note">确认后才会生成流程图，不会直接改掉当前群。</span>
