@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Agent, ChatIntro, Conversation, Member, Message, ModelInfo, Task } from '@sbot/shared';
+import type { Agent, ChatIntro, Conversation, GroupWorkflow, Member, Message, ModelInfo, Task } from '@sbot/shared';
 import confetti from 'canvas-confetti';
 import {
   addHumanMember,
@@ -21,20 +21,24 @@ import {
   fetchMessages,
   fetchModels,
   fetchKbDatasets,
+  fetchGroupWorkflow,
   fetchOpencodeStatus,
   fetchSettings,
   installOpencodeRuntime,
   fetchIntro,
   fetchRuntime,
   fetchTasks,
+  generateGroupWorkflow,
   importConversation as importConversationApi,
   heartbeatPresence,
   inviteLanPeer,
   apiUrl,
+  approveWorkflow,
   removeMember as removeMemberApi,
   replyHumanWait,
   replyPermission,
   resumeHumanWait,
+  saveGroupWorkflow,
   sendMessage,
   setLanIdentity,
   startExecution,
@@ -53,6 +57,7 @@ import Intro from './Intro';
 import AgentsPage from './AgentsPage';
 import SkillsPage from './SkillsPage';
 import SettingsPage from './SettingsPage';
+import WorkflowEditor from './WorkflowEditor';
 import { ColleagueSearchDialog, MattermostInviteDialog } from './Colleagues';
 import { animateDrawer, animateIntro, animateOverlay, animatePanel, animateToast } from './anim';
 import {
@@ -65,6 +70,7 @@ import {
   RenameDialog,
   SearchPanel,
   TaskDialog,
+  WorkflowApprovalDialog,
   type MenuItem,
 } from './Panels';
 import './styles.css';
@@ -475,6 +481,14 @@ export default function App() {
   } | null>(null);
   const [retrievingAgent, setRetrievingAgent] = useState<string | null>(null);
   const [selectedCitation, setSelectedCitation] = useState<{ n: number; kb: string; doc: string; score: number; text: string } | null>(null);
+  const [workflowRun, setWorkflowRun] = useState<{
+    runId: string;
+    conversationId: string;
+    graph: GroupWorkflow;
+    currentNodeId?: string;
+  } | null>(null);
+  const [workflowApproval, setWorkflowApproval] = useState<{ runId: string; nodeId: string; title: string; nodeLabel: string } | null>(null);
+  const [workflowEditor, setWorkflowEditor] = useState<{ conversationId: string; graph: GroupWorkflow } | null>(null);
   const [ocSetup, setOcSetup] = useState<{ url: string; busy: boolean; error?: string } | null>(null);
   const [unread, setUnread] = useState<Record<string, number>>({});
   const activeIdRef = useRef<string | null>(null);
@@ -1011,9 +1025,9 @@ export default function App() {
     }
   }
 
-  async function handleCreateGroup(title: string, memberIds: string[]) {
+  async function handleCreateGroup(title: string, memberIds: string[], workflow: GroupWorkflow | null = null) {
     try {
-      const conv = await createGroupApi(title, memberIds);
+      const conv = await createGroupApi(title, memberIds, workflow);
       setConversations((prev) => [conv, ...prev]);
       setActiveId(conv.id);
       setView('chat');
@@ -1220,6 +1234,27 @@ export default function App() {
       await addHumanMember(active.id, name, role);
       await reloadActive();
       showToast(`${name} 已加入群聊`);
+    } catch (e) {
+      showToast(String(e));
+    }
+  }
+
+  async function openWorkflowEditor(conversationId: string) {
+    try {
+      let graph = await fetchGroupWorkflow(conversationId);
+      if (!graph) graph = await generateGroupWorkflow(conversationId);
+      setWorkflowEditor({ conversationId, graph });
+      setDrawerOpen(false);
+    } catch (e) {
+      showToast(String(e));
+    }
+  }
+
+  async function saveWorkflowGraph(conversationId: string, graph: GroupWorkflow) {
+    try {
+      await saveGroupWorkflow(conversationId, graph);
+      setWorkflowEditor(null);
+      showToast('聊天逻辑已保存，下一轮生效');
     } catch (e) {
       showToast(String(e));
     }
@@ -1485,6 +1520,22 @@ export default function App() {
             }
           } else if (e.type === 'human.resume') {
             setHumanWait((cur) => (cur?.runId === e.runId ? null : cur));
+          } else if (e.type === 'workflow.start') {
+            setWorkflowRun({
+              runId: e.runId,
+              conversationId: e.conversationId,
+              graph: e.graph,
+            });
+          } else if (e.type === 'workflow.node') {
+            setWorkflowRun((cur) => (cur && cur.runId === e.runId ? { ...cur, currentNodeId: e.node.id } : cur));
+            if (e.node.type === 'human') {
+              setWorkflowApproval({ runId: e.runId, nodeId: e.node.id, title: e.node.label, nodeLabel: e.node.label });
+            }
+          } else if (e.type === 'workflow.approval') {
+            setWorkflowApproval({ runId: e.runId, nodeId: e.nodeId, title: e.title, nodeLabel: e.title });
+          } else if (e.type === 'workflow.done') {
+            setWorkflowRun(null);
+            setWorkflowApproval(null);
           } else if (e.type === 'message.end') {
             setStreaming(null);
             if (document.hidden || !document.hasFocus()) {
@@ -1902,6 +1953,21 @@ export default function App() {
                 )}
               </header>
 
+              {workflowRun && workflowRun.conversationId === active.id && (
+                <div className="wf-strip">
+                  <span className="wf-strip-title">聊天逻辑</span>
+                  <div className="wf-strip-steps">
+                    {workflowRun.graph.nodes
+                      .filter((n) => n.type !== 'start' && n.type !== 'end')
+                      .map((n) => (
+                        <span key={n.id} className={`wf-step ${n.type} ${workflowRun.currentNodeId === n.id ? 'on' : ''}`}>
+                          {n.label}
+                        </span>
+                      ))}
+                  </div>
+                </div>
+              )}
+
               <div className={`messages ${messages.length === 0 ? 'with-intro' : ''}`} ref={scrollRef}>
                 {messages.length === 0 && !running && (
                   <Intro
@@ -2180,6 +2246,7 @@ export default function App() {
           onToast={showToast}
           user={user}
           onInviteHuman={(name, role) => void inviteHumanToActive(name, role)}
+          onEditWorkflow={() => void openWorkflowEditor(active.id)}
         />
       )}
       {p2pInvite && (
@@ -2250,7 +2317,7 @@ export default function App() {
         <NewGroupDialog
           agents={agents}
           onCancel={() => setNewGroupOpen(false)}
-          onCreate={(title, ids) => void handleCreateGroup(title, ids)}
+          onCreate={(title, ids, graph) => void handleCreateGroup(title, ids, graph)}
         />
       )}
       {taskDialog && (
@@ -2336,6 +2403,27 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+      {workflowEditor && (
+        <div className="overlay wf-editor-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setWorkflowEditor(null); }}>
+          <WorkflowEditor
+            graph={workflowEditor.graph}
+            agents={agents}
+            onClose={() => setWorkflowEditor(null)}
+            onSave={(g) => void saveWorkflowGraph(workflowEditor.conversationId, g)}
+          />
+        </div>
+      )}
+      {workflowApproval && (
+        <WorkflowApprovalDialog
+          title={workflowApproval.title}
+          nodeLabel={workflowApproval.nodeLabel}
+          onDecide={(decision) => {
+            const { runId, nodeId } = workflowApproval;
+            setWorkflowApproval(null);
+            approveWorkflow(runId, nodeId, decision).catch((e) => showToast(String(e)));
+          }}
+        />
       )}
       {toast && <div className="toast">{toast}</div>}
       {draggingMember && (

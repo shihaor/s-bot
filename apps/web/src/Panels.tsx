@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Agent, Conversation, Message, ModelInfo, Task } from '@sbot/shared';
+import type { Agent, Conversation, GroupWorkflow, Message, ModelInfo, Task } from '@sbot/shared';
+import { previewGroupWorkflow } from './api';
+import WorkflowEditor from './WorkflowEditor';
 
 export interface MenuItem {
   label: string;
@@ -284,10 +286,13 @@ export function NewGroupDialog({
 }: {
   agents: Agent[];
   onCancel: () => void;
-  onCreate: (title: string, memberIds: string[]) => void;
+  onCreate: (title: string, memberIds: string[], workflow: GroupWorkflow | null) => void;
 }) {
   const [title, setTitle] = useState('');
   const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [graph, setGraph] = useState<GroupWorkflow | null>(null);
+  const [graphBusy, setGraphBusy] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
 
   function toggle(id: string) {
     setPicked((prev) => {
@@ -298,12 +303,36 @@ export function NewGroupDialog({
     });
   }
 
+  useEffect(() => {
+    if (picked.size < 2) {
+      setGraph(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setGraphBusy(true);
+      try {
+        const g = await previewGroupWorkflow([...picked], true);
+        if (!cancelled) setGraph(g);
+      } catch {
+        if (!cancelled) setGraph(null);
+      } finally {
+        if (!cancelled) setGraphBusy(false);
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [picked]);
+
   const name = title.trim() || (picked.size === 2 ? '新的评审组' : '新建群聊');
+  const stages = graph?.nodes.filter((n) => n.type !== 'start' && n.type !== 'end') ?? [];
 
   return (
     <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
       <div className="sheet">
-        <div className="sheet-head"><h3>新建群聊</h3><p>选 2~6 个智能体，它们会像同事一样在一个群里协作。</p></div>
+        <div className="sheet-head"><h3>新建群聊</h3><p>选 2~6 个智能体，系统会按他们的角色生成一张聊天逻辑图。</p></div>
         <div className="sheet-body">
           <label className="field"><span>群名称</span>
             <input className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="留空自动生成，比如「首页改版评审」" />
@@ -319,12 +348,42 @@ export function NewGroupDialog({
               ))}
             </div>
           </div>
+
+          <div className="field">
+            <span>聊天逻辑（自动生成，可调整）</span>
+            <div className="wf-preview">
+              {graphBusy && <span className="wf-preview-hint">正在生成…</span>}
+              {!graphBusy && picked.size < 2 && <span className="wf-preview-hint">选满 2 人后自动生成</span>}
+              {!graphBusy && stages.length > 0 && (
+                <div className="wf-preview-chain">
+                  {stages.map((n, i) => (
+                    <span key={n.id} className={`wf-step ${n.type}`}>
+                      {i > 0 && <span className="wf-arrow">→</span>}
+                      {n.label}
+                    </span>
+                  ))}
+                </div>
+              )}
+              <button className="btn" disabled={!graph} onClick={() => setEditorOpen(true)}>编辑聊天逻辑</button>
+            </div>
+          </div>
         </div>
         <div className="sheet-foot">
           <button className="btn" onClick={onCancel}>取消</button>
-          <button className="btn primary" disabled={picked.size < 2} onClick={() => onCreate(name, [...picked])}>创建群聊</button>
+          <button className="btn primary" disabled={picked.size < 2} onClick={() => onCreate(name, [...picked], graph)}>创建群聊</button>
         </div>
       </div>
+
+      {editorOpen && graph && (
+        <div className="overlay wf-editor-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setEditorOpen(false); }}>
+          <WorkflowEditor
+            graph={graph}
+            agents={agents}
+            onClose={() => setEditorOpen(false)}
+            onSave={(g) => { setGraph(g); setEditorOpen(false); }}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -425,6 +484,7 @@ export function GroupDrawer({
   onToast,
   user,
   onInviteHuman,
+  onEditWorkflow,
 }: {
   conv: Conversation;
   agents: Agent[];
@@ -443,6 +503,7 @@ export function GroupDrawer({
   onToast: (msg: string) => void;
   user: { id?: string; name: string; role: string; initial: string } | null;
   onInviteHuman: (name: string, role: string) => void;
+  onEditWorkflow: () => void;
 }) {
   const [title, setTitle] = useState(conv.title);
   const [picking, setPicking] = useState(false);
@@ -621,6 +682,12 @@ export function GroupDrawer({
           </div>
         </div>
 
+        <div className="dsec">
+          <div className="dsec-title">聊天逻辑</div>
+          <div className="dsec-hint" style={{ marginTop: 0 }}>这张图决定群里谁在什么时候说话，以及什么时候停。</div>
+          <button className="btn" onClick={onEditWorkflow}>编辑聊天逻辑</button>
+        </div>
+
         <div className="dsec danger-zone">
           <button className="btn danger" onClick={onDissolve}>解散群聊</button>
         </div>
@@ -668,6 +735,37 @@ export function PermissionDialog({
           <button className="btn" onClick={() => onDecide('reject')}>拒绝</button>
           <button className="btn" onClick={() => onDecide('always')}>总是允许</button>
           <button className="btn primary" onClick={() => onDecide('once')}>允许一次</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- 聊天逻辑：真人确认 ---------- */
+
+export function WorkflowApprovalDialog({
+  title,
+  nodeLabel,
+  onDecide,
+}: {
+  title: string;
+  nodeLabel: string;
+  onDecide: (decision: 'pass' | 'changes') => void;
+}) {
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) return; }}>
+      <div className="sheet perm-sheet">
+        <div className="sheet-head">
+          <h3>{title || '需要你确认'}</h3>
+          <p>聊天逻辑走到了「{nodeLabel || '真人确认'}」这一步。</p>
+        </div>
+        <div className="sheet-body">
+          <div className="perm-action">确认这一步的结果</div>
+          <div className="perm-hint">通过就继续往下走；要改会回到修订节点。120 秒不处理按超时处理。</div>
+        </div>
+        <div className="sheet-foot perm-foot">
+          <button className="btn" onClick={() => onDecide('changes')}>要改</button>
+          <button className="btn primary" onClick={() => onDecide('pass')}>通过</button>
         </div>
       </div>
     </div>

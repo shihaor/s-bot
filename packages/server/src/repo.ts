@@ -1,6 +1,6 @@
 import { db } from './db.js';
 import { broadcast } from './events.js';
-import type { Agent, Conversation, Member, Message, ModelInfo, Task } from '@sbot/shared';
+import type { Agent, Conversation, GroupWorkflow, Member, Message, ModelInfo, Task } from '@sbot/shared';
 
 const mapAgent = (r: any): Agent => ({
   id: r.id,
@@ -883,4 +883,86 @@ export function upsertHuman(input: { name: string; role?: string }): Human {
     Date.now(),
   );
   return getHuman(id)!;
+}
+
+/* ---------- 聊天逻辑图 ---------- */
+
+export function getWorkflow(conversationId: string): GroupWorkflow | null {
+  const row = db.prepare('SELECT * FROM group_workflows WHERE conversation_id = ?').get(conversationId) as any;
+  if (!row) return null;
+  try {
+    const graph = JSON.parse(row.graph) as GroupWorkflow;
+    return { ...graph, version: row.version, updatedAt: row.updated_at };
+  } catch {
+    return null;
+  }
+}
+
+export function saveWorkflow(conversationId: string, graph: GroupWorkflow): GroupWorkflow {
+  const prev = db.prepare('SELECT version FROM group_workflows WHERE conversation_id = ?').get(conversationId) as any;
+  const version = (prev?.version ?? 0) + 1;
+  const updatedAt = Date.now();
+  const next: GroupWorkflow = { ...graph, version, updatedAt };
+  db.prepare(
+    `INSERT INTO group_workflows (conversation_id, graph, version, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(conversation_id) DO UPDATE SET graph = excluded.graph, version = excluded.version, updated_at = excluded.updated_at`,
+  ).run(conversationId, JSON.stringify(next), version, updatedAt);
+  broadcast('workflow', { conversationId, version }, conversationId);
+  return next;
+}
+
+export function deleteWorkflow(conversationId: string): void {
+  db.prepare('DELETE FROM group_workflows WHERE conversation_id = ?').run(conversationId);
+  db.prepare('DELETE FROM workflow_runs WHERE conversation_id = ?').run(conversationId);
+}
+
+export function createWorkflowRun(input: {
+  conversationId: string;
+  graphVersion: number;
+  inputMessageId?: string | null;
+}): string {
+  const id = `wfr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  db.prepare(
+    'INSERT INTO workflow_runs (id, conversation_id, graph_version, input_message_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(id, input.conversationId, input.graphVersion, input.inputMessageId ?? null, 'running', Date.now());
+  return id;
+}
+
+export function updateWorkflowRun(
+  id: string,
+  patch: { status?: string; currentNode?: string | null; endedAt?: number | null },
+): void {
+  const fields: string[] = [];
+  const values: Array<string | number | null> = [];
+  if (patch.status !== undefined) { fields.push('status = ?'); values.push(patch.status); }
+  if (patch.currentNode !== undefined) { fields.push('current_node = ?'); values.push(patch.currentNode); }
+  if (patch.endedAt !== undefined) { fields.push('ended_at = ?'); values.push(patch.endedAt); }
+  if (!fields.length) return;
+  values.push(id);
+  db.prepare(`UPDATE workflow_runs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+}
+
+export function addWorkflowStep(input: {
+  runId: string;
+  nodeId: string;
+  agentId?: string | null;
+  status: string;
+  verdict?: string | null;
+  text?: string | null;
+}): string {
+  const id = `wfs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  db.prepare(
+    'INSERT INTO workflow_steps (id, run_id, node_id, agent_id, status, verdict, text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+  ).run(
+    id,
+    input.runId,
+    input.nodeId,
+    input.agentId ?? null,
+    input.status,
+    input.verdict ?? null,
+    input.text ?? null,
+    Date.now(),
+  );
+  return id;
 }

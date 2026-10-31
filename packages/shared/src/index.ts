@@ -117,6 +117,39 @@ export interface ModelInfo {
 
 export type TaskStatus = 'todo' | 'awaiting' | 'done';
 
+/** 群聊的聊天逻辑图：节点 + 条件连线 */
+export type WorkflowNodeType = 'start' | 'agent' | 'human' | 'end';
+export type WorkflowWhen = 'always' | 'pass' | 'changes' | 'timeout';
+
+export interface WorkflowNode {
+  id: string;
+  type: WorkflowNodeType;
+  label: string;
+  agentId?: string;
+  prompt?: string;
+  producesVerdict?: boolean;
+  x?: number;
+  y?: number;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  from: string;
+  to: string;
+  when?: WorkflowWhen;
+  label?: string;
+  maxLoops?: number;
+}
+
+export interface GroupWorkflow {
+  version: number;
+  enabled: boolean;
+  maxLoops: number;
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  updatedAt?: number;
+}
+
 /** 首次进入会话时的开场白 + 推荐问题 */
 export interface ChatIntro {
   kind: 'dm' | 'group';

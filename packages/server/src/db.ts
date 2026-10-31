@@ -110,6 +110,36 @@ CREATE TABLE IF NOT EXISTS humans (
   initial TEXT NOT NULL DEFAULT '人',
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS group_workflows (
+  conversation_id TEXT PRIMARY KEY,
+  graph TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  graph_version INTEGER NOT NULL DEFAULT 1,
+  input_message_id TEXT,
+  status TEXT NOT NULL DEFAULT 'running',
+  current_node TEXT,
+  created_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS workflow_steps (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  agent_id TEXT,
+  status TEXT NOT NULL DEFAULT 'running',
+  verdict TEXT,
+  text TEXT,
+  created_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
 `);
 
 /* 轻量迁移：给老库补列 */

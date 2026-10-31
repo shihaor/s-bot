@@ -1,4 +1,4 @@
-﻿import type { Agent, ChatIntro, Conversation, HandoffPackage, Message, ModelInfo, Task } from '@sbot/shared';
+﻿import type { Agent, ChatIntro, Conversation, GroupWorkflow, HandoffPackage, Message, ModelInfo, Task } from '@sbot/shared';
 
 /** 可以指向内网服务器（设置里保存），留空就是本地内置服务 */
 export function apiBase(): string {
@@ -179,15 +179,60 @@ export async function ensureHumanDm(humanId: string): Promise<Conversation> {
   return r.data;
 }
 
-export async function createGroup(title: string, memberIds: string[]): Promise<Conversation> {
+export async function createGroup(title: string, memberIds: string[], workflow?: GroupWorkflow | null): Promise<Conversation> {
   const res = await apiFetch('/api/conversations', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ title, memberIds }),
+    body: JSON.stringify({ title, memberIds, workflow }),
   });
   if (!res.ok) throw new Error('创建群聊失败');
   const r = (await res.json()) as { data: Conversation };
   return r.data;
+}
+
+/* ---------- 聊天逻辑图 ---------- */
+
+export async function fetchGroupWorkflow(conversationId: string): Promise<GroupWorkflow | null> {
+  const r = await getJson<{ data: GroupWorkflow | null }>(`/api/conversations/${conversationId}/workflow`);
+  return r.data;
+}
+
+export async function saveGroupWorkflow(conversationId: string, graph: GroupWorkflow): Promise<GroupWorkflow> {
+  const res = await apiFetch(`/api/conversations/${conversationId}/workflow`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ graph }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { data?: GroupWorkflow; error?: string };
+  if (!res.ok) throw new Error(body.error ?? '保存聊天逻辑失败');
+  return body.data!;
+}
+
+export async function generateGroupWorkflow(conversationId: string): Promise<GroupWorkflow> {
+  const res = await apiFetch(`/api/conversations/${conversationId}/workflow/generate`, { method: 'POST' });
+  if (!res.ok) throw new Error('生成聊天逻辑失败');
+  const r = (await res.json()) as { data: GroupWorkflow };
+  return r.data;
+}
+
+export async function previewGroupWorkflow(memberIds: string[], withHuman = true): Promise<GroupWorkflow> {
+  const res = await apiFetch('/api/workflows/preview', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ memberIds, withHuman }),
+  });
+  if (!res.ok) throw new Error('生成聊天逻辑失败');
+  const r = (await res.json()) as { data: GroupWorkflow };
+  return r.data;
+}
+
+export async function approveWorkflow(runId: string, nodeId: string, decision: 'pass' | 'changes'): Promise<void> {
+  const res = await apiFetch(`/api/workflow/runs/${runId}/approve`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ nodeId, decision }),
+  });
+  if (!res.ok) throw new Error('提交确认失败');
 }
 
 export async function updateConversation(
@@ -834,6 +879,11 @@ export type ChatEvent =
   | { type: 'retrieval.start'; agentId: string }
   | { type: 'retrieval.done'; agentId: string; count: number }
   | { type: 'permission.ask'; agentId: string; messageId: string; requestID: string; action: string; resources: string[] }
+  | { type: 'workflow.start'; runId: string; conversationId: string; graph: GroupWorkflow }
+  | { type: 'workflow.node'; runId: string; node: { id: string; type: string; label: string; agentId: string | null } }
+  | { type: 'workflow.node.end'; runId: string; nodeId: string; status: string; verdict: string | null }
+  | { type: 'workflow.approval'; runId: string; nodeId: string; title: string }
+  | { type: 'workflow.done'; runId: string; interrupted: boolean }
   | { type: 'task.confirm'; message: Message; task: Task }
   | { type: 'execution.plan'; message: Message }
   | { type: 'run.end' };

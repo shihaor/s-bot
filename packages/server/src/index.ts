@@ -33,6 +33,9 @@ import {
   getSettings,
   getTask,
   getHuman,
+  getWorkflow,
+  saveWorkflow,
+  deleteWorkflow,
   upsertHuman,
   listAgents,
   listConversations,
@@ -80,6 +83,8 @@ import {
   sendMattermostDm,
 } from './mattermost.js';
 import { broadcast, bus } from './events.js';
+import { generateWorkflow, validateWorkflow } from './workflow.js';
+import { resolveWorkflowApproval, runWorkflow } from './workflowRunner.js';
 
 const app = new Hono();
 app.use('*', cors());
@@ -1125,7 +1130,14 @@ app.post('/api/conversations', async (c) => {
   const title = String(b?.title ?? '').trim();
   const memberIds = Array.isArray(b?.memberIds) ? b.memberIds.map((s: unknown) => String(s)) : [];
   if (!title || memberIds.length < 2) return c.json({ error: 'title and at least 2 members required' }, 400);
-  return c.json({ data: createGroup(title, memberIds) }, 201);
+  const conv = createGroup(title, memberIds);
+  // 新建群：自动生成聊天逻辑图（前端可以传自己改过的）
+  const graph = b?.workflow && Array.isArray(b.workflow.nodes)
+    ? b.workflow
+    : generateWorkflow({ memberIds, title, withHuman: true });
+  const checked = validateWorkflow(graph);
+  if (checked.ok) saveWorkflow(conv.id, graph);
+  return c.json({ data: conv, workflow: checked.ok ? getWorkflow(conv.id) : null, workflowErrors: checked.errors }, 201);
 });
 
 app.post('/api/conversations/dm', async (c) => {
@@ -1167,6 +1179,7 @@ app.delete('/api/conversations/:id', (c) => {
   if (!getConversation(id)) return c.json({ error: 'conversation not found' }, 404);
   deleteConversation(id);
   clearAgentSessions(id);
+  deleteWorkflow(id);
   return c.json({ ok: true });
 });
 
@@ -1221,6 +1234,61 @@ app.post('/api/conversations/:id/humans', async (c) => {
   });
   void sendJoinEvent(id, 'human', human.id);
   return c.json({ data: getConversation(id) });
+});
+
+app.get('/api/conversations/:id/workflow', (c) => {
+  const id = c.req.param('id');
+  if (!getConversation(id)) return c.json({ error: 'conversation not found' }, 404);
+  return c.json({ data: getWorkflow(id) });
+});
+
+app.put('/api/conversations/:id/workflow', async (c) => {
+  const id = c.req.param('id');
+  if (!getConversation(id)) return c.json({ error: 'conversation not found' }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const graph = b?.graph ?? b;
+  if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
+    return c.json({ error: 'invalid workflow' }, 400);
+  }
+  const checked = validateWorkflow(graph);
+  if (!checked.ok) return c.json({ error: checked.errors.join('；'), errors: checked.errors }, 400);
+  return c.json({ data: saveWorkflow(id, graph) });
+});
+
+app.post('/api/conversations/:id/workflow/generate', (c) => {
+  const id = c.req.param('id');
+  const conv = getConversation(id);
+  if (!conv) return c.json({ error: 'conversation not found' }, 404);
+  const graph = generateWorkflow({
+    memberIds: conv.members.filter((m) => m.memberType === 'agent').map((m) => m.memberId),
+    title: conv.title,
+    withHuman: true,
+  });
+  return c.json({ data: saveWorkflow(id, graph) });
+});
+
+app.post('/api/workflows/preview', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const memberIds = Array.isArray(b?.memberIds) ? b.memberIds.map((x: unknown) => String(x)) : [];
+  if (!memberIds.length) return c.json({ error: 'memberIds required' }, 400);
+  const graph = generateWorkflow({
+    memberIds,
+    title: String(b?.title ?? ''),
+    withHuman: b?.withHuman !== false,
+  });
+  return c.json({ data: graph });
+});
+
+app.post('/api/workflow/runs/:runId/approve', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const nodeId = String(b?.nodeId ?? '');
+  const decision = ['pass', 'changes', 'reject'].includes(b?.decision) ? b.decision : 'pass';
+  const ok = resolveWorkflowApproval(
+    c.req.param('runId'),
+    nodeId,
+    decision === 'changes' || decision === 'reject' ? 'changes' : 'pass',
+  );
+  return c.json({ ok });
 });
 
 app.patch('/api/conversations/:id/members/:agentId', async (c) => {
@@ -2800,6 +2868,25 @@ app.post('/api/conversations/:id/messages', async (c) => {
         runtime: opencodeOn ? 'opencode' : fallback ? 'llm' : 'mock',
       }),
     });
+
+    // 群聊如果配了聊天逻辑图，按图执行
+    const workflow = conv.type === 'group' && !suppressRun ? getWorkflow(id) : null;
+    if (workflow?.enabled) {
+      await runWorkflow({
+        conv,
+        graph: workflow,
+        text: promptText,
+        userMessageAt: userMessage.createdAt,
+        userMessageId: userMessage.id,
+        history,
+        defaultModel,
+        opencodeOn,
+        aborted: () => aborted,
+        signal: abortCtl.signal,
+        stream,
+      });
+      return;
+    }
 
     const produced: Array<ReturnType<typeof addMessage>> = [];
     const maxRounds = conv.maxTurns === 0 ? 2 : 1;
