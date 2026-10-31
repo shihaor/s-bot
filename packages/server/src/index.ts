@@ -2885,6 +2885,34 @@ app.post('/api/conversations/:id/messages', async (c) => {
         signal: abortCtl.signal,
         stream,
       });
+
+      if (!aborted) {
+        const pendingTask = tasksForConversation(id, 'todo')[0];
+        if (pendingTask) {
+          try {
+            if (await judgeTaskDone(pendingTask, defaultModel)) {
+              updateTask(pendingTask.id, { status: 'awaiting' });
+              const authorId = targets[targets.length - 1] ?? conv.members.find((m) => m.memberType === 'agent')?.memberId ?? null;
+              const confirmMessage = addMessage({
+                conversationId: id,
+                authorType: 'agent',
+                authorId,
+                role: 'assistant',
+                text: `任务「${pendingTask.title}」看起来已经完成，@${pendingTask.creatorName === '我' ? '你' : pendingTask.creatorName} 确认一下？`,
+                parts: [{ type: 'task-confirm', taskId: pendingTask.id, title: pendingTask.title }],
+              });
+              await stream.writeSSE({
+                event: 'task.confirm',
+                data: JSON.stringify({ message: confirmMessage, task: getTask(pendingTask.id) }),
+              });
+            }
+          } catch {
+            /* 判断失败不影响主流程 */
+          }
+        }
+      }
+
+      await stream.writeSSE({ event: 'run.end', data: '{}' });
       return;
     }
 
