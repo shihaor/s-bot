@@ -164,6 +164,7 @@ ensureColumn('messages', 'author_color', 'author_color TEXT');
 ensureColumn('messages', 'author_initial', 'author_initial TEXT');
 ensureColumn('agents', 'owner_id', 'owner_id TEXT');
 ensureColumn('humans', 'simulated', 'simulated INTEGER NOT NULL DEFAULT 0');
+ensureColumn('conversations', 'workflow_done', 'workflow_done INTEGER NOT NULL DEFAULT 0');
 
 /** 一次性默认：群聊发言不限制，让智能体多轮讨论 */
 function migrateUnlimitedTurns() {
@@ -227,23 +228,38 @@ cleanupDemoData();
 /**
  * 预置唯一一个「S-BOT 助手」：内置本软件使用手册，用户问它怎么用即可。
  * 只在没有同名智能体时创建，不覆盖用户后续的修改。
+ * 同时在消息列表里默认放一个它的单聊，方便用户直接问。
  */
 function seedHelper() {
   const exists = db.prepare('SELECT id FROM agents WHERE id = ?').get(S_BOT_HELPER_ID);
-  if (exists) return;
-  db.prepare(
-    'INSERT INTO agents (id, name, role, color, initial, model_id, system_prompt, description, skills, kb_ids, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)',
-  ).run(
-    S_BOT_HELPER_ID,
-    'S-BOT 助手',
-    '使用向导',
-    '#5B8CFF',
-    '助',
-    S_BOT_MANUAL,
-    'S-BOT 的使用手册都在我这里，问我怎么用就行。',
-    JSON.stringify(['使用帮助', '功能讲解', '问题排查']),
-    '[]',
-    now(),
-  );
+  if (!exists) {
+    db.prepare(
+      'INSERT INTO agents (id, name, role, color, initial, model_id, system_prompt, description, skills, kb_ids, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)',
+    ).run(
+      S_BOT_HELPER_ID,
+      'S-BOT 助手',
+      '使用向导',
+      '#5B8CFF',
+      '助',
+      S_BOT_MANUAL,
+      'S-BOT 的使用手册都在我这里，问我怎么用就行。',
+      JSON.stringify(['使用帮助', '功能讲解', '问题排查']),
+      '[]',
+      now(),
+    );
+  }
+
+  // 默认开一个 S-BOT 助手的单聊，让它在左侧消息列表里直接可见
+  const dmId = `cv_dm_${S_BOT_HELPER_ID}`;
+  const dm = db.prepare('SELECT id FROM conversations WHERE id = ?').get(dmId);
+  if (!dm) {
+    const at = now();
+    db.prepare(
+      'INSERT INTO conversations (id, type, title, model_id, pinned, muted, max_turns, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, 0, ?, ?)',
+    ).run(dmId, 'dm', 'S-BOT 助手', at, at);
+    db.prepare(
+      "INSERT INTO conversation_members (conversation_id, member_type, member_id, muted, talk) VALUES (?, 'agent', ?, 0, 'normal')",
+    ).run(dmId, S_BOT_HELPER_ID);
+  }
 }
 seedHelper();

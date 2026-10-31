@@ -208,6 +208,12 @@ export async function saveGroupWorkflow(conversationId: string, graph: GroupWork
   return body.data!;
 }
 
+/** 重新按流程走：清除「已出结论」标记 */
+export async function restartGroupWorkflow(conversationId: string): Promise<void> {
+  const res = await apiFetch(`/api/conversations/${conversationId}/workflow/restart`, { method: 'POST' });
+  if (!res.ok) throw new Error('重新启用流程失败');
+}
+
 export async function generateGroupWorkflow(conversationId: string): Promise<GroupWorkflow> {
   const res = await apiFetch(`/api/conversations/${conversationId}/workflow/generate`, { method: 'POST' });
   if (!res.ok) throw new Error('生成聊天逻辑失败');
@@ -676,8 +682,8 @@ export async function fetchLanSelf(): Promise<LanSelf> {
   return r.self;
 }
 
-/** 手动添加内网同事（广播/组播被屏蔽时输入对方 IP:端口） */
-export async function addLanPeer(host: string, port: number): Promise<LanPeer> {
+/** 手动添加内网同事（广播/组播被屏蔽时输入对方 IP 即可，端口默认 17070） */
+export async function addLanPeer(host: string, port = 17070): Promise<LanPeer> {
   const res = await apiFetch('/api/lan/peers', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -696,6 +702,29 @@ export async function setLanIdentity(input: { name?: string; role?: string; colo
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(input),
   });
+}
+
+/** 打开和远端真人的 P2P 单聊（局域网直连） */
+export async function openLanDm(peer: {
+  id: string;
+  name: string;
+  role: string;
+  color: string;
+  initial: string;
+  host: string;
+  port: number;
+}): Promise<Conversation> {
+  const res = await apiFetch('/api/p2p/dm', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ peer }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? '打开单聊失败');
+  }
+  const r = (await res.json()) as { data: Conversation };
+  return r.data;
 }
 
 export interface Colleague {

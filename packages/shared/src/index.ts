@@ -48,6 +48,8 @@ export interface Conversation {
   autoReply: boolean;
   supModel: string | null;
   maxTurns: number;
+  /** 流程是否已跑完/已出结论：为 true 时后续消息走自由对话，不再按聊天逻辑重跑 */
+  workflowDone?: boolean;
   createdAt: number;
   updatedAt: number;
   p2pGroupId?: string | null;

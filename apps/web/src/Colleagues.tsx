@@ -70,20 +70,17 @@ export function ColleagueSearchDialog({
   }, []);
 
   async function addManualPeer() {
-    const raw = manualAddr.trim();
-    if (!raw || manualBusy) return;
-    // 支持「10.201.2.5:8787」或「10.201.2.5 8787」
-    const m = raw.match(/^([0-9a-zA-Z.\-]+?)[\s:：]+(\d{2,5})$/);
-    if (!m) {
-      setManualError('格式：IP:端口，例如 10.201.2.5:8787');
+    const host = manualAddr.trim();
+    if (!host || manualBusy) return;
+    // 只填 IP：桌面端内置服务固定监听 17070 端口
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+      setManualError('请填写正确的 IP，例如 10.201.2.5');
       return;
     }
-    const host = m[1]!;
-    const port = Number(m[2]);
     setManualBusy(true);
     setManualError('');
     try {
-      const peer = await addLanPeer(host, port);
+      const peer = await addLanPeer(host);
       onToast(`已添加 ${peer.name}（${host}）`);
       setManualAddr('');
       setLanPeers((prev) => {
@@ -168,7 +165,8 @@ export function ColleagueSearchDialog({
             <div className="colleague-count">手动添加同事 <span className="lan-tag">内网互通</span></div>
             {lanSelf && lanSelf.addrs.length > 0 && (
               <div className="lan-self">
-                本机地址：<b>{lanSelf.addrs.map((a) => `${a}:${lanSelf.port}`).join('　')}</b>
+                本机地址：<b>{lanSelf.addrs.join('　')}</b>
+                <span className="lan-self-port">端口 17070</span>
               </div>
             )}
             <div className="lan-manual-row">
@@ -176,7 +174,7 @@ export function ColleagueSearchDialog({
                 className="input"
                 value={manualAddr}
                 onChange={(e) => setManualAddr(e.target.value)}
-                placeholder="对方 IP:端口，如 10.201.2.5:8787"
+                placeholder="对方 IP，如 10.201.2.5"
                 onKeyDown={(e) => { if (e.key === 'Enter') void addManualPeer(); }}
               />
               <button className="btn" disabled={manualBusy || !manualAddr.trim()} onClick={() => void addManualPeer()}>
@@ -186,7 +184,7 @@ export function ColleagueSearchDialog({
             {manualError && <div className="colleague-note warn">{manualError}</div>}
             {lanPeers.length === 0 && (
               <div className="colleague-note">
-                没自动发现到同事？如果公司网络屏蔽了广播/组播，把上面的「本机地址」告诉对方，让对方在这里手动添加即可。
+                没自动发现到同事？如果公司网络屏蔽了广播/组播，把上面的「本机地址」告诉对方，让对方在这里输入你的 IP 即可。
               </div>
             )}
           </div>

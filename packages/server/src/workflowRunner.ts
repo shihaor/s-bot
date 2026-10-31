@@ -1,5 +1,5 @@
 ﻿import type { Agent, Conversation, GroupWorkflow, Message, ModelInfo, WorkflowEdge, WorkflowNode } from '@sbot/shared';
-import { addMessage, addWorkflowStep, createWorkflowRun, getAgent, getModel, updateWorkflowRun } from './repo.js';
+import { addMessage, addWorkflowStep, createWorkflowRun, getAgent, getModel, setWorkflowDone, updateWorkflowRun } from './repo.js';
 import { ensureSession, runAgent } from './opencode.js';
 import { generateReply, type ModelConfig } from './runtime.js';
 import { retrieve } from './ragflow.js';
@@ -119,6 +119,7 @@ export async function runWorkflow(input: WorkflowRunInput): Promise<{ produced: 
 
   let current: WorkflowNode | null = graph.nodes.find((n) => n.type === 'start') ?? graph.nodes[0] ?? null;
   let guard = 0;
+  let reachedEnd = false;
 
   try {
     while (current && guard++ < 60 && !input.aborted()) {
@@ -132,6 +133,7 @@ export async function runWorkflow(input: WorkflowRunInput): Promise<{ produced: 
       });
 
       if (current.type === 'end') {
+        reachedEnd = true;
         updateWorkflowRun(runId, { currentNode: current.id });
         break;
       }
@@ -363,6 +365,8 @@ export async function runWorkflow(input: WorkflowRunInput): Promise<{ produced: 
       status: input.aborted() ? 'interrupted' : 'done',
       endedAt: Date.now(),
     });
+    // 正常跑完（到达结束节点）就把群标记为「已出结论」，后续消息转自由对话
+    if (reachedEnd && !input.aborted()) setWorkflowDone(conv.id, true);
     await stream.writeSSE({
       event: 'workflow.done',
       data: JSON.stringify({ runId, interrupted: input.aborted() }),

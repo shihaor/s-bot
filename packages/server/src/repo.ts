@@ -98,6 +98,7 @@ const mapConversation = (r: any, withMembers = true): Conversation => ({
   autoReply: r.auto_reply === undefined ? true : !!r.auto_reply,
   supModel: r.sup_model ?? null,
   maxTurns: r.max_turns ?? 0,
+  workflowDone: !!r.workflow_done,
   p2pGroupId: r.p2p_group_id ?? null,
   p2pHostId: r.p2p_host_id ?? null,
   createdAt: r.created_at,
@@ -779,6 +780,57 @@ export function upsertP2PHuman(input: { id: string; name: string; role?: string;
   return getHuman(input.id)!;
 }
 
+/** 打开一个和远端真人的 P2P 单聊：本地建影子真人 + 单聊会话，记录对方连接信息 */
+export function ensureP2PDm(peer: {
+  id: string;
+  name: string;
+  role?: string;
+  color?: string;
+  initial?: string;
+  host: string;
+  port: number;
+}): Conversation {
+  const human = upsertP2PHuman({
+    id: peer.id,
+    name: peer.name,
+    role: peer.role,
+    color: peer.color,
+    initial: peer.initial,
+  });
+  const dmId = `cv_dm_${peer.id}`;
+  let conv = getConversation(dmId);
+  const at = Date.now();
+  if (conv) {
+    // 对方 IP/端口可能变化，刷新一下
+    setP2PState(dmId, { peers: [{ id: peer.id, name: peer.name, host: peer.host, port: peer.port, token: '' }] });
+    return conv;
+  }
+  db.prepare(
+    'INSERT INTO conversations (id, type, title, model_id, pinned, muted, max_turns, p2p_group_id, p2p_host_id, p2p_token, p2p_peers, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, 0, ?, ?, ?, ?, ?, ?)',
+  ).run(
+    dmId,
+    'dm',
+    peer.name || '内网同事',
+    `pdm_${peer.id}`,
+    peer.id,
+    '',
+    JSON.stringify([{ id: peer.id, name: peer.name, host: peer.host, port: peer.port, token: '' }]),
+    at,
+    at,
+  );
+  addMember(dmId, human.id, 'human');
+  return getConversation(dmId)!;
+}
+
+/** 读 P2P 单聊的远端连接信息；不是 P2P 单聊返回 null */
+export function getP2PDmPeer(conversationId: string): P2PPeer | null {
+  const conv = getConversation(conversationId);
+  if (!conv || conv.type !== 'dm' || !conv.p2pHostId) return null;
+  const peer = getP2PState(conversationId)?.peers?.[0];
+  if (!peer?.host || !peer.port) return null;
+  return peer;
+}
+
 /** 给 P2P 群创建远端智能体的本地影子（不包含模型/系统提示，执行在创建者机器） */
 export function upsertP2PAgent(input: {
   id: string;
@@ -908,8 +960,15 @@ export function saveWorkflow(conversationId: string, graph: GroupWorkflow): Grou
      VALUES (?, ?, ?, ?)
      ON CONFLICT(conversation_id) DO UPDATE SET graph = excluded.graph, version = excluded.version, updated_at = excluded.updated_at`,
   ).run(conversationId, JSON.stringify(next), version, updatedAt);
+  // 改了流程就重新启用：下次发消息会再走一遍
+  setWorkflowDone(conversationId, false);
   broadcast('workflow', { conversationId, version }, conversationId);
   return next;
+}
+
+/** 标记流程是否已出结论：done=true 表示已跑完，后续消息走自由对话 */
+export function setWorkflowDone(conversationId: string, done: boolean): void {
+  db.prepare('UPDATE conversations SET workflow_done = ? WHERE id = ?').run(done ? 1 : 0, conversationId);
 }
 
 export function deleteWorkflow(conversationId: string): void {

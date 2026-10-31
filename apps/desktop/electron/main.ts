@@ -29,8 +29,24 @@ function freePort(): Promise<number> {
   });
 }
 
+/** 内置服务固定端口：同事之间只报 IP 就能互通，避免每次启动端口漂移 */
+const DEFAULT_HTTP_PORT = 17070;
+
+function tryPort(port: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.once('error', () => resolve(null));
+    srv.listen(port, '0.0.0.0', () => {
+      srv.close(() => resolve(port));
+    });
+  });
+}
+
 async function startServer(): Promise<number> {
-  const port = await freePort();
+  // 优先用固定端口 17070；被占用时退回随机端口（此时需在设置里指定对方真实端口）
+  let port = await tryPort(DEFAULT_HTTP_PORT);
+  if (!port) port = await freePort();
   process.env.PORT = String(port);
   process.env.SBOT_STATIC_DIR = path.join(__dirname, '../web');
   process.env.SBOT_DB = path.join(app.getPath('userData'), 'sbot.db');

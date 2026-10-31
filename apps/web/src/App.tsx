@@ -18,6 +18,7 @@ import {
   fetchAgents,
   fetchConversations,
   fetchHumans,
+  fetchLanPeers,
   fetchMessages,
   fetchModels,
   fetchKbDatasets,
@@ -32,6 +33,7 @@ import {
   importConversation as importConversationApi,
   heartbeatPresence,
   inviteLanPeer,
+  openLanDm,
   apiUrl,
   approveWorkflow,
   removeMember as removeMemberApi,
@@ -39,6 +41,7 @@ import {
   replyPermission,
   resumeHumanWait,
   saveGroupWorkflow,
+  restartGroupWorkflow,
   sendMessage,
   setLanIdentity,
   startExecution,
@@ -472,6 +475,7 @@ export default function App() {
   const [findColleaguesOpen, setFindColleaguesOpen] = useState(false);
   const [inviteExternalOpen, setInviteExternalOpen] = useState(false);
   const [inviteExternalUser, setInviteExternalUser] = useState('');
+  const [lanPeers, setLanPeers] = useState<LanPeer[]>([]);
   const [intro, setIntro] = useState<ChatIntro | null>(null);
   const [introLoading, setIntroLoading] = useState(false);
   const [permissionReq, setPermissionReq] = useState<{
@@ -714,6 +718,22 @@ export default function App() {
     }).catch(() => {});
   }, [profile.name, profile.role, profile.color, profile.initial]);
 
+  // 轮询局域网里自动发现的同事，显示到消息列表
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      void fetchLanPeers()
+        .then((list) => { if (alive) setLanPeers(list); })
+        .catch(() => { /* 本地服务不支持时忽略 */ });
+    };
+    load();
+    const timer = window.setInterval(load, 4000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   // 软等待倒计时
   useEffect(() => {
     if (!humanWait) {
@@ -826,10 +846,36 @@ export default function App() {
     (c) => c.type === 'dm' && c.members[0]?.memberType === 'agent' && matchQuery(c, searchQuery),
   );
 
-  /** 消息列里的同事：排除自己，在线优先；已经开过单聊的带上最近一条消息 */
+  /** 局域网自动发现的同事：按搜索词过滤 */
+  const filteredLanPeers = lanPeers.filter((p) => {
+    const needle = searchQuery.trim().toLowerCase();
+    if (!needle) return true;
+    return (
+      p.name.toLowerCase().includes(needle) ||
+      (p.role || '').toLowerCase().includes(needle) ||
+      p.host.toLowerCase().includes(needle)
+    );
+  });
+
+  /** 已经聊过的 P2P 单聊（远端真人），按搜索词过滤 */
+  const p2pDmConvs = conversations.filter(
+    (c) => c.type === 'dm' && !!c.p2pHostId && matchQuery(c, searchQuery),
+  );
+  /** 在线内网真人：优先显示已聊过的会话（带最后一条消息） */
+  const lanPeerRows = filteredLanPeers
+    .map((p) => ({ peer: p, conv: p2pDmConvs.find((c) => c.p2pHostId === p.id) ?? null }))
+    .filter(({ peer, conv }) => {
+      const q = searchQuery.trim().toLowerCase();
+      return !q || peer.name.toLowerCase().includes(q) || (peer.role || '').toLowerCase().includes(q);
+    });
+  /** 已聊过但当前不在线的 P2P 单聊（保留历史可继续聊） */
+  const offlineP2pDms = p2pDmConvs.filter((c) => !filteredLanPeers.some((p) => p.id === c.p2pHostId));
+
+  /** 消息列里的同事：排除自己，在线优先；已经开过单聊的带上最近一条消息（只含本地真人，不含内网影子真人） */
   const humanColleagues = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return humans
+      .filter((h) => h.id.startsWith('hu_'))
       .filter((h) => h.id !== user?.id)
       .filter((h) => !q || h.name.toLowerCase().includes(q) || h.role.toLowerCase().includes(q))
       .map((human) => ({
@@ -892,6 +938,38 @@ export default function App() {
     try {
       await inviteLanPeer(active.id, { id: peer.id, name: peer.name, host: peer.host, port: peer.port });
       showToast(`邀请已发送给 ${peer.name}`);
+    } catch (e) {
+      showToast(String(e));
+    }
+  }
+
+  async function openLanPeerDm(peer: LanPeer) {
+    try {
+      const conv = await openLanDm({
+        id: peer.id,
+        name: peer.name,
+        role: peer.role,
+        color: peer.color,
+        initial: peer.initial,
+        host: peer.host,
+        port: peer.port,
+      });
+      setConversations((prev) => (prev.some((c) => c.id === conv.id) ? prev.map((c) => (c.id === conv.id ? conv : c)) : [conv, ...prev]));
+      setActiveId(conv.id);
+      setView('chat');
+      setDrawerOpen(false);
+      setSearchOpen(false);
+    } catch (e) {
+      showToast(String(e));
+    }
+  }
+
+  async function restartWorkflowNow() {
+    if (!activeId) return;
+    try {
+      await restartGroupWorkflow(activeId);
+      setConversations((prev) => prev.map((c) => (c.id === activeId ? { ...c, workflowDone: false } : c)));
+      showToast('已重新启用流程，下次发消息会按流程走');
     } catch (e) {
       showToast(String(e));
     }
@@ -1822,7 +1900,63 @@ export default function App() {
               </>
             )}
 
-            {searchQuery && groups.length === 0 && dms.length === 0 && humanColleagues.length === 0 && (
+            {(lanPeerRows.length > 0 || offlineP2pDms.length > 0) && (
+              <>
+                <div className="sec">真人 <span>{lanPeerRows.length} 在线</span></div>
+                {lanPeerRows.map(({ peer: p, conv }) => (
+                  <div
+                    key={p.id}
+                    className={`conv human ${conv && activeId === conv.id ? 'active' : ''}`}
+                    title={`${p.host} · 点击开始聊天`}
+                    onClick={() => (conv ? (setActiveId(conv.id), setView('chat'), setDrawerOpen(false), setSearchOpen(false)) : openLanPeerDm(p))}
+                  >
+                    <span className="av-online-wrap">
+                      <Avatar name={p.name} initial={p.initial || p.name.slice(0, 1)} color={p.color} />
+                      <span className="human-online" />
+                    </span>
+                    <div className="conv-main">
+                      <div className="conv-top">
+                        <span className="conv-name">{p.name}</span>
+                        <span className="conv-right">
+                          <span className="conv-time online-text">在线</span>
+                        </span>
+                      </div>
+                      <div className="conv-sub">
+                        {conv?.lastMessage ? `${conv.lastMessage.authorName}：${conv.lastMessage.text}` : `${p.role || '同事'} · ${p.host}`}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {offlineP2pDms.map((c) => {
+                  const m = c.members.find((x) => x.memberType === 'human');
+                  return (
+                    <div
+                      key={c.id}
+                      className={`conv human ${activeId === c.id ? 'active' : ''}`}
+                      title={`${m?.name ?? c.title} · 离线，可查看历史`}
+                      onClick={() => { setActiveId(c.id); setView('chat'); setDrawerOpen(false); setSearchOpen(false); }}
+                    >
+                      <span className="av-online-wrap">
+                        <Avatar name={m?.name ?? c.title} initial={m?.initial ?? ''} color={m?.color ?? '#6B7385'} />
+                      </span>
+                      <div className="conv-main">
+                        <div className="conv-top">
+                          <span className="conv-name">{m?.name ?? c.title}</span>
+                          <span className="conv-right">
+                            <span className="conv-time">{c.lastMessage ? fmtTime(c.lastMessage.at) : '离线'}</span>
+                          </span>
+                        </div>
+                        <div className="conv-sub">
+                          {c.lastMessage ? `${c.lastMessage.authorName}：${c.lastMessage.text}` : (m?.role || '同事')}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            )}
+
+            {searchQuery && groups.length === 0 && dms.length === 0 && humanColleagues.length === 0 && lanPeerRows.length === 0 && offlineP2pDms.length === 0 && (
               <div className="side-empty">没有匹配的会话</div>
             )}
 
@@ -2085,6 +2219,12 @@ export default function App() {
               {error && <div className="error-line">{error}</div>}
 
               <footer className="composer-wrap">
+                {active?.type === 'group' && active.workflowDone && (
+                  <div className="wf-done-bar">
+                    <span className="wf-done-text">✅ 已按流程出结论，现在是自由讨论</span>
+                    <button className="btn" onClick={() => void restartWorkflowNow()}>重新按流程</button>
+                  </div>
+                )}
                 {humanWait && humanWait.conversationId === activeId && (
                   <div className="wait-bar">
                     <div className="wait-head">

@@ -26,6 +26,8 @@ import {
   deleteTask,
   ensureDm,
   ensureHumanDm,
+  ensureP2PDm,
+  getP2PDmPeer,
   getAgent,
   getConversation,
   getDefaultModel,
@@ -46,6 +48,7 @@ import {
   removeMember,
   saveSettings,
   setDefaultModel,
+  setWorkflowDone,
   DEFAULT_OPENCODE_URL,
   tasksForConversation,
   touchAgentSession,
@@ -429,9 +432,10 @@ app.post('/api/lan/identity', async (c) => {
 app.post('/api/lan/peers', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   const host = String(b?.host ?? '').trim().replace(/^https?:\/\//, '').split('/')[0];
-  const port = Number(b?.port ?? b?.port);
-  if (!host || !Number.isFinite(port) || port <= 0) {
-    return c.json({ error: '请填写对方 IP 和端口' }, 400);
+  // 默认端口 17070：桌面端内置服务固定监听这个端口，同事之间只报 IP 即可
+  const port = Number(b?.port) || 17070;
+  if (!host) {
+    return c.json({ error: '请填写对方 IP' }, 400);
   }
   const url = `http://${host}:${port}/api/lan/hello`;
   try {
@@ -454,6 +458,57 @@ app.post('/api/lan/peers', async (c) => {
   } catch (e) {
     return c.json({ error: `连不上 ${host}:${port}（${String((e as Error).message ?? e).slice(0, 80)}）` }, 400);
   }
+});
+
+/* ---------- P2P 单聊（局域网直连 1 对 1） ---------- */
+
+/** 打开一个和远端真人的单聊：本地建影子真人和会话，返回会话 */
+app.post('/api/p2p/dm', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const peer = b?.peer as { id?: string; name?: string; role?: string; color?: string; initial?: string; host?: string; port?: number } | undefined;
+  if (!peer?.id || !peer.host || !peer.port) return c.json({ error: '对方连接信息不完整' }, 400);
+  const conv = ensureP2PDm({
+    id: String(peer.id),
+    name: String(peer.name ?? '内网同事'),
+    role: String(peer.role ?? ''),
+    color: String(peer.color ?? '#5B8CFF'),
+    initial: String(peer.initial ?? ''),
+    host: String(peer.host),
+    port: Number(peer.port),
+  });
+  return c.json({ data: conv });
+});
+
+/** 收到远端真人的单聊消息：落到本地对应会话，推给界面 */
+app.post('/api/p2p/receive-dm', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const from = b?.from as { id?: string; name?: string; role?: string; color?: string; initial?: string } | undefined;
+  const text = String(b?.text ?? '').trim();
+  if (!from?.id || !text) return c.json({ ok: false, error: '消息格式不对' }, 400);
+  const host = p2pRemoteAddress(c) || String((b?.from as any)?.host ?? '');
+  const port = Number((b?.from as any)?.port ?? 0);
+
+  const conv = ensureP2PDm({
+    id: String(from.id),
+    name: String(from.name ?? '内网同事'),
+    role: String(from.role ?? ''),
+    color: String(from.color ?? '#5B8CFF'),
+    initial: String(from.initial ?? ''),
+    host,
+    port,
+  });
+  const human = getHuman(String(from.id));
+  addMessage({
+    conversationId: conv.id,
+    authorType: 'human',
+    authorId: human?.id ?? null,
+    authorName: human?.name ?? String(from.name ?? '内网同事'),
+    authorColor: human?.color ?? String(from.color ?? '#5B8CFF'),
+    authorInitial: human?.initial ?? String(from.initial ?? ''),
+    role: 'user',
+    text,
+  });
+  return c.json({ ok: true });
 });
 
 /* ---------- P2P 邀请 / 接受（局域网直连） ---------- */
@@ -1294,6 +1349,14 @@ app.put('/api/conversations/:id/workflow', async (c) => {
   const outsider = graph.nodes.find((n: any) => n.type === 'agent' && n.agentId && !memberIds.has(n.agentId));
   if (outsider) return c.json({ error: `节点「${outsider.label}」绑定的智能体不在这个群里` }, 400);
   return c.json({ data: saveWorkflow(id, graph) });
+});
+
+/** 重新按流程走：清除「已出结论」标记，下次发消息会再跑一遍聊天逻辑 */
+app.post('/api/conversations/:id/workflow/restart', (c) => {
+  const id = c.req.param('id');
+  if (!getConversation(id)) return c.json({ error: 'conversation not found' }, 404);
+  setWorkflowDone(id, false);
+  return c.json({ ok: true });
 });
 
 app.post('/api/conversations/:id/workflow/generate', (c) => {
@@ -3001,6 +3064,35 @@ app.post('/api/conversations/:id/messages', async (c) => {
   const parts = Array.isArray(body?.parts) ? body.parts : [];
   if (!text && parts.length === 0) return c.json({ error: 'text required' }, 400);
 
+  // P2P 单聊：把消息转发给远端真人，不跑本地智能体
+  const p2pPeer = getP2PDmPeer(id);
+  if (p2pPeer) {
+    const uid = c.req.header('x-sbot-user') || null;
+    const author = uid ? getHuman(uid) : null;
+    const own = getLanIdentity();
+    const msg = addMessage({
+      conversationId: id,
+      authorType: uid ? 'human' : 'user',
+      authorId: uid,
+      authorName: author?.name ?? own.name,
+      authorColor: author?.color ?? own.color,
+      authorInitial: author?.initial ?? own.initial,
+      role: 'user',
+      text,
+      parts,
+    });
+    try {
+      await p2pPost(p2pPeer.host, p2pPeer.port, '/api/p2p/receive-dm', {
+        from: { id: own.id, name: own.name, role: own.role, color: own.color, initial: own.initial, host: '', port: own.port },
+        text,
+        ts: Date.now(),
+      }, '');
+      return c.json({ data: msg });
+    } catch (e) {
+      return c.json({ data: msg, error: `对方暂时连不上：${String((e as Error).message ?? e).slice(0, 120)}` });
+    }
+  }
+
   const history = listMessages(id, 20)
     .filter((m) => m.status === 'done' && (m.role === 'user' || m.role === 'assistant'))
     .map((m) => {
@@ -3107,7 +3199,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
       });
     }
 
-    const workflow = conv.type === 'group' && !suppressRun ? getWorkflow(id) : null;
+    // 流程已跑完（已出结论）的群，后续消息走自由对话，不再按聊天逻辑重跑
+    const workflow = conv.type === 'group' && !suppressRun && !conv.workflowDone ? getWorkflow(id) : null;
     if (workflow?.enabled) {
       await runWorkflow({
         conv,

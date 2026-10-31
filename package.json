@@ -1,7 +1,7 @@
 {
   "name": "s-bot",
   "private": true,
-  "version": "0.1.10",
+  "version": "0.1.11",
   "type": "module",
   "workspaces": [
     "packages/*",
