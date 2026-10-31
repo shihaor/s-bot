@@ -1283,6 +1283,106 @@ app.post('/api/workflows/preview', async (c) => {
   return c.json({ data: graph });
 });
 
+app.post('/api/workflows/coach', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const memberIds = Array.isArray(b?.memberIds) ? b.memberIds.map((x: unknown) => String(x)) : [];
+  const agents = memberIds.map((id: string) => getAgent(id)).filter(Boolean) as Array<NonNullable<ReturnType<typeof getAgent>>>;
+  if (!agents.length) return c.json({ error: 'memberIds required' }, 400);
+  const text = String(b?.text ?? '').trim();
+  if (!text) return c.json({ error: 'text required' }, 400);
+  const history = Array.isArray(b?.messages)
+    ? b.messages
+        .filter((m: any) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+        .slice(-10)
+        .map((m: any) => ({ role: m.role, content: String(m.content).slice(0, 2000) }))
+    : [];
+
+  const fallback = () => ({
+    status: 'ready' as const,
+    reply: '没配置模型，我先按角色生成一版聊天逻辑，你可以再看图调整。',
+    graph: generateWorkflow({ memberIds, withHuman: true }),
+  });
+
+  const cfg = toConfig(getDefaultModel());
+  if (!cfg?.apiKey) return c.json({ data: fallback() });
+
+  const roster = agents
+    .map((a) => `- ${a.id} / ${a.name} / ${a.role}${a.skills?.length ? ` / 擅长：${a.skills.join('、')}` : ''}`)
+    .join('\n');
+
+  const system = [
+    '你是 S-BOT 的群聊流程设计师，负责把用户用自然语言描述的聊天流程变成一张可执行的流程图。',
+    '',
+    '可用智能体（只能使用这些 id）：',
+    roster,
+    '',
+    '图结构：',
+    '{"nodes":[{"id":"start","type":"start","label":"开始"},{"id":"a1","type":"agent","label":"出方案","agentId":"上面的id","prompt":"这一步要做什么","producesVerdict":false},{"id":"h1","type":"human","label":"真人确认"},{"id":"end","type":"end","label":"结束"}],"edges":[{"id":"e1","from":"start","to":"a1","when":"always"},{"id":"e2","from":"a1","to":"h1","when":"pass"}],"maxLoops":3}',
+    '',
+    '规则：',
+    '1. 必须有一个 start 和一个 end，所有节点从 start 可达。',
+    '2. 智能体节点必须绑定上面列表里的 agentId。',
+    '3. 评审节点把 producesVerdict 设为 true；走 pass / changes 两条边；修订回路的边加 maxLoops: 2。',
+    '4. 除非用户明确说不要，最后加一个 human 真人确认节点。',
+    '5. 如果用户要求评审不通过要修订，必须单独加一个 agent 修订节点，并加 review→revise（when=changes）和 revise→review（when=always, maxLoops=2）两条边。',
+    '6. 不要发明智能体，不要用群外的 id。',
+    '',
+    '对话规则：',
+    '- 信息不足（谁先做、要不要评审、改几轮、要不要真人确认）时，只问一个最关键的问题，status 用 question。',
+    '- 信息够了，先用一句话复述你的理解，并问用户是否确认，status 用 question，reply 里要出现「确认」。',
+    '- 只有用户明确确认后，才输出 status=ready 和 graph。',
+    '',
+    '只输出 JSON，格式：{"status":"question" 或 "ready","reply":"给用户看的话","graph":{...}}。status 为 question 时不要输出 graph。',
+  ].join('\n');
+
+  try {
+    const reply = await completeChat(
+      cfg,
+      [{ role: 'system', content: system }, ...history, { role: 'user', content: text }],
+      { temperature: 0.2, maxTokens: 1400 },
+    );
+    const raw = reply.match(/\{[\s\S]*\}/);
+    const json = raw ? JSON.parse(raw[0]) : null;
+    if (!json || (json.status !== 'question' && json.status !== 'ready')) {
+      return c.json({ data: { status: 'question', reply: reply.slice(0, 500) || '能再说一下你希望的顺序吗？' } });
+    }
+
+    const hasAssistant = history.some((m: any) => m.role === 'assistant');
+    if (json.status === 'ready' && !hasAssistant) {
+      return c.json({
+        data: {
+          status: 'question',
+          reply: `${String(json.reply ?? '').trim() || '我按你的描述整理了一版流程。'} 你确认按这个生成流程图吗？`,
+        },
+      });
+    }
+
+    if (json.status === 'ready' && json.graph) {
+      const graph = json.graph;
+      const checked = validateWorkflow(graph);
+      const memberSet = new Set(agents.map((a) => a.id));
+      const bad = Array.isArray(graph.nodes)
+        ? graph.nodes.find((n: any) => n.type === 'agent' && (!n.agentId || !memberSet.has(n.agentId)))
+        : true;
+      if (checked.ok && !bad) {
+        return c.json({ data: { status: 'ready', reply: String(json.reply ?? '已生成，打开流程图确认。'), graph } });
+      }
+      // 图不合法：退回一版确定性的，避免卡住
+      return c.json({
+        data: {
+          status: 'ready',
+          reply: '模型生成的图有点问题，我先按角色生成一版，你在画布上再调。',
+          graph: generateWorkflow({ memberIds, withHuman: true }),
+        },
+      });
+    }
+
+    return c.json({ data: { status: 'question', reply: String(json.reply ?? '再说一下你希望的流程？') } });
+  } catch (e) {
+    return c.json({ data: { status: 'question', reply: `我这边没理解好：${String((e as Error).message ?? e).slice(0, 120)}。能再说一下顺序吗？` } });
+  }
+});
+
 app.post('/api/workflow/runs/:runId/approve', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   const nodeId = String(b?.nodeId ?? '');

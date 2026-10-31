@@ -58,6 +58,7 @@ import AgentsPage from './AgentsPage';
 import SkillsPage from './SkillsPage';
 import SettingsPage from './SettingsPage';
 import WorkflowEditor from './WorkflowEditor';
+import WorkflowCoach from './WorkflowCoach';
 import { ColleagueSearchDialog, MattermostInviteDialog } from './Colleagues';
 import { animateDrawer, animateIntro, animateOverlay, animatePanel, animateToast } from './anim';
 import {
@@ -489,6 +490,7 @@ export default function App() {
   } | null>(null);
   const [workflowApproval, setWorkflowApproval] = useState<{ runId: string; nodeId: string; title: string; nodeLabel: string } | null>(null);
   const [workflowEditor, setWorkflowEditor] = useState<{ conversationId: string; graph: GroupWorkflow } | null>(null);
+  const [workflowCoach, setWorkflowCoach] = useState<{ conversationId: string; agents: Agent[] } | null>(null);
   const [ocSetup, setOcSetup] = useState<{ url: string; busy: boolean; error?: string } | null>(null);
   const [unread, setUnread] = useState<Record<string, number>>({});
   const activeIdRef = useRef<string | null>(null);
@@ -2250,6 +2252,10 @@ export default function App() {
           user={user}
           onInviteHuman={(name, role) => void inviteHumanToActive(name, role)}
           onEditWorkflow={() => void openWorkflowEditor(active.id)}
+          onCoachWorkflow={() => setWorkflowCoach({
+            conversationId: active.id,
+            agents: agents.filter((a) => active.members.some((m) => m.memberId === a.id)),
+          })}
         />
       )}
       {p2pInvite && (
@@ -2406,6 +2412,17 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+      {workflowCoach && (
+        <WorkflowCoach
+          agents={workflowCoach.agents}
+          onClose={() => setWorkflowCoach(null)}
+          onReady={(g) => {
+            const cid = workflowCoach.conversationId;
+            setWorkflowCoach(null);
+            setWorkflowEditor({ conversationId: cid, graph: g });
+          }}
+        />
       )}
       {workflowEditor && (
         <div className="overlay wf-editor-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setWorkflowEditor(null); }}>

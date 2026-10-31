@@ -226,6 +226,27 @@ export async function previewGroupWorkflow(memberIds: string[], withHuman = true
   return r.data;
 }
 
+export interface WorkflowCoachResult {
+  status: 'question' | 'ready';
+  reply: string;
+  graph?: GroupWorkflow;
+}
+
+export async function coachWorkflow(
+  memberIds: string[],
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  text: string,
+): Promise<WorkflowCoachResult> {
+  const res = await apiFetch('/api/workflows/coach', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ memberIds, messages, text }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { data?: WorkflowCoachResult; error?: string };
+  if (!res.ok) throw new Error(body.error ?? '生成失败');
+  return body.data ?? { status: 'question', reply: '能再说一遍吗？' };
+}
+
 export async function approveWorkflow(runId: string, nodeId: string, decision: 'pass' | 'changes'): Promise<void> {
   const res = await apiFetch(`/api/workflow/runs/${runId}/approve`, {
     method: 'POST',

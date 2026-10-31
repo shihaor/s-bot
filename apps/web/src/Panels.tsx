@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Agent, Conversation, GroupWorkflow, Message, ModelInfo, Task } from '@sbot/shared';
 import { previewGroupWorkflow } from './api';
 import WorkflowEditor from './WorkflowEditor';
+import WorkflowCoach from './WorkflowCoach';
 
 export interface MenuItem {
   label: string;
@@ -293,6 +294,7 @@ export function NewGroupDialog({
   const [graph, setGraph] = useState<GroupWorkflow | null>(null);
   const [graphBusy, setGraphBusy] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [coachOpen, setCoachOpen] = useState(false);
 
   function toggle(id: string) {
     setPicked((prev) => {
@@ -365,6 +367,7 @@ export function NewGroupDialog({
                 </div>
               )}
               <button className="btn" disabled={!graph} onClick={() => setEditorOpen(true)}>编辑聊天逻辑</button>
+              <button className="btn" disabled={picked.size < 2} onClick={() => setCoachOpen(true)}>用对话生成</button>
             </div>
           </div>
         </div>
@@ -383,6 +386,18 @@ export function NewGroupDialog({
             onSave={(g) => { setGraph(g); setEditorOpen(false); }}
           />
         </div>
+      )}
+
+      {coachOpen && (
+        <WorkflowCoach
+          agents={agents.filter((a) => picked.has(a.id))}
+          onClose={() => setCoachOpen(false)}
+          onReady={(g) => {
+            setGraph(g);
+            setCoachOpen(false);
+            setEditorOpen(true);
+          }}
+        />
       )}
     </div>
   );
@@ -485,6 +500,7 @@ export function GroupDrawer({
   user,
   onInviteHuman,
   onEditWorkflow,
+  onCoachWorkflow,
 }: {
   conv: Conversation;
   agents: Agent[];
@@ -504,6 +520,7 @@ export function GroupDrawer({
   user: { id?: string; name: string; role: string; initial: string } | null;
   onInviteHuman: (name: string, role: string) => void;
   onEditWorkflow: () => void;
+  onCoachWorkflow: () => void;
 }) {
   const [title, setTitle] = useState(conv.title);
   const [picking, setPicking] = useState(false);
@@ -685,7 +702,10 @@ export function GroupDrawer({
         <div className="dsec">
           <div className="dsec-title">聊天逻辑</div>
           <div className="dsec-hint" style={{ marginTop: 0 }}>这张图决定群里谁在什么时候说话，以及什么时候停。</div>
-          <button className="btn" onClick={onEditWorkflow}>编辑聊天逻辑</button>
+          <div className="handoff-row">
+            <button className="btn" onClick={onEditWorkflow}>编辑聊天逻辑</button>
+            <button className="btn" onClick={onCoachWorkflow}>用对话生成</button>
+          </div>
         </div>
 
         <div className="dsec danger-zone">
