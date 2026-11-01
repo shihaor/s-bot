@@ -419,7 +419,12 @@ textarea.input { height: auto; padding: 9px 11px; line-height: 1.6; resize: vert
 .btn.danger:hover { background: rgba(245,82,93,0.2); }
 
 /* ---------- 设置页 ---------- */
-.settings .set-card { max-width: 720px; background: var(--bg-elev); border: 1px solid var(--border-soft); border-radius: 12px; padding: 18px 20px; margin-bottom: 14px; }
+.settings { padding: 26px 22px; }
+.settings .page-head { max-width: 760px; margin-left: auto; margin-right: auto; }
+@media (max-width: 840px) {
+  .settings { padding: 16px 14px; }
+}
+.settings .set-card { max-width: 760px; margin-left: auto; margin-right: auto; background: var(--bg-elev); border: 1px solid var(--border-soft); border-radius: 12px; padding: 18px 20px; margin-bottom: 14px; }
 .set-card h3 { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
 .set-card .sub { font-size: 11.5px; color: var(--text-faint); margin-bottom: 14px; line-height: 1.6; }
 .set-card .hint { font-style: normal; color: var(--text-faint); font-size: 10.5px; margin-left: 6px; }
