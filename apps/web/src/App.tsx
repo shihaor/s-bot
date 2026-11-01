@@ -1198,6 +1198,18 @@ export default function App() {
         created.push(await createAgentApi(input));
       }
       setAgents((prev) => [...prev, ...created]);
+      // 批量创建后，也为每个智能体开一个单聊，让消息列表立刻出现
+      const convs: Conversation[] = [];
+      for (const agent of created) {
+        try {
+          convs.push(await ensureDmApi(agent.id));
+        } catch { /* 单个开聊失败不影响其他 */ }
+      }
+      setConversations((prev) => {
+        const ids = new Set(prev.map((c) => c.id));
+        const added = convs.filter((c) => !ids.has(c.id));
+        return [...added, ...prev];
+      });
       showToast(`已批量创建 ${created.length} 个智能体`);
     } catch (e) {
       showToast(String(e));
