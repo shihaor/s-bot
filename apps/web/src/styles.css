@@ -392,6 +392,7 @@ textarea.input { height: auto; padding: 9px 11px; line-height: 1.6; resize: vert
 .search-foot { padding: 7px 14px; border-top: 1px solid var(--border-soft); font-size: 10.5px; color: var(--text-faint); background: #0f1319; }
 
 /* ---------- 群设置抽屉 ---------- */
+.drawer-overlay { position: fixed; top: 38px; left: 0; right: 0; bottom: 0; z-index: 69; background: rgba(0, 0, 0, 0.32); }
 .drawer { position: fixed; top: 38px; right: 0; bottom: 0; width: 370px; z-index: 70; display: flex; flex-direction: column; background: var(--bg-elev); border-left: 1px solid var(--border); box-shadow: -24px 0 60px rgba(0,0,0,0.35); }
 .drawer-head { height: 56px; flex: 0 0 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px 0 20px; border-bottom: 1px solid var(--border-soft); }
 .drawer-head h3 { font-size: 14px; font-weight: 600; }

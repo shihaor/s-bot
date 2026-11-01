@@ -2551,7 +2551,9 @@ export default function App() {
         />
       )}
       {drawerOpen && active?.type === 'group' && (
-        <GroupDrawer
+        <>
+          <div className="drawer-overlay" onClick={() => setDrawerOpen(false)} />
+          <GroupDrawer
           conv={active}
           agents={agents}
           models={models}
@@ -2576,6 +2578,7 @@ export default function App() {
             agents: agents.filter((a) => active.members.some((m) => m.memberId === a.id)),
           })}
         />
+        </>
       )}
       {p2pInvite && (
         <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setP2pInvite(null); }}>

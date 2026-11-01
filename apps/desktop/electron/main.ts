@@ -109,7 +109,7 @@ function createWindow(url: string) {
     backgroundColor: '#0A0C10',
     icon: iconPath,
     titleBarStyle: 'hidden',
-    titleBarOverlay: { color: '#0E1116', symbolColor: '#8A93A6', height: 38 },
+    titleBarOverlay: { color: 'rgba(0,0,0,0)', symbolColor: '#8A93A6', height: 38 },
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -236,8 +236,8 @@ ipcMain.on('notify', (_event, payload: { title?: string; body?: string; theme?: 
 });
 
 const TITLEBAR_THEME = {
-  dark: { color: '#0E1116', symbolColor: '#8A93A6' },
-  light: { color: '#EDF1F8', symbolColor: '#59657C' },
+  dark: { color: 'rgba(0,0,0,0)', symbolColor: '#8A93A6' },
+  light: { color: 'rgba(0,0,0,0)', symbolColor: '#59657C' },
 };
 
 /** 前端主题切换时同步标题栏（右上角窗口控制按钮）配色 */
