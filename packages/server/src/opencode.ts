@@ -1038,6 +1038,7 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
   signal.addEventListener('abort', onAbort);
 
   const toolNames = new Map<string, string>();
+  const toolInputDetail = new Map<string, string>();
 
   try {
     await client.session.prompt({ sessionID: sessionId, text: prompt });
@@ -1077,6 +1078,27 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
         case 'session.tool.failed':
           yield { type: 'tool-end', id: String(raw.data.id), ok: false };
           break;
+        case 'session.tool.input.delta': {
+          // 工具输入的流式增量（比如浏览器插件的输入过程）：累积并实时展示
+          const id = String(raw.data.id);
+          const delta = String(raw.data.delta ?? '');
+          if (delta) {
+            const prev = toolInputDetail.get(id) ?? '';
+            const next = prev + delta;
+            toolInputDetail.set(id, next);
+            yield { type: 'tool', id, name: toolNames.get(id) ?? 'tool', detail: next.slice(-200) };
+          }
+          break;
+        }
+        case 'session.tool.progress': {
+          // 工具进度（比如浏览器插件的操作过程）：提取可读信息实时展示
+          const id = String(raw.data.id);
+          const msg = describeProgress(raw.data.metadata);
+          if (msg) {
+            yield { type: 'tool', id, name: toolNames.get(id) ?? 'tool', detail: msg };
+          }
+          break;
+        }
         case 'permission.asked': {
           const requestID = String(raw.data.id);
           if (input.autoApprove) {
@@ -1140,6 +1162,21 @@ export async function generateText(prompt: string): Promise<string> {
   const text = res?.data?.text;
   if (typeof text === 'string') return text;
   throw new Error('opencode 没有返回文本');
+}
+
+function describeProgress(metadata: any): string {
+  if (!metadata || typeof metadata !== 'object') return '';
+  const m = metadata as Record<string, any>;
+  for (const k of ['message', 'status', 'step', 'action', 'title', 'text', 'label', 'url']) {
+    const v = m[k];
+    if (typeof v === 'string' && v.trim()) return v.slice(0, 120);
+  }
+  try {
+    const s = JSON.stringify(m);
+    return s.length > 2 ? s.slice(0, 120) : '';
+  } catch {
+    return '';
+  }
 }
 
 function describeInput(text: string): string {
