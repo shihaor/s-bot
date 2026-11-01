@@ -739,6 +739,23 @@ export function PermissionDialog({
   onDecide: (decision: 'once' | 'always' | 'reject') => void;
 }) {
   const action = ACTION_TEXT[request.action] ?? request.action;
+  const [left, setLeft] = useState(60);
+
+  useEffect(() => {
+    let n = 60;
+    const timer = window.setInterval(() => {
+      n -= 1;
+      if (n <= 0) {
+        window.clearInterval(timer);
+        onDecide('reject');
+      } else {
+        setLeft(n);
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onDecide('reject'); }}>
       <div className="sheet perm-sheet">
@@ -751,7 +768,7 @@ export function PermissionDialog({
           <div className="perm-list">
             {request.resources.map((r) => <code key={r}>{r}</code>)}
           </div>
-          <div className="perm-hint">允许后它才会继续；60 秒不处理会按拒绝处理。</div>
+          <div className="perm-hint">允许后它才会继续；<b className="perm-count">{left}</b> 秒不处理会按拒绝处理。</div>
         </div>
         <div className="sheet-foot perm-foot">
           <button className="btn" onClick={() => onDecide('reject')}>拒绝</button>

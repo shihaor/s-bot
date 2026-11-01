@@ -21,6 +21,8 @@ function paint(mode: ThemeMode) {
   document.documentElement.dataset.theme = resolved;
   document.documentElement.dataset.themeMode = mode;
   document.documentElement.style.colorScheme = resolved;
+  // 同步 Electron 标题栏（右上角窗口控制按钮）颜色
+  (window as any).sbot?.setTitleBarTheme?.(resolved);
 }
 
 export function applyTheme(mode: ThemeMode) {

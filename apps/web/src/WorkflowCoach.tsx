@@ -62,22 +62,22 @@ export default function WorkflowCoach({
   }
 
   return (
-    <div className="overlay coach-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="sheet coach-sheet">
+    <div className="overlay wf-coach-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="sheet wf-coach-sheet">
         <div className="sheet-head">
           <h3>用对话生成聊天逻辑</h3>
           <p>说清楚流程，AI 会先和你确认，再生成流程图给你调整。</p>
         </div>
-        <div className="coach-list" ref={listRef}>
+        <div className="wf-coach-list" ref={listRef}>
           {messages.map((m, i) => (
-            <div key={i} className={`coach-msg ${m.role}`}>
-              <div className="coach-bubble">{m.content}</div>
+            <div key={i} className={`wf-coach-msg ${m.role}`}>
+              <div className="wf-coach-bubble">{m.content}</div>
             </div>
           ))}
-          {busy && <div className="coach-msg assistant"><div className="coach-bubble coach-typing"><span className="dots"><i /><i /><i /></span></div></div>}
-          {readyResult && <div className="coach-ready">流程已生成，正在打开画布…</div>}
+          {busy && <div className="wf-coach-msg assistant"><div className="wf-coach-bubble wf-coach-typing"><span className="dots"><i /><i /><i /></span></div></div>}
+          {readyResult && <div className="wf-coach-ready">流程已生成，正在打开画布…</div>}
         </div>
-        <div className="coach-input">
+        <div className="wf-coach-input">
           <textarea
             className="input"
             rows={2}

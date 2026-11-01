@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, Notification, screen, shell, Tray } from 'electron';
 import path from 'node:path';
 import net from 'node:net';
 import { createRequire } from 'node:module';
@@ -13,8 +13,6 @@ const trayIconPath = path.join(__dirname, '../assets/tray.png');
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
-let closePromptPending = false;
-let closePromptTimer: ReturnType<typeof setTimeout> | null = null;
 
 app.setAppUserModelId('com.sbot.desktop');
 
@@ -104,7 +102,10 @@ function createWindow(url: string) {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
+      // 关闭渲染进程节流：窗口缩到托盘/后台时 rAF 和定时器不会被暂停，
+      // 避免恢复窗口或弹桌面通知时 UI 卡顿、动画卡在不可见状态
+      backgroundThrottling: false,
     },
   });
   mainWindow = win;
@@ -116,30 +117,10 @@ function createWindow(url: string) {
 
   win.on('close', (event) => {
     if (isQuitting) return;
-    // 关窗口改为让前端弹「符合页面风格」的确认框，不再用系统默认对话框
+    // 点关闭直接缩到托盘，不退出；退出走托盘菜单
     event.preventDefault();
-    if (closePromptPending) return;
-    closePromptPending = true;
-    win.webContents.send('app:close-query');
-    // 兜底：前端若未及时回 close-decision（窗口还没加载完 / 页面异常 / 重载），
-    // 几秒后自动复位，并退回系统原生对话框，保证关闭按钮永远有效
-    if (closePromptTimer) clearTimeout(closePromptTimer);
-    closePromptTimer = setTimeout(async () => {
-      closePromptPending = false;
-      closePromptTimer = null;
-      if (!mainWindow || mainWindow.isDestroyed()) return;
-      const { response } = await dialog.showMessageBox(mainWindow, {
-        type: 'question',
-        buttons: ['取消', '退出 S-BOT', '最小化到托盘'],
-        defaultId: 2,
-        cancelId: 0,
-        title: '关闭 S-BOT',
-        message: '关闭 S-BOT',
-        detail: '要最小化到托盘，还是直接退出？',
-      });
-      if (response === 1) quitApp();
-      else if (response === 2) mainWindow?.hide();
-    }, 4000);
+    win.hide();
+    win.webContents.send('app:minimized-to-tray');
   });
 
   win.on('closed', () => {
@@ -148,20 +129,6 @@ function createWindow(url: string) {
 
   void win.loadURL(url);
 }
-
-ipcMain.on('close-decision', (_event, decision: 'tray' | 'quit' | 'cancel') => {
-  closePromptPending = false;
-  if (closePromptTimer) {
-    clearTimeout(closePromptTimer);
-    closePromptTimer = null;
-  }
-  if (decision === 'tray') {
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
-  } else if (decision === 'quit') {
-    quitApp();
-  }
-  // 'cancel' → 什么都不做，窗口保持打开
-});
 
 let notifyWindow: BrowserWindow | null = null;
 let notifyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -193,7 +160,7 @@ function showThemedNotification(payload: { title?: string; body?: string; theme?
     notifyWindow = new BrowserWindow({
       width,
       height,
-      x: area.x + 20,
+      x: area.x + area.width - width - 20,
       y: area.y + area.height - height - 20,
       frame: false,
       transparent: true,
@@ -255,6 +222,19 @@ function showThemedNotification(payload: { title?: string; body?: string; theme?
 
 ipcMain.on('notify', (_event, payload: { title?: string; body?: string; theme?: 'dark' | 'light' }) => {
   showThemedNotification(payload ?? {});
+});
+
+const TITLEBAR_THEME = {
+  dark: { color: '#0E1116', symbolColor: '#8A93A6' },
+  light: { color: '#EDF1F8', symbolColor: '#59657C' },
+};
+
+/** 前端主题切换时同步标题栏（右上角窗口控制按钮）配色 */
+ipcMain.on('titlebar-theme', (_event, theme: 'dark' | 'light') => {
+  console.log('[titlebar-theme] received', theme);
+  const t = TITLEBAR_THEME[theme] ?? TITLEBAR_THEME.dark;
+  mainWindow?.setTitleBarOverlay({ ...t, height: 38 });
+  console.log('[titlebar-theme] applied', JSON.stringify(t), 'mainWindow?', !!mainWindow);
 });
 
 app.whenReady().then(async () => {

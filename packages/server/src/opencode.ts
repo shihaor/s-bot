@@ -632,6 +632,9 @@ export async function ensureStarted(model?: ModelInfo | null): Promise<boolean> 
         ...process.env,
         XDG_CONFIG_HOME: configHome,
         OPENCODE_DB: opencodeDb,
+        // Windows 上让 opencode 的 shell 工具优先用 PowerShell（否则默认走 Git Bash，
+        // 智能体生成的 PowerShell 命令会执行失败，表现为任务卡住）
+        ...(isWin ? { SHELL: 'powershell' } : {}),
       },
     });
     proc = child;
@@ -643,6 +646,7 @@ export async function ensureStarted(model?: ModelInfo | null): Promise<boolean> 
       const onData = (d: Buffer) => {
         buf += d.toString();
         if (process.env.SBOT_OPENCODE_LOG) process.stdout.write(`[opencode] ${d.toString()}`);
+        // 找到 password 后继续打印 stderr，方便排查 shell/权限等执行失败原因
         const m = buf.match(/server password (\S+)/);
         if (m) {
           clearTimeout(timer);
@@ -650,7 +654,7 @@ export async function ensureStarted(model?: ModelInfo | null): Promise<boolean> 
         }
       };
       child.stdout?.on('data', onData);
-      child.stderr?.on('data', onData);
+      child.stderr?.on('data', (d: Buffer) => process.stdout.write(`[opencode:err] ${d.toString()}`));
       child.once('exit', () => { clearTimeout(timer); res(null); });
     });
 
@@ -1127,6 +1131,15 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
   } finally {
     signal.removeEventListener('abort', onAbort);
   }
+}
+
+/** 用 opencode 引擎做一次纯文本生成（不走 agent/工具），适合教练这类单次对话 */
+export async function generateText(prompt: string): Promise<string> {
+  if (!client) throw new Error('执行引擎还没启动');
+  const res = (await client.generate.text({ prompt })) as { data?: { text?: string } };
+  const text = res?.data?.text;
+  if (typeof text === 'string') return text;
+  throw new Error('opencode 没有返回文本');
 }
 
 function describeInput(text: string): string {

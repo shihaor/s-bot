@@ -7,5 +7,5 @@
     "rootDir": "electron",
     "types": ["node"]
   },
-  "include": ["electron"]
+  "include": ["electron/main.ts"]
 }

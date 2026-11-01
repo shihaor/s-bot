@@ -73,6 +73,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   const [ocModels, setOcModels] = useState<OpencodeModel[]>([]);
   const [ocModelsBusy, setOcModelsBusy] = useState(false);
   const [ocModelsOpen, setOcModelsOpen] = useState(false);
+  const [ocPicked, setOcPicked] = useState<Set<string>>(new Set());
   const [serverUrl, setServerUrl] = useState(localStorage.getItem('sbot.server') ?? '');
   const [theme, setTheme] = useState<ThemeMode>(getThemeMode());
   const [mmUrl, setMmUrl] = useState('');
@@ -108,17 +109,18 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
     }
   }
 
-  /** 导入一个 opencode 内置模型（免费模型走 opencode 鉴权，无需 Key） */
-  async function importOpencodeModel(m: OpencodeModel) {
-    const model = `${m.providerID}/${m.modelID}`;
-    if (models.some((x) => x.baseUrl === 'opencode://' && x.model === model)) {
-      onToast(`${m.name} 已经在列表里了`);
-      return;
+  /** 批量导入 opencode 内置模型（免费模型走 opencode 鉴权，无需 Key） */
+  async function importOpencodeModels(list: OpencodeModel[]) {
+    let n = 0;
+    for (const m of list) {
+      const model = `${m.providerID}/${m.modelID}`;
+      if (models.some((x) => x.baseUrl === 'opencode://' && x.model === model)) continue;
+      await createModel({ name: m.name, model, baseUrl: 'opencode://', apiKey: '', tools: true, stream: true });
+      n++;
     }
-    await createModel({ name: m.name, model, baseUrl: 'opencode://', apiKey: '', tools: true, stream: true });
     await refresh();
     onSaved();
-    onToast(`已导入 ${m.name}${m.free ? '（免费）' : ''}`);
+    onToast(n ? `已添加 ${n} 个模型` : '选中的模型都已在列表里');
   }
 
   /** 把 opencode 配置里的模型导入 S-BOT；所有智能体共用这份模型列表 */
@@ -399,6 +401,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
               onClick={async () => {
                 setOcModelsOpen(true);
                 setOcModels([]);
+                setOcPicked(new Set());
                 await loadOpencodeModels();
               }}
             >
@@ -425,7 +428,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
               </div>
               <span className="test-inline">{testMsg[m.id] ?? ''}</span>
               <button className="mini" title="测试" onClick={() => void runTest(m)}>◌</button>
-              <button className="mini" title="设为默认" onClick={async () => { await setDefaultModel(m.id); await refresh(); onSaved(); onToast('已设为默认'); }}>★</button>
+              <button className={`mini${m.isDefault ? ' star-on' : ''}`} title={m.isDefault ? '当前默认' : '设为默认'} onClick={async () => { if (m.isDefault) return; await setDefaultModel(m.id); await refresh(); onSaved(); onToast('已设为默认'); }}>★</button>
               <button className="mini" title="编辑" onClick={() => setForm({ ...m, apiKey: '' })}>✎</button>
               <button className="mini danger" title="删除" onClick={async () => { if (!window.confirm(`删除模型「${m.name}」？`)) return; await deleteModel(m.id); await refresh(); onSaved(); onToast('模型已删除'); }}>×</button>
             </div>
@@ -809,29 +812,55 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
           <div className="sheet oc-models-sheet">
             <div className="sheet-head">
               <h3>内置可用模型</h3>
-              <p>来自执行引擎内置模型目录。免费模型无需 Key 即可用。</p>
+              <p>来自执行引擎内置模型目录。点击选中可多选，免费模型无需 Key 即可用。</p>
             </div>
             <div className="sheet-body">
               {ocModelsBusy && <div className="kb-empty">读取中…</div>}
               {!ocModelsBusy && ocModels.length === 0 && <div className="kb-empty">没读到模型，确认执行引擎已启动</div>}
               <div className="kb-list">
-                {ocModels.map((m) => (
-                  <div key={`${m.providerID}/${m.modelID}`} className="kb-item row">
-                    <span className="kb-meta">
-                      <span className="kb-name">
-                        {m.name}
-                        {m.free && <span className="mtag free">免费</span>}
+                {ocModels.map((m) => {
+                  const key = `${m.providerID}/${m.modelID}`;
+                  const on = ocPicked.has(key);
+                  return (
+                    <button
+                      key={key}
+                      className={`kb-item ${on ? 'sel' : ''}`}
+                      onClick={() => {
+                        setOcPicked((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(key)) next.delete(key); else next.add(key);
+                          return next;
+                        });
+                      }}
+                    >
+                      <span className="kb-meta">
+                        <span className="kb-name">
+                          {m.name}
+                          {m.free && <span className="mtag free">免费</span>}
+                        </span>
+                        <span className="kb-sub">{m.providerID} / {m.modelID}{m.limit ? ` · ${Math.round(m.limit / 1000)}k ctx` : ''}</span>
                       </span>
-                      <span className="kb-sub">{m.providerID} / {m.modelID}{m.limit ? ` · ${Math.round(m.limit / 1000)}k ctx` : ''}</span>
-                    </span>
-                    <button className="mini" onClick={async () => { await importOpencodeModel(m); }}>导入</button>
-                  </div>
-                ))}
+                      <span className="tick">{on ? '✓' : ''}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
             <div className="sheet-foot">
               <span className="foot-note">只显示目录里的模型；实际能否免费以执行引擎为准。</span>
-              <button className="btn primary" onClick={() => setOcModelsOpen(false)}>关闭</button>
+              <button className="btn" onClick={() => setOcModelsOpen(false)}>取消</button>
+              <button
+                className="btn primary"
+                disabled={ocPicked.size === 0}
+                onClick={async () => {
+                  const picked = ocModels.filter((m) => ocPicked.has(`${m.providerID}/${m.modelID}`));
+                  await importOpencodeModels(picked);
+                  setOcPicked(new Set());
+                  setOcModelsOpen(false);
+                }}
+              >
+                添加 {ocPicked.size} 个
+              </button>
             </div>
           </div>
         </div>

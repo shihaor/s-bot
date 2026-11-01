@@ -9,10 +9,10 @@ contextBridge.exposeInMainWorld('sbot', {
     ipcRenderer.on('app:abort', handler);
     return () => ipcRenderer.removeListener('app:abort', handler);
   },
-  onCloseQuery: (cb: () => void) => {
+  onMinimizedToTray: (cb: () => void) => {
     const handler = () => cb();
-    ipcRenderer.on('app:close-query', handler);
-    return () => ipcRenderer.removeListener('app:close-query', handler);
+    ipcRenderer.on('app:minimized-to-tray', handler);
+    return () => ipcRenderer.removeListener('app:minimized-to-tray', handler);
   },
-  closeDecision: (decision: 'tray' | 'quit' | 'cancel') => ipcRenderer.send('close-decision', decision),
+  setTitleBarTheme: (theme: 'dark' | 'light') => ipcRenderer.send('titlebar-theme', theme),
 });

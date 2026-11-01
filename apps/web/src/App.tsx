@@ -67,6 +67,7 @@ import SettingsPage from './SettingsPage';
 import WorkflowEditor from './WorkflowEditor';
 import WorkflowCoach from './WorkflowCoach';
 import ManualDialog from './ManualDialog';
+import { Markdown } from './markdown';
 import { ColleagueSearchDialog, MattermostInviteDialog } from './Colleagues';
 import { animateDrawer, animateIntro, animateOverlay, animatePanel, animateToast } from './anim';
 import {
@@ -234,14 +235,7 @@ function ToolRow({ tools }: { tools: ToolChip[] }) {
 }
 
 function RichText({ text }: { text: string }) {
-  const parts = text.split(/(\[\d+\])/g);
-  return (
-    <>
-      {parts.map((p, i) => (/^\[\d+\]$/.test(p)
-        ? <sup key={i} className="cite-mark">{p}</sup>
-        : <span key={i}>{p}</span>))}
-    </>
-  );
+  return <Markdown text={text} />;
 }
 
 function ExecutionCard({ plan }: { plan: ExecutionPlan }) {
@@ -549,7 +543,6 @@ export default function App() {
   const [inviteExternalUser, setInviteExternalUser] = useState('');
   const [lanPeers, setLanPeers] = useState<LanPeer[]>([]);
   const [manualOpen, setManualOpen] = useState(false);
-  const [closePromptOpen, setClosePromptOpen] = useState(false);
   const [intro, setIntro] = useState<ChatIntro | null>(null);
   const [introLoading, setIntroLoading] = useState(false);
   const [permissionReq, setPermissionReq] = useState<{
@@ -670,11 +663,11 @@ export default function App() {
           if (p.conversationId !== activeIdRef.current && (p.authorType === 'agent' || p.authorType === 'human')) {
             setUnread((prev) => ({ ...prev, [p.conversationId]: (prev[p.conversationId] ?? 0) + 1 }));
           }
-          // 收到别人（同事/其他端的智能体）的消息：窗口缩到托盘或失焦时弹提醒。
+          // 收到别人（同事/其他端的智能体）的消息：弹桌面提醒。
           // 自己的 run 已在 message.end 里提醒，这里用 runningRef 排除，避免重复弹。
           const incoming = p.authorType === 'agent' || p.authorType === 'human';
           const ownHuman = p.authorType === 'human' && !!p.authorId && p.authorId === localStorage.getItem('sbot.user');
-          if (incoming && !ownHuman && !runningRef.current && (document.hidden || !document.hasFocus())) {
+          if (incoming && !ownHuman && !runningRef.current) {
             const who = p.authorType === 'agent'
               ? (agentsRef.current.find((a) => a.id === p.authorId)?.name ?? '智能体')
               : (p.authorName ?? '同事');
@@ -858,15 +851,17 @@ export default function App() {
     });
   }, []);
 
-  // 点 X 关闭窗口时，弹出符合页面风格的确认框（在 Electron 里）
+  // 点 X 关闭窗口时，主进程直接缩到托盘，这里收到通知后弹一个左下角提示
   useEffect(() => {
     const sbot = (window as any).sbot;
-    if (!sbot?.onCloseQuery) return;
-    return sbot.onCloseQuery(() => setClosePromptOpen(true));
+    if (!sbot?.onMinimizedToTray) return;
+    return sbot.onMinimizedToTray(() => {
+      notifyDesktop('已缩小到托盘', 'S-BOT 仍在后台运行，点托盘图标可重新打开');
+    });
   }, []);
 
   // GSAP：弹窗渐显、抽屉滑入、开场白、toast
-  const dialogKey = `${loginOpen}|${newGroupOpen}|${findColleaguesOpen}|${inviteExternalOpen}|${!!taskDialog}|${!!permissionReq}|${!!formReq}|${!!renameTarget}|${!!selectedCitation}|${!!ocSetup}|${manualOpen}|${closePromptOpen}`;
+  const dialogKey = `${loginOpen}|${newGroupOpen}|${findColleaguesOpen}|${inviteExternalOpen}|${!!taskDialog}|${!!permissionReq}|${!!formReq}|${!!renameTarget}|${!!selectedCitation}|${!!ocSetup}|${manualOpen}`;
   useEffect(() => {
     const overlays = document.querySelectorAll('.overlay');
     animateOverlay((overlays[overlays.length - 1] as HTMLElement) ?? null);
@@ -892,6 +887,7 @@ export default function App() {
       if (saved) setUser(JSON.parse(saved));
     } catch { /* ignore */ }
     (async () => {
+      const bootStart = Date.now();
       try {
         const [a, c, r, ms, ts, hs] = await Promise.all([
           fetchAgents(),
@@ -921,6 +917,9 @@ export default function App() {
       } catch (e) {
         setError(String(e));
       } finally {
+        // 让「燃烧转动」的启动动画至少展示一小段时间，避免一闪而过
+        const wait = Math.max(0, 800 - (Date.now() - bootStart));
+        await new Promise((r) => setTimeout(r, wait));
         setLoading(false);
       }
     })();
@@ -1121,6 +1120,12 @@ export default function App() {
     window.setTimeout(() => setToast((t) => (t === msg ? '' : t)), 2200);
   }
 
+  function copyMessage(text: string) {
+    navigator.clipboard.writeText(text)
+      .then(() => showToast('已复制 Markdown 源码'))
+      .catch(() => showToast('复制失败，请手动选中复制'));
+  }
+
   function saveLocalProfile(next: LocalProfile) {
     setProfile(next);
     try { localStorage.setItem('sbot.profile', JSON.stringify(next)); } catch { /* ignore */ }
@@ -1137,11 +1142,6 @@ export default function App() {
   function notifyDesktop(title: string, body: string) {
     const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
     (window as any).sbot?.notify?.(title, body, theme);
-  }
-
-  function decideClose(decision: 'tray' | 'quit' | 'cancel') {
-    setClosePromptOpen(false);
-    (window as any).sbot?.closeDecision?.(decision);
   }
 
   async function openAgentDm(agentId: string) {
@@ -1726,6 +1726,8 @@ export default function App() {
               resources: e.resources,
               agentId: e.agentId,
             });
+            const who = agents.find((a) => a.id === e.agentId)?.name ?? '智能体';
+            notifyDesktop(`${who} · 需要你确认`, '有权限申请待审批，切回 S-BOT 处理');
           } else if (e.type === 'form.ask') {
             setFormReq({
               formID: e.formID,
@@ -1733,6 +1735,8 @@ export default function App() {
               fields: Array.isArray(e.fields) ? e.fields : [],
               agentId: e.agentId,
             });
+            const who = agents.find((a) => a.id === e.agentId)?.name ?? '智能体';
+            notifyDesktop(`${who} · 需要你确认`, '有表单待填写，切回 S-BOT 处理');
           } else if (e.type === 'human.wait') {
             setHumanWait({
               runId: e.runId,
@@ -1745,10 +1749,8 @@ export default function App() {
               deadline: Date.now() + e.seconds * 1000,
             });
             setWaitReply('');
-            if (document.hidden || !document.hasFocus()) {
-              const where = conversations.find((c) => c.id === runConv)?.title ?? 'S-BOT';
-              notifyDesktop(`${e.name} · ${where}`, '智能体在等你拍板');
-            }
+            const where = conversations.find((c) => c.id === runConv)?.title ?? 'S-BOT';
+            notifyDesktop(`${e.name} · ${where}`, '智能体在等你拍板');
           } else if (e.type === 'human.resume') {
             setHumanWait((cur) => (cur?.runId === e.runId ? null : cur));
           } else if (e.type === 'workflow.start') {
@@ -1769,11 +1771,9 @@ export default function App() {
             setWorkflowApproval(null);
           } else if (e.type === 'message.end') {
             setStreaming(null);
-            if (document.hidden || !document.hasFocus()) {
-              const who = agents.find((a) => a.id === e.agentId)?.name ?? '智能体';
-              const where = conversations.find((c) => c.id === runConv)?.title ?? 'S-BOT';
-              notifyDesktop(`${who} · ${where}`, e.text.slice(0, 90));
-            }
+            const who = agents.find((a) => a.id === e.agentId)?.name ?? '智能体';
+            const where = conversations.find((c) => c.id === runConv)?.title ?? 'S-BOT';
+            notifyDesktop(`${who} · ${where}`, e.text.slice(0, 90));
             if (activeIdRef.current === runConv) {
               setMessages((prev) => [
                 ...prev,
@@ -1794,9 +1794,7 @@ export default function App() {
               setUnread((prev) => ({ ...prev, [runConv]: (prev[runConv] ?? 0) + 1 }));
             }
           } else if (e.type === 'task.confirm') {
-            if (document.hidden || !document.hasFocus()) {
-              notifyDesktop('S-BOT', '有任务等你确认');
-            }
+            notifyDesktop('S-BOT', '有任务等你确认');
             if (activeIdRef.current === runConv) setMessages((prev) => [...prev, e.message]);
             else setUnread((prev) => ({ ...prev, [runConv]: (prev[runConv] ?? 0) + 1 }));
             void refreshTasks();
@@ -1851,7 +1849,15 @@ export default function App() {
     abortRef.current?.abort();
   }
 
-  if (loading) return <div className="boot">正在启动 S-BOT…</div>;
+  if (loading) return (
+    <div className="boot">
+      <div className="boot-logo">
+        <span className="boot-ring" />
+        <span className="boot-mark"><span>S</span></span>
+      </div>
+      <div className="boot-text">正在启动 S-BOT…</div>
+    </div>
+  );
 
   const isElectron = /Electron/.test(navigator.userAgent);
 
@@ -2336,7 +2342,10 @@ export default function App() {
                               <span className="time">{fmtTime(m.createdAt)}</span>
                             </div>
                           )}
-                          <div className={`bubble ${isSummary ? 'summary' : ''} ${isConclusion ? 'conclusion' : ''}`}><RichText text={m.text} /></div>
+                          <div className="bubble-wrap">
+                            <div className={`bubble ${isSummary ? 'summary' : ''} ${isConclusion ? 'conclusion' : ''}`}><RichText text={m.text} /></div>
+                            <button className="copy-btn" title="复制 Markdown 源码" onClick={() => void copyMessage(m.text)}>复制</button>
+                          </div>
                           {renderParts(m, (id, status) => void handleTaskStatus(id, status), decidedTasks, (c) => setSelectedCitation(c))}
                           {m.status === 'interrupted' && <div className="interrupted">■ 已中断</div>}
                         </div>
@@ -2615,24 +2624,6 @@ export default function App() {
         />
       )}
       {manualOpen && <ManualDialog onClose={() => setManualOpen(false)} />}
-      {closePromptOpen && (
-        <div className="overlay">
-          <div className="sheet close-sheet">
-            <div className="sheet-head">
-              <h3>关闭 S-BOT</h3>
-              <p>要最小化到托盘，还是直接退出？</p>
-            </div>
-            <div className="sheet-body">
-              <p className="close-hint">退出会中断当前正在生成的回复；最小化后可以从托盘重新打开。</p>
-            </div>
-            <div className="sheet-foot">
-              <button className="btn" onClick={() => decideClose('cancel')}>取消</button>
-              <button className="btn" onClick={() => decideClose('quit')}>退出 S-BOT</button>
-              <button className="btn primary" onClick={() => decideClose('tray')}>最小化到托盘</button>
-            </div>
-          </div>
-        </div>
-      )}
       {inviteExternalOpen && (
         <MattermostInviteDialog
           username={inviteExternalUser}

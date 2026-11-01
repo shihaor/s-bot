@@ -1,12 +1,12 @@
 {
   "name": "@sbot/desktop",
-  "version": "0.1.14",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
     "dev": "electron .",
-    "build:main": "tsc -p tsconfig.json",
+    "build:main": "tsc -p tsconfig.json && esbuild electron/preload.ts --bundle --format=cjs --platform=node --outfile=dist/preload.cjs --external:electron",
     "prepare:app": "node scripts/prepare.mjs",
     "dist": "npm run build:main && npm run prepare:app && electron-builder --win nsis",
     "dist:dir": "npm run build:main && npm run prepare:app && electron-builder --dir"

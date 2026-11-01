@@ -65,6 +65,7 @@ import {
   createSkill,
   ensureSession,
   ensureStarted as ensureOpencode,
+  generateText,
   getStatus as getOpencodeStatus,
   importableModels,
   installFromZip,
@@ -103,6 +104,37 @@ const artifactRoot = join(dataDir, 'artifacts');
 const toConfig = (m: ReturnType<typeof getModel>): ModelConfig | null =>
   m ? { baseUrl: m.baseUrl, apiKey: m.apiKey, model: m.model } : null;
 
+/** 教练对话：opencode 内置模型（baseUrl=opencode://）走执行引擎的纯文本生成，普通模型走 HTTP */
+async function coachReply(
+  systemPrompt: string,
+  turns: ChatTurn[],
+  opts: { temperature?: number; maxTokens?: number; model?: ReturnType<typeof getModel> } = {},
+): Promise<string> {
+  const model = opts.model ?? getDefaultModel();
+  if (!model) throw new Error('还没有可用的模型，请先在设置里添加模型并填写 API Key');
+
+  if (model.baseUrl === 'opencode://') {
+    const ok = await ensureOpencode(model);
+    if (!ok) throw new Error('执行引擎不可用，无法使用 opencode 模型，请先安装并启动执行引擎');
+    const prompt = [
+      '以下是你的系统指令：',
+      systemPrompt,
+      '',
+      ...turns.map((t) => `${t.role === 'user' ? '用户' : '助手'}：${t.content}`),
+    ].join('\n');
+    return generateText(prompt);
+  }
+
+  const cfg = toConfig(model);
+  if (!cfg || !cfg.baseUrl.trim() || !cfg.apiKey.trim()) {
+    throw new Error('还没有可用的模型，请先在设置里添加模型并填写 API Key');
+  }
+  return completeChat(cfg, [{ role: 'system', content: systemPrompt }, ...turns], {
+    temperature: opts.temperature,
+    maxTokens: opts.maxTokens,
+  });
+}
+
 app.get('/api/health', (c) => c.json({ ok: true }));
 
 /** 使用手册：给界面上的「使用手册」查看 */
@@ -110,11 +142,17 @@ app.get('/api/manual', (c) => c.json({ data: { title: 'S-BOT 使用手册', cont
 
 app.get('/api/runtime', (c) => {
   const d = getDefaultModel();
-  const ready = !!(d && d.baseUrl && d.apiKey);
   const oc = getOpencodeStatus();
   const mode = process.env.SBOT_RUNTIME?.toLowerCase();
+  // opencode 内置模型（baseUrl=opencode://）走引擎鉴权，无需 apiKey
+  const isOpencodeModel = !!d && d.baseUrl === 'opencode://';
+  const ready = !!(d && d.baseUrl && (d.apiKey || isOpencodeModel));
   if (ready && oc.available && mode !== 'llm' && mode !== 'mock') {
     return c.json({ mode: 'opencode', label: d!.name });
+  }
+  // opencode 模型已配好，但执行引擎没起来：给准确提示而不是「未配置模型」
+  if (isOpencodeModel && !oc.available) {
+    return c.json({ mode: 'unset', label: '执行引擎不可用' });
   }
   return c.json({ mode: ready ? 'llm' : 'unset', label: ready ? d!.name : '未配置模型' });
 });
@@ -255,19 +293,18 @@ app.post('/api/skills/coach', async (c) => {
   }
 
   const picked = b?.modelId ? getModel(String(b.modelId)) : null;
-  const cfg = toConfig(picked ?? getDefaultModel());
-  if (!cfg || !cfg.baseUrl.trim() || !cfg.apiKey.trim()) {
-    return c.json({ error: '还没有可用的模型，请先在设置里添加模型并填写 API Key' }, 400);
-  }
 
   let reply = '';
   try {
-    reply = await completeChat(cfg, [
-      { role: 'system', content: SKILL_COACH_PROMPT },
-      ...turns,
-    ], { temperature: 0.35, maxTokens: 2600 });
+    reply = await coachReply(SKILL_COACH_PROMPT, turns, {
+      temperature: 0.35,
+      maxTokens: 2600,
+      model: picked ?? undefined,
+    });
   } catch (e) {
-    return c.json({ error: String((e as Error).message ?? e) }, 502);
+    const msg = String((e as Error).message ?? e);
+    const status = /还没有可用的模型/.test(msg) ? 400 : 502;
+    return c.json({ error: msg }, status);
   }
 
   // 模型想看某个地址通不通，服务端代跑一次 TCP 测试
@@ -1226,20 +1263,14 @@ app.post('/api/agents/coach', async (c) => {
     return c.json({ error: '需要一条用户消息' }, 400);
   }
 
-  const cfg = toConfig(getDefaultModel());
-  if (!cfg || !cfg.baseUrl.trim() || !cfg.apiKey.trim()) {
-    return c.json({ error: '还没有可用的模型，请先在设置里添加模型并填写 API Key' }, 400);
-  }
-
   try {
-    const reply = await completeChat(cfg, [
-      { role: 'system', content: AGENT_COACH_PROMPT },
-      ...turns,
-    ], { temperature: 0.55, maxTokens: 2400 });
+    const reply = await coachReply(AGENT_COACH_PROMPT, turns, { temperature: 0.55, maxTokens: 2400 });
     const drafts = parseAgentDrafts(reply);
     return c.json({ data: { reply, draft: drafts[0] ?? null, drafts } });
   } catch (e) {
-    return c.json({ error: String((e as Error).message ?? e) }, 502);
+    const msg = String((e as Error).message ?? e);
+    const status = /还没有可用的模型/.test(msg) ? 400 : 502;
+    return c.json({ error: msg }, status);
   }
 });
 
