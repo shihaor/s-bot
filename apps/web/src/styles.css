@@ -513,6 +513,7 @@ textarea.input { height: auto; padding: 9px 11px; line-height: 1.6; resize: vert
 .sw::after { content: ""; position: absolute; left: 2px; top: 2px; width: 16px; height: 16px; border-radius: 50%; background: #7c8699; transition: 0.15s; }
 .sw.on { background: rgba(91,140,255,0.35); }
 .sw.on::after { left: 16px; background: var(--accent); }
+.sw.locked { opacity: 0.45; cursor: not-allowed; }
 .drow { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--border-soft); }
 .drow:last-child { border-bottom: 0; }
 .drow .k { font-size: 12.5px; }

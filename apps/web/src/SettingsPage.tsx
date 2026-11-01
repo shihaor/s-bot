@@ -47,19 +47,22 @@ interface ModelForm {
   stream: boolean;
   /** 厂商预设 id，仅表单辅助，不入库 */
   provider?: string;
+  /** 厂商能力：不支持的功能要禁用对应开关 */
+  canTools?: boolean;
+  canStream?: boolean;
 }
 
 /** 主流厂商预设：OpenAI 兼容接口，选厂商即内置 baseUrl + 默认模型，用户只填 Key */
-const PROVIDER_PRESETS: Array<{ id: string; name: string; baseUrl: string; model: string }> = [
-  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-  { id: 'qwen', name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
-  { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' },
-  { id: 'anthropic', name: 'Anthropic Claude', baseUrl: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-20250514' },
-  { id: 'google', name: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash' },
-  { id: 'moonshot', name: 'Moonshot Kimi', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
-  { id: 'zhipu', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-plus' },
-  { id: 'siliconflow', name: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3' },
-  { id: 'ollama', name: 'Ollama 本地', baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5' },
+const PROVIDER_PRESETS: Array<{ id: string; name: string; baseUrl: string; model: string; tools: boolean; stream: boolean }> = [
+  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', tools: true, stream: true },
+  { id: 'qwen', name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', tools: true, stream: true },
+  { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o', tools: true, stream: true },
+  { id: 'anthropic', name: 'Anthropic Claude', baseUrl: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-20250514', tools: true, stream: true },
+  { id: 'google', name: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash', tools: true, stream: true },
+  { id: 'moonshot', name: 'Moonshot Kimi', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k', tools: true, stream: true },
+  { id: 'zhipu', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-plus', tools: true, stream: true },
+  { id: 'siliconflow', name: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3', tools: true, stream: true },
+  { id: 'ollama', name: 'Ollama 本地', baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5', tools: false, stream: true },
 ];
 
 const EMPTY_MODEL: ModelForm = {
@@ -70,6 +73,8 @@ const EMPTY_MODEL: ModelForm = {
   tools: true,
   stream: true,
   provider: 'deepseek',
+  canTools: true,
+  canStream: true,
 };
 
 export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
@@ -1005,13 +1010,23 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
                   value={form.provider ?? 'custom'}
                   onChange={(e) => {
                     const preset = PROVIDER_PRESETS.find((p) => p.id === e.target.value);
-                    if (!preset) return;
-                    setForm({
-                      ...form,
-                      provider: preset.id,
-                      model: preset.model,
-                      baseUrl: preset.baseUrl,
-                      name: form.name || preset.name,
+                    setForm((f) => {
+                      if (!f) return f;
+                      if (!preset) {
+                        // 自定义：不限制能力，由用户自己开关
+                        return { ...f, provider: 'custom', canTools: true, canStream: true };
+                      }
+                      return {
+                        ...f,
+                        provider: preset.id,
+                        model: preset.model,
+                        baseUrl: preset.baseUrl,
+                        name: f.name || preset.name,
+                        tools: preset.tools,
+                        stream: preset.stream,
+                        canTools: preset.tools,
+                        canStream: preset.stream,
+                      };
                     });
                   }}
                 >
@@ -1039,8 +1054,8 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
               </div>
               <label className="field"><span>Base URL *</span><input className="input" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://api.deepseek.com/v1" /></label>
               <label className="field"><span>API Key {form.id && <em className="hint">留空不修改</em>}</span><input className="input" type="password" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder="sk-..." /></label>
-              <div className="form-row"><div><div className="k">支持 function calling</div></div><div className={`sw ${form.tools ? 'on' : ''}`} onClick={() => setForm({ ...form, tools: !form.tools })} /></div>
-              <div className="form-row"><div><div className="k">支持流式输出</div></div><div className={`sw ${form.stream ? 'on' : ''}`} onClick={() => setForm({ ...form, stream: !form.stream })} /></div>
+              <div className="form-row"><div><div className="k">支持 function calling{form.canTools === false ? <em className="hint">该厂商不支持</em> : null}</div></div><div className={`sw ${form.tools ? 'on' : ''} ${form.canTools === false ? 'locked' : ''}`} onClick={() => { if (form.canTools !== false) setForm({ ...form, tools: !form.tools }); }} /></div>
+              <div className="form-row"><div><div className="k">支持流式输出{form.canStream === false ? <em className="hint">该厂商不支持</em> : null}</div></div><div className={`sw ${form.stream ? 'on' : ''} ${form.canStream === false ? 'locked' : ''}`} onClick={() => { if (form.canStream !== false) setForm({ ...form, stream: !form.stream }); }} /></div>
             </div>
             <div className="sheet-foot">
               <button className="btn" onClick={() => setForm(null)}>取消</button>
