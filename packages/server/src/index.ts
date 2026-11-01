@@ -51,6 +51,7 @@ import {
   setDefaultModel,
   setWorkflowDone,
   DEFAULT_OPENCODE_URL,
+  DEFAULT_OPENCODE_EXTERNAL_URL,
   tasksForConversation,
   touchAgentSession,
   updateAgent,
@@ -385,7 +386,7 @@ app.post('/api/forms/:formID', async (c) => {
 
 app.get('/api/settings', (c) => {
   const s = getSettings();
-  return c.json({ data: { ...s, opencodeUrl: s.opencodeUrl || DEFAULT_OPENCODE_URL } });
+  return c.json({ data: { ...s, opencodeUrl: s.opencodeUrl || DEFAULT_OPENCODE_URL, opencodeExternalUrl: DEFAULT_OPENCODE_EXTERNAL_URL } });
 });
 
 app.patch('/api/settings', async (c) => {

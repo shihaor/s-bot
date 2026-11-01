@@ -4,6 +4,7 @@ data/
 .env
 *.log
 .DS_Store
+apps/desktop/release*/
 apps/desktop/release/
 .opencode-probe/
 apps/desktop/server/

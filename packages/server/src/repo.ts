@@ -623,6 +623,8 @@ export interface AppSettings {
 }
 
 export const DEFAULT_OPENCODE_URL = 'http://10.201.1.19:80/artifactory/installer/opencode/OpenCode.zip';
+/** opencode 外网官方源（GitHub Releases 的 Windows x64 CLI zip），内网不通时的兜底 */
+export const DEFAULT_OPENCODE_EXTERNAL_URL = 'https://github.com/anomalyco/opencode/releases/latest/download/opencode-windows-x64.zip';
 export const DEFAULT_RAGFLOW_URL = 'http://10.200.25.16:8080';
 
 export function getSettings(): AppSettings {

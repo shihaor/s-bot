@@ -58,6 +58,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   const [settings, setSettings] = useState<AppSettingsData | null>(null);
   const [ocStatus, setOcStatus] = useState<OpencodeStatusData | null>(null);
   const [ocUrl, setOcUrl] = useState('');
+  const [ocExternalUrl, setOcExternalUrl] = useState('');
   const [ocBin, setOcBin] = useState('');
   const [ocBusy, setOcBusy] = useState(false);
   const [ocCandidates, setOcCandidates] = useState<OpencodeCandidate[]>([]);
@@ -146,6 +147,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
       const [s, oc] = await Promise.all([fetchSettings(), fetchOpencodeStatus()]);
       setSettings(s);
       setOcUrl(s.opencodeUrl);
+      setOcExternalUrl(s.opencodeExternalUrl ?? '');
       setOcBin(s.opencodeBin ?? '');
       setRfUrl(s.ragflowBaseUrl);
       setRfKey(s.ragflowApiKey);
@@ -587,6 +589,30 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
           </label>
           <div className="settings-actions">
             <button
+              className="btn"
+              disabled={ocBusy}
+              onClick={async () => {
+                const url = ocExternalUrl || 'https://github.com/anomalyco/opencode/releases/latest/download/opencode-windows-x64.zip';
+                setOcBusy(true);
+                try {
+                  const r = await installOpencodeRuntime(url);
+                  if (r.ok) {
+                    setOcStatus(r.status ?? ocStatus);
+                    onToast(`执行引擎 ${r.version ?? ''} 安装完成`);
+                  } else {
+                    if (r.status) setOcStatus(r.status);
+                    onToast(r.error ?? '外网下载失败，试试内网离线包地址');
+                  }
+                } catch (e) {
+                  onToast(String(e));
+                } finally {
+                  setOcBusy(false);
+                }
+              }}
+            >
+              从外网下载
+            </button>
+            <button
               className="btn primary"
               disabled={ocBusy}
               onClick={async () => {
@@ -611,7 +637,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
             </button>
           </div>
           <p className="sub" style={{ margin: '8px 0 0' }}>
-            安装会解压到上面的 sidecar 目录。内网下载不通时，让管理员把离线包放到这个地址，或者直接把执行引擎程序放进 sidecar 目录。
+            安装会解压到上面的 sidecar 目录。内网下载不通时，可以点「从外网下载」拉取官方执行引擎，或让管理员把离线包放到上面的地址。
           </p>
         </details>
 

@@ -568,7 +568,7 @@ export default function App() {
   const [workflowApproval, setWorkflowApproval] = useState<{ runId: string; nodeId: string; title: string; nodeLabel: string } | null>(null);
   const [workflowEditor, setWorkflowEditor] = useState<{ conversationId: string; graph: GroupWorkflow } | null>(null);
   const [workflowCoach, setWorkflowCoach] = useState<{ conversationId: string; agents: Agent[] } | null>(null);
-  const [ocSetup, setOcSetup] = useState<{ url: string; busy: boolean; error?: string } | null>(null);
+  const [ocSetup, setOcSetup] = useState<{ url: string; externalUrl: string; busy: boolean; error?: string } | null>(null);
   const [unread, setUnread] = useState<Record<string, number>>({});
   const activeIdRef = useRef<string | null>(null);
   const runningRef = useRef(false);
@@ -905,13 +905,18 @@ export default function App() {
         setRuntime(r.mode === 'mock' ? '本地模式' : r.label);
         setActiveId(c.find((x) => x.type === 'group')?.id ?? c[0]?.id ?? null);
         void loadKbs();
-        // 首次启动探测 opencode：没有就提示装离线包
+        // 首次启动探测 opencode：没有就提示装离线包（内网 / 外网都可）
         void fetchOpencodeStatus()
           .then(async (oc) => {
             if (oc.available) return;
             let url = 'http://10.201.1.19:80/artifactory/installer/opencode/OpenCode.zip';
-            try { url = (await fetchSettings()).opencodeUrl || url; } catch { /* ignore */ }
-            setOcSetup({ url, busy: false });
+            let externalUrl = 'https://github.com/anomalyco/opencode/releases/latest/download/opencode-windows-x64.zip';
+            try {
+              const s = await fetchSettings();
+              url = s.opencodeUrl || url;
+              externalUrl = s.opencodeExternalUrl || externalUrl;
+            } catch { /* ignore */ }
+            setOcSetup({ url, externalUrl, busy: false });
           })
           .catch(() => {});
       } catch (e) {
@@ -2723,6 +2728,22 @@ export default function App() {
             <div className="sheet-foot">
               <button className="btn" onClick={() => { setOcSetup(null); setView('settings'); }}>去设置里指定目录</button>
               <button className="btn" onClick={() => setOcSetup(null)}>稍后</button>
+              <button
+                className="btn"
+                disabled={ocSetup.busy}
+                onClick={async () => {
+                  setOcSetup({ ...ocSetup, busy: true, error: undefined });
+                  const r = await installOpencodeRuntime(ocSetup.externalUrl.trim());
+                  if (r.ok) {
+                    showToast(`执行引擎 ${r.version ?? ''} 安装完成`);
+                    setOcSetup(null);
+                  } else {
+                    setOcSetup({ ...ocSetup, busy: false, error: r.error ?? '外网下载失败，试试内网地址或去设置里指定目录' });
+                  }
+                }}
+              >
+                从外网下载
+              </button>
               <button
                 className="btn primary"
                 disabled={ocSetup.busy}

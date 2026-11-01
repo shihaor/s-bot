@@ -867,6 +867,7 @@ export interface AppSettingsData {
   apiKey: string;
   model: string;
   opencodeUrl: string;
+  opencodeExternalUrl: string;
   opencodeBin: string;
   ragflowBaseUrl: string;
   ragflowApiKey: string;
