@@ -44,9 +44,32 @@ interface ModelForm {
   apiKey: string;
   tools: boolean;
   stream: boolean;
+  /** 厂商预设 id，仅表单辅助，不入库 */
+  provider?: string;
 }
 
-const EMPTY_MODEL: ModelForm = { name: '', model: '', baseUrl: '', apiKey: '', tools: true, stream: true };
+/** 主流厂商预设：OpenAI 兼容接口，选厂商即内置 baseUrl + 默认模型，用户只填 Key */
+const PROVIDER_PRESETS: Array<{ id: string; name: string; baseUrl: string; model: string }> = [
+  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  { id: 'qwen', name: '通义千问', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus' },
+  { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o' },
+  { id: 'anthropic', name: 'Anthropic Claude', baseUrl: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-20250514' },
+  { id: 'google', name: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash' },
+  { id: 'moonshot', name: 'Moonshot Kimi', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
+  { id: 'zhipu', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-plus' },
+  { id: 'siliconflow', name: '硅基流动', baseUrl: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3' },
+  { id: 'ollama', name: 'Ollama 本地', baseUrl: 'http://localhost:11434/v1', model: 'qwen2.5' },
+];
+
+const EMPTY_MODEL: ModelForm = {
+  name: '',
+  model: 'deepseek-chat',
+  baseUrl: 'https://api.deepseek.com/v1',
+  apiKey: '',
+  tools: true,
+  stream: true,
+  provider: 'deepseek',
+};
 
 export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -948,8 +971,29 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
       {form && (
         <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) setForm(null); }}>
           <div className="sheet">
-            <div className="sheet-head"><h3>{form.id ? '编辑模型' : '添加模型'}</h3><p>OpenAI 兼容接口。</p></div>
+            <div className="sheet-head"><h3>{form.id ? '编辑模型' : '添加模型'}</h3><p>选厂商会自动填好 Base URL 和模型 ID，只需填 Key；也可以切「自定义」连自己的模型。</p></div>
             <div className="sheet-body">
+              <label className="field">
+                <span>大模型厂商</span>
+                <select
+                  className="input"
+                  value={form.provider ?? 'custom'}
+                  onChange={(e) => {
+                    const preset = PROVIDER_PRESETS.find((p) => p.id === e.target.value);
+                    if (!preset) return;
+                    setForm({
+                      ...form,
+                      provider: preset.id,
+                      model: preset.model,
+                      baseUrl: preset.baseUrl,
+                      name: form.name || preset.name,
+                    });
+                  }}
+                >
+                  {PROVIDER_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  <option value="custom">自定义</option>
+                </select>
+              </label>
               <div className="two">
                 <label className="field"><span>显示名称 *</span><input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="DeepSeek Chat" /></label>
                 <label className="field"><span>模型 ID *</span><input className="input" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder="deepseek-chat" /></label>
