@@ -2407,22 +2407,31 @@ export default function App() {
                     </div>
                   )}
 
-                  {streaming && (
-                    <div className="msg gap">
-                      <Avatar name={streaming.name} initial={streaming.initial} color={streaming.color} />
-                      <div className="msg-body">
-                        <div className="meta">
-                          <span className="name" style={{ color: streaming.color }}>{streaming.name}</span>
-                          <span className="role">{streaming.role}</span>
+                  {streaming && (() => {
+                    const activeTool = [...streaming.tools].reverse().find((t) => t.status === 'running') ?? null;
+                    return (
+                      <div className="msg gap">
+                        <Avatar name={streaming.name} initial={streaming.initial} color={streaming.color} />
+                        <div className="msg-body">
+                          <div className="meta">
+                            <span className="name" style={{ color: streaming.color }}>{streaming.name}</span>
+                            <span className="role">{streaming.role}</span>
+                          </div>
+                          <div className="bubble">
+                            <RichText text={streaming.text} />
+                            {activeTool && (
+                              <div className="streaming-step">
+                                <span className="step-dot" />
+                                <span className="step-text">正在{toolLabel(activeTool.name, activeTool.detail)}</span>
+                              </div>
+                            )}
+                            <span className="cursor" />
+                          </div>
+                          <ToolRow tools={streaming.tools} />
                         </div>
-                        <div className="bubble">
-                          <RichText text={streaming.text} />
-                          <span className="cursor" />
-                        </div>
-                        <ToolRow tools={streaming.tools} />
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
               </div>
 
