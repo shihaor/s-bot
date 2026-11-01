@@ -394,6 +394,17 @@ export async function testModel(id: string): Promise<{ ok: boolean; error?: stri
   return (await res.json()) as { ok: boolean; error?: string; ms?: number; status?: number };
 }
 
+export async function fetchModelIds(baseUrl: string, apiKey: string): Promise<string[]> {
+  const res = await apiFetch('/api/models/fetch-list', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ baseUrl, apiKey }),
+  });
+  const body = (await res.json()) as { data?: string[]; error?: string };
+  if (!res.ok || !body.data) throw new Error(body.error ?? '获取模型列表失败');
+  return body.data;
+}
+
 /* ---------- 任务 ---------- */
 
 export async function fetchTasks(): Promise<Task[]> {

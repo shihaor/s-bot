@@ -482,6 +482,9 @@ textarea.input { height: auto; padding: 9px 11px; line-height: 1.6; resize: vert
 .mode-btn .d { font-size: 10.5px; color: var(--text-faint); margin-top: 3px; }
 .remote-box { margin-top: 8px; }
 .model-list { margin-top: 12px; max-height: 320px; overflow-y: auto; padding-right: 4px; }
+.model-id-picker { display: flex; gap: 6px; }
+.model-id-picker .input { flex: 1; min-width: 0; }
+.model-id-picker .btn { flex: 0 0 auto; white-space: nowrap; }
 .model-row { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--border-soft); }
 .model-row:last-child { border-bottom: 0; }
 .model-meta { flex: 1; min-width: 0; }

@@ -1083,6 +1083,29 @@ app.get('/api/events', (c) => {
 
 app.get('/api/models', (c) => c.json({ data: listModels() }));
 
+/** 拉取厂商模型列表：用 baseUrl + apiKey 调 OpenAI 兼容的 GET /models，返回模型 ID 列表 */
+app.post('/api/models/fetch-list', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const baseUrl = String(b?.baseUrl ?? '').trim().replace(/\/+$/, '');
+  const apiKey = String(b?.apiKey ?? '').trim();
+  if (!baseUrl || !apiKey) return c.json({ error: '请先填 Base URL 和 API Key' }, 400);
+  try {
+    const res = await fetch(`${baseUrl}/models`, {
+      headers: { authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return c.json({ error: `获取模型列表失败 ${res.status} ${body.slice(0, 200)}` }, 502);
+    }
+    const json = (await res.json()) as { data?: Array<{ id?: string }> };
+    const ids = (json.data ?? []).map((m) => String(m.id ?? '').trim()).filter(Boolean);
+    return c.json({ data: ids });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 502);
+  }
+});
+
 app.post('/api/models', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   const name = String(b?.name ?? '').trim();

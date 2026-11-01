@@ -10,6 +10,7 @@ import {
   fetchImportableModels,
   fetchMattermostStatus,
   fetchModels,
+  fetchModelIds,
   fetchOpencodeModels,
   fetchOpencodeStatus,
   fetchSettings,
@@ -74,6 +75,8 @@ const EMPTY_MODEL: ModelForm = {
 export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [form, setForm] = useState<ModelForm | null>(null);
+  const [modelIdOptions, setModelIdOptions] = useState<string[] | null>(null);
+  const [modelIdBusy, setModelIdBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<'local' | 'remote'>(() => (localStorage.getItem('sbot.server') ? 'remote' : 'local'));
   const [testMsg, setTestMsg] = useState<Record<string, string>>({});
@@ -259,6 +262,28 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
     void loadImportables();
     void fetchMattermostStatus().then(setMmStatus).catch(() => setMmStatus({ configured: false, ok: false }));
   }, []);
+
+  async function fetchModelIdList() {
+    if (!form) return;
+    if (!form.baseUrl.trim() || !form.apiKey.trim()) {
+      onToast('先填 Base URL 和 API Key');
+      return;
+    }
+    setModelIdBusy(true);
+    setModelIdOptions(null);
+    try {
+      const ids = await fetchModelIds(form.baseUrl.trim(), form.apiKey.trim());
+      if (!ids.length) {
+        onToast('没有读到模型，检查 Key 或 Base URL');
+        return;
+      }
+      setModelIdOptions(ids);
+    } catch (e) {
+      onToast(String((e as Error).message ?? e));
+    } finally {
+      setModelIdBusy(false);
+    }
+  }
 
   async function saveModel() {
     if (!form || busy) return;
@@ -996,7 +1021,21 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
               </label>
               <div className="two">
                 <label className="field"><span>显示名称 *</span><input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="DeepSeek Chat" /></label>
-                <label className="field"><span>模型 ID *</span><input className="input" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder="deepseek-chat" /></label>
+                <div className="field">
+                  <span>模型 ID *</span>
+                  <div className="model-id-picker">
+                    {modelIdOptions ? (
+                      <select className="input" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}>
+                        {modelIdOptions.map((id) => <option key={id} value={id}>{id}</option>)}
+                      </select>
+                    ) : (
+                      <input className="input" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} placeholder="deepseek-chat" />
+                    )}
+                    <button className="btn" type="button" disabled={modelIdBusy} onClick={() => void fetchModelIdList()} title="用 Key 拉取该厂商的模型列表">
+                      {modelIdBusy ? '获取中' : '获取'}
+                    </button>
+                  </div>
+                </div>
               </div>
               <label className="field"><span>Base URL *</span><input className="input" value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://api.deepseek.com/v1" /></label>
               <label className="field"><span>API Key {form.id && <em className="hint">留空不修改</em>}</span><input className="input" type="password" value={form.apiKey} onChange={(e) => setForm({ ...form, apiKey: e.target.value })} placeholder="sk-..." /></label>
