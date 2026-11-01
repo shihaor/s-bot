@@ -54,9 +54,10 @@ interface Props {
   onUpdate: (id: string, input: AgentInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onDuplicate: (agent: Agent) => Promise<void>;
+  onConfirm: (opts: { title: string; message: string; danger?: boolean; onConfirm: () => void }) => void;
 }
 
-export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCreate, onCreateBatch, onUpdate, onDelete, onDuplicate }: Props) {
+export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCreate, onCreateBatch, onUpdate, onDelete, onDuplicate, onConfirm }: Props) {
   const [form, setForm] = useState<FormState | null>(null);
   const [busy, setBusy] = useState(false);
   const [coachOpen, setCoachOpen] = useState(false);
@@ -207,7 +208,7 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
               <button className="mini" title="复制" onClick={() => void onDuplicate(a)}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h8" /></svg>
               </button>
-              <button className="mini danger" title="删除" onClick={() => { if (window.confirm(`删除「${a.name}」？`)) void onDelete(a.id); }}>
+              <button className="mini danger" title="删除" onClick={() => onConfirm({ title: '删除智能体', message: `删除「${a.name}」？`, danger: true, onConfirm: () => void onDelete(a.id) })}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M4 7h16M10 11v6M14 11v6" /><path d="M6 7l1 13h10l1-13" /><path d="M9 7V4h6v3" /></svg>
               </button>
             </div>

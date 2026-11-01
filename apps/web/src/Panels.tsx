@@ -43,6 +43,33 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
   );
 }
 
+export function ConfirmDialog({
+  title,
+  message,
+  danger,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  message: string;
+  danger?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
+      <div className="sheet confirm-sheet">
+        <div className="sheet-head"><h3>{title}</h3></div>
+        <div className="sheet-body"><p className="confirm-msg">{message}</p></div>
+        <div className="sheet-foot">
+          <button className="btn" onClick={onCancel}>取消</button>
+          <button className={`btn ${danger ? 'confirm-danger' : 'primary'}`} onClick={onConfirm}>确定</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function RenameDialog({
   current,
   onCancel,

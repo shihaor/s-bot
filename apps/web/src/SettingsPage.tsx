@@ -35,6 +35,7 @@ interface Props {
   onToast: (m: string) => void;
   onSaved: () => void;
   onKbChanged?: () => void;
+  onConfirm: (opts: { title: string; message: string; danger?: boolean; onConfirm: () => void }) => void;
 }
 
 interface ModelForm {
@@ -77,7 +78,7 @@ const EMPTY_MODEL: ModelForm = {
   canStream: true,
 };
 
-export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
+export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm }: Props) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [form, setForm] = useState<ModelForm | null>(null);
   const [modelIdOptions, setModelIdOptions] = useState<string[] | null>(null);
@@ -485,7 +486,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged }: Props) {
               <button className="mini" title="测试" onClick={() => void runTest(m)}>◌</button>
               <button className={`mini${m.isDefault ? ' star-on' : ''}`} title={m.isDefault ? '当前默认' : '设为默认'} onClick={async () => { if (m.isDefault) return; await setDefaultModel(m.id); await refresh(); onSaved(); onToast('已设为默认'); }}>★</button>
               <button className="mini" title="编辑" onClick={() => setForm({ ...m, apiKey: '' })}>✎</button>
-              <button className="mini danger" title="删除" onClick={async () => { if (!window.confirm(`删除模型「${m.name}」？`)) return; await deleteModel(m.id); await refresh(); onSaved(); onToast('模型已删除'); }}>×</button>
+              <button className="mini danger" title="删除" onClick={() => onConfirm({ title: '删除模型', message: `删除模型「${m.name}」？`, danger: true, onConfirm: () => { void (async () => { await deleteModel(m.id); await refresh(); onSaved(); onToast('模型已删除'); })(); } })}>×</button>
             </div>
           ))}
         </div>

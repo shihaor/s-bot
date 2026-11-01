@@ -71,6 +71,7 @@ import { Markdown } from './markdown';
 import { ColleagueSearchDialog, MattermostInviteDialog } from './Colleagues';
 import { animateDrawer, animateIntro, animateOverlay, animatePanel, animateToast } from './anim';
 import {
+  ConfirmDialog,
   ContextMenu,
   FormDialog,
   GroupDrawer,
@@ -569,6 +570,7 @@ export default function App() {
   const [workflowEditor, setWorkflowEditor] = useState<{ conversationId: string; graph: GroupWorkflow } | null>(null);
   const [workflowCoach, setWorkflowCoach] = useState<{ conversationId: string; agents: Agent[] } | null>(null);
   const [ocSetup, setOcSetup] = useState<{ url: string; externalUrl: string; busy: boolean; error?: string } | null>(null);
+  const [confirmState, setConfirmState] = useState<{ title: string; message: string; danger?: boolean; onConfirm: () => void } | null>(null);
   const [unread, setUnread] = useState<Record<string, number>>({});
   const activeIdRef = useRef<string | null>(null);
   const runningRef = useRef(false);
@@ -1315,15 +1317,23 @@ export default function App() {
     }
   }
 
-  async function handleDeleteTask(id: string) {
-    if (!window.confirm('删除这个任务？')) return;
-    try {
-      await deleteTaskApi(id);
-      await refreshTasks();
-      showToast('任务已删除');
-    } catch (e) {
-      showToast(String(e));
-    }
+  function handleDeleteTask(id: string) {
+    setConfirmState({
+      title: '删除任务',
+      message: '删除这个任务？',
+      danger: true,
+      onConfirm: () => {
+        void (async () => {
+          try {
+            await deleteTaskApi(id);
+            await refreshTasks();
+            showToast('任务已删除');
+          } catch (e) {
+            showToast(String(e));
+          }
+        })();
+      },
+    });
   }
 
   function openTaskConv(conversationId: string) {
@@ -1346,16 +1356,24 @@ export default function App() {
     }
   }
 
-  async function unassignTask(taskId: string) {
+  function unassignTask(taskId: string) {
     const t = tasks.find((x) => x.id === taskId);
-    if (t && !window.confirm(`取消执行「${t.title}」？\n它会回到待分配，其他群可以接手。`)) return;
-    try {
-      await updateTaskApi(taskId, { conversationId: null, status: 'todo' });
-      await refreshTasks();
-      showToast('已取消执行，任务回到待分配');
-    } catch (e) {
-      showToast(String(e));
-    }
+    if (!t) return;
+    setConfirmState({
+      title: '取消执行',
+      message: `取消执行「${t.title}」？它会回到待分配，其他群可以接手。`,
+      onConfirm: () => {
+        void (async () => {
+          try {
+            await updateTaskApi(taskId, { conversationId: null, status: 'todo' });
+            await refreshTasks();
+            showToast('已取消执行，任务回到待分配');
+          } catch (e) {
+            showToast(String(e));
+          }
+        })();
+      },
+    });
   }
 
   async function importIntoActive(pkg: unknown) {
@@ -1400,18 +1418,26 @@ export default function App() {
     }
   }
 
-  async function removeConversation(c: Conversation) {
-    if (!window.confirm(`删除「${c.title}」？聊天记录会一起删除。`)) return;
-    try {
-      await deleteConversationApi(c.id);
-      const list = await fetchConversations();
-      setConversations(list);
-      if (activeId === c.id) setActiveId(list[0]?.id ?? null);
-      setDrawerOpen(false);
-      showToast('已删除');
-    } catch (e) {
-      showToast(String(e));
-    }
+  function removeConversation(c: Conversation) {
+    setConfirmState({
+      title: '删除会话',
+      message: `删除「${c.title}」？聊天记录会一起删除。`,
+      danger: true,
+      onConfirm: () => {
+        void (async () => {
+          try {
+            await deleteConversationApi(c.id);
+            const list = await fetchConversations();
+            setConversations(list);
+            if (activeId === c.id) setActiveId(list[0]?.id ?? null);
+            setDrawerOpen(false);
+            showToast('已删除');
+          } catch (e) {
+            showToast(String(e));
+          }
+        })();
+      },
+    });
   }
 
   async function exportConversation(c: Conversation) {
@@ -2206,6 +2232,7 @@ export default function App() {
               onUpdate={handleUpdateAgent}
               onDelete={handleDeleteAgent}
               onDuplicate={handleDuplicateAgent}
+              onConfirm={(opts) => setConfirmState(opts)}
             />
           ) : view === 'skills' ? (
             <SkillsPage />
@@ -2217,6 +2244,7 @@ export default function App() {
                 void fetchModels().then(setModels).catch(() => { /* ignore */ });
               }}
               onKbChanged={() => void loadKbs()}
+              onConfirm={(opts) => setConfirmState(opts)}
             />
           ) : !active ? (
             <div className="empty">选一个会话开始</div>
@@ -2659,6 +2687,15 @@ export default function App() {
           defaultConversationId={active?.type === 'group' ? active.id : null}
           onCancel={() => setTaskDialog(null)}
           onSave={(input) => void saveTask(input)}
+        />
+      )}
+      {confirmState && (
+        <ConfirmDialog
+          title={confirmState.title}
+          message={confirmState.message}
+          danger={confirmState.danger}
+          onCancel={() => setConfirmState(null)}
+          onConfirm={() => { const fn = confirmState.onConfirm; setConfirmState(null); fn(); }}
         />
       )}
       {permissionReq && (

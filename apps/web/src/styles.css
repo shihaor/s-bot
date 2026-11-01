@@ -722,6 +722,10 @@ kbd { font-family: var(--font); font-size: 10px; background: #181d26; border: 1p
 
 /* ---------- 审批弹窗 ---------- */
 .perm-sheet { width: 520px; }
+.confirm-sheet { width: 420px; max-width: 92vw; }
+.confirm-msg { font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.btn.confirm-danger { background: var(--danger); color: #fff; }
+.btn.confirm-danger:hover { filter: brightness(1.1); }
 .perm-action { font-size: 13px; font-weight: 600; color: #b9ccff; margin-bottom: 10px; }
 .perm-list { display: flex; flex-direction: column; gap: 6px; }
 .perm-list code { font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; font-size: 11.5px; color: var(--text); background: var(--bg-active); border: 1px solid var(--border-soft); border-radius: 6px; padding: 8px 10px; word-break: break-all; white-space: pre-wrap; }
