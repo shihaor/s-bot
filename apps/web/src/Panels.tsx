@@ -500,6 +500,7 @@ export function GroupDrawer({
   onImport,
   onToast,
   user,
+  lanPeers,
   onInviteHuman,
   onEditWorkflow,
   onCoachWorkflow,
@@ -520,6 +521,7 @@ export function GroupDrawer({
   onImport: (pkg: unknown) => void;
   onToast: (msg: string) => void;
   user: { id?: string; name: string; role: string; initial: string } | null;
+  lanPeers: Array<{ id: string; name: string; role: string; color: string; initial: string }>;
   onInviteHuman: (name: string, role: string) => void;
   onEditWorkflow: () => void;
   onCoachWorkflow: () => void;
@@ -529,6 +531,11 @@ export function GroupDrawer({
   const fileRef = useRef<HTMLInputElement | null>(null);
   const memberIds = new Set(conv.members.map((m) => m.memberId));
   const available = agents.filter((a) => !memberIds.has(a.id));
+  // 可拉进群的真人：自己 + 内网发现到的同事（按名字去重）
+  const humanCandidates = [
+    ...(user ? [{ id: user.id ?? 'self', name: user.name, role: user.role, initial: user.initial, color: '#5B8CFF' }] : []),
+    ...lanPeers.map((p) => ({ id: p.id, name: p.name, role: p.role, initial: p.initial, color: p.color })),
+  ].filter((h, i, arr) => arr.findIndex((x) => x.name === h.name) === i);
 
   const convTasks = tasks.filter((t) => t.conversationId === conv.id);
   const activeTasks = convTasks.filter((t) => t.status !== 'done');
@@ -632,17 +639,20 @@ export function GroupDrawer({
 
         <div className="dsec">
           <div className="dsec-title">邀请同事</div>
-          {!user && <div className="dsec-empty">登录后可以拉真人进群</div>}
-          {user && conv.members.some((m) => m.memberId === user.id) && (
-            <div className="dsec-empty">{user.name} 已经在群里了</div>
-          )}
-          {user && !conv.members.some((m) => m.memberId === user.id) && (
-            <button className="add-row" onClick={() => onInviteHuman(user.name, user.role)}>
-              <div className="av" style={{ width: 22, height: 22, flexBasis: 22, fontSize: 9.5, background: '#5B8CFF22', border: '2px solid #5B8CFF', color: '#5B8CFF' }}>{user.initial}</div>
-              <div><div className="add-name">{user.name}</div><div className="add-role">{user.role} · 真人</div></div>
-              <span className="plus">+</span>
-            </button>
-          )}
+          {humanCandidates.length === 0 && <div className="dsec-empty">没有识别到在线真人</div>}
+          {humanCandidates.map((h) => {
+            const inGroup = conv.members.some((m) => m.memberId === h.id || m.name === h.name);
+            if (inGroup) {
+              return <div key={h.id} className="dsec-empty">{h.name} 已经在群里了</div>;
+            }
+            return (
+              <button key={h.id} className="add-row" onClick={() => onInviteHuman(h.name, h.role)}>
+                <div className="av" style={{ width: 22, height: 22, flexBasis: 22, fontSize: 9.5, background: `${h.color}22`, border: `2px solid ${h.color}`, color: h.color }}>{h.initial}</div>
+                <div><div className="add-name">{h.name}</div><div className="add-role">{h.role} · 真人</div></div>
+                <span className="plus">+</span>
+              </button>
+            );
+          })}
         </div>
 
         <div className="dsec">

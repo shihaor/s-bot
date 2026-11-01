@@ -2568,6 +2568,7 @@ export default function App() {
           onImport={(pkg) => void importIntoActive(pkg)}
           onToast={showToast}
           user={user}
+          lanPeers={lanPeers}
           onInviteHuman={(name, role) => void inviteHumanToActive(name, role)}
           onEditWorkflow={() => void openWorkflowEditor(active.id)}
           onCoachWorkflow={() => setWorkflowCoach({
