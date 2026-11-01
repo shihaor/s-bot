@@ -16,6 +16,17 @@ let isQuitting = false;
 
 app.setAppUserModelId('com.sbot.desktop');
 
+// 单实例锁：重复启动时直接唤起已运行实例的主窗口，避免端口占用报错
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    // 用户再次启动时，把已运行实例的主窗口唤到前台（含从托盘恢复）
+    showWindow();
+  });
+}
+
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
@@ -237,27 +248,29 @@ ipcMain.on('titlebar-theme', (_event, theme: 'dark' | 'light') => {
   console.log('[titlebar-theme] applied', JSON.stringify(t), 'mainWindow?', !!mainWindow);
 });
 
-app.whenReady().then(async () => {
-  let url = 'http://localhost:5173';
-  if (!isDev) {
-    const port = await startServer();
-    url = `http://127.0.0.1:${port}`;
-  }
-  createTray();
-  createWindow(url);
+if (gotSingleInstanceLock) {
+  app.whenReady().then(async () => {
+    let url = 'http://localhost:5173';
+    if (!isDev) {
+      const port = await startServer();
+      url = `http://127.0.0.1:${port}`;
+    }
+    createTray();
+    createWindow(url);
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow(url);
-    else showWindow();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow(url);
+      else showWindow();
+    });
   });
-});
 
-app.on('before-quit', () => {
-  isQuitting = true;
-  try { mainWindow?.webContents.send('app:abort'); } catch { /* ignore */ }
-});
+  app.on('before-quit', () => {
+    isQuitting = true;
+    try { mainWindow?.webContents.send('app:abort'); } catch { /* ignore */ }
+  });
 
-app.on('window-all-closed', () => {
-  // 有托盘时，关掉窗口不退出应用
-  if (!tray && process.platform !== 'darwin') app.quit();
-});
+  app.on('window-all-closed', () => {
+    // 有托盘时，关掉窗口不退出应用
+    if (!tray && process.platform !== 'darwin') app.quit();
+  });
+}
