@@ -937,7 +937,7 @@ export function resolvePermission(requestID: string, decision: 'once' | 'always'
   return true;
 }
 
-function waitPermission(requestID: string, timeout = 60000): Promise<'once' | 'always' | 'reject'> {
+function waitPermission(requestID: string, timeout = 30 * 60 * 1000): Promise<'once' | 'always' | 'reject'> {
   return new Promise((res) => {
     const timer = setTimeout(() => {
       pendingPermissions.delete(requestID);

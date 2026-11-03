@@ -68,12 +68,12 @@ const PROVIDER_PRESETS: Array<{ id: string; name: string; baseUrl: string; model
 
 const EMPTY_MODEL: ModelForm = {
   name: '',
-  model: 'deepseek-chat',
-  baseUrl: 'https://api.deepseek.com/v1',
+  model: '',
+  baseUrl: '',
   apiKey: '',
   tools: true,
   stream: true,
-  provider: 'deepseek',
+  provider: 'custom',
   canTools: true,
   canStream: true,
 };
@@ -1014,8 +1014,8 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
                     setForm((f) => {
                       if (!f) return f;
                       if (!preset) {
-                        // 自定义：不限制能力，由用户自己开关
-                        return { ...f, provider: 'custom', canTools: true, canStream: true };
+                        // 自定义：清空厂商预填的模型 ID / Base URL，避免误存成 DeepSeek 默认值
+                        return { ...f, provider: 'custom', model: '', baseUrl: '', canTools: true, canStream: true };
                       }
                       return {
                         ...f,

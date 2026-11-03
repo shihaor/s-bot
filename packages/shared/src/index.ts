@@ -32,7 +32,10 @@ export interface Member {
   color: string;
   initial: string;
   muted: boolean;
-  talk: 'low' | 'normal' | 'high';
+  /** 活跃度：mention=仅@，interval=间隔（合并窗口），realtime=实时 */
+  activity: 'mention' | 'interval' | 'realtime';
+  /** interval 模式的合并窗口秒数 */
+  intervalSecs: number;
   online: boolean;
 }
 
@@ -52,6 +55,8 @@ export interface Conversation {
   autoReply: boolean;
   supModel: string | null;
   maxTurns: number;
+  /** 群聊模式：workflow=按聊天逻辑图执行；free=自由讨论（多智能体持续对话） */
+  discussionMode: 'workflow' | 'free';
   /** 流程是否已跑完/已出结论：为 true 时后续消息走自由对话，不再按聊天逻辑重跑 */
   workflowDone?: boolean;
   createdAt: number;

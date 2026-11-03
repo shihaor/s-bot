@@ -1262,9 +1262,9 @@ export default function App() {
     }
   }
 
-  async function handleCreateGroup(title: string, memberIds: string[], workflow: GroupWorkflow | null = null) {
+  async function handleCreateGroup(title: string, memberIds: string[], workflow: GroupWorkflow | null = null, discussionMode: 'workflow' | 'free' = 'workflow') {
     try {
-      const conv = await createGroupApi(title, memberIds, workflow);
+      const conv = await createGroupApi(title, memberIds, workflow, discussionMode);
       setConversations((prev) => [conv, ...prev]);
       setActiveId(conv.id);
       setView('chat');
@@ -1420,7 +1420,7 @@ export default function App() {
     }
   }
 
-  async function patchConv(c: Conversation, patch: { title?: string; pinned?: boolean; muted?: boolean }) {
+  async function patchConv(c: Conversation, patch: { title?: string; pinned?: boolean; muted?: boolean; discussionMode?: 'workflow' | 'free' }) {
     try {
       await updateConversation(c.id, patch);
       await reloadActive();
@@ -1539,6 +1539,12 @@ export default function App() {
       }
       try {
         await addMemberApi(convId, agent.id);
+        // 刷新会话列表 + 当前会话消息，让「XX 加入了群聊」和打招呼能立刻显示
+        const list = await fetchConversations();
+        setConversations(list);
+        if (activeIdRef.current === convId) {
+          void fetchMessages(convId).then(setMessages).catch(() => {});
+        }
         showToast(`「${agent.name}」已加入「${conv.title}」`);
       } catch (e) {
         showToast(String(e));
@@ -1583,7 +1589,7 @@ export default function App() {
     }
   }
 
-  async function patchMember(agentId: string, patch: { muted?: boolean; talk?: 'low' | 'normal' | 'high' }) {
+  async function patchMember(agentId: string, patch: { muted?: boolean; activity?: 'mention' | 'interval' | 'realtime'; intervalSecs?: number }) {
     if (!active) return;
     try {
       await updateMemberApi(active.id, agentId, patch);
@@ -2360,7 +2366,8 @@ export default function App() {
                           color: m.authorColor ?? '#6B7385',
                           initial: m.authorInitial ?? m.authorName.slice(0, 1),
                           muted: false,
-                          talk: 'normal',
+                          activity: 'realtime',
+                          intervalSecs: 30,
                           online: false,
                         } as Member)
                       : null);
@@ -2698,7 +2705,7 @@ export default function App() {
         <NewGroupDialog
           agents={agents}
           onCancel={() => setNewGroupOpen(false)}
-          onCreate={(title, ids, graph) => void handleCreateGroup(title, ids, graph)}
+          onCreate={(title, ids, graph, mode) => void handleCreateGroup(title, ids, graph, mode)}
         />
       )}
       {taskDialog && (

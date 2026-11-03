@@ -167,6 +167,9 @@ ensureColumn('agents', 'agent_group', "agent_group TEXT NOT NULL DEFAULT ''");
 ensureColumn('agents', 'tags', "tags TEXT NOT NULL DEFAULT '[]'");
 ensureColumn('humans', 'simulated', 'simulated INTEGER NOT NULL DEFAULT 0');
 ensureColumn('conversations', 'workflow_done', 'workflow_done INTEGER NOT NULL DEFAULT 0');
+ensureColumn('conversations', 'discussion_mode', "discussion_mode TEXT NOT NULL DEFAULT 'workflow'");
+ensureColumn('conversation_members', 'activity', "activity TEXT NOT NULL DEFAULT 'realtime'");
+ensureColumn('conversation_members', 'interval_secs', 'interval_secs INTEGER NOT NULL DEFAULT 30');
 
 /** 一次性默认：群聊发言不限制，让智能体多轮讨论 */
 function migrateUnlimitedTurns() {

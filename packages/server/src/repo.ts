@@ -49,7 +49,7 @@ export function getAgent(id: string): Agent | null {
 function membersOf(conversationId: string): Member[] {
   const rows = db
     .prepare(
-      `SELECT m.conversation_id, m.member_type, m.member_id, m.muted, m.talk,
+      `SELECT m.conversation_id, m.member_type, m.member_id, m.muted, m.activity, m.interval_secs,
               COALESCE(a.name, h.name, m.member_id) AS name,
               COALESCE(a.role, h.role, '') AS role,
               COALESCE(a.color, h.color, '#6B7385') AS color,
@@ -71,7 +71,8 @@ function membersOf(conversationId: string): Member[] {
     color: r.color,
     initial: r.initial,
     muted: !!r.muted,
-    talk: r.talk,
+    activity: r.activity === 'mention' || r.activity === 'interval' ? r.activity : 'realtime',
+    intervalSecs: Number(r.interval_secs) || 30,
     online: true,
   }));
 }
@@ -100,6 +101,7 @@ const mapConversation = (r: any, withMembers = true): Conversation => ({
   autoReply: r.auto_reply === undefined ? true : !!r.auto_reply,
   supModel: r.sup_model ?? null,
   maxTurns: r.max_turns ?? 0,
+  discussionMode: r.discussion_mode === 'free' ? 'free' : 'workflow',
   workflowDone: !!r.workflow_done,
   p2pGroupId: r.p2p_group_id ?? null,
   p2pHostId: r.p2p_host_id ?? null,
@@ -128,6 +130,30 @@ export function listMessages(conversationId: string, limit = 200): Message[] {
     )
     .all(conversationId, limit) as any[];
   return rows.map(mapMessage);
+}
+
+/** 智能体的跨会话记忆：取它在私聊（或最近一个其它会话）里的最近发言 */
+export function agentCrossMemory(agentId: string, excludeConvId: string, limit = 6): Message[] {
+  const dm = db
+    .prepare(
+      `SELECT c.id FROM conversations c
+       JOIN conversation_members cm ON cm.conversation_id = c.id
+       WHERE c.type = 'dm' AND cm.member_type = 'agent' AND cm.member_id = ? AND c.id != ?
+       ORDER BY c.updated_at DESC LIMIT 1`,
+    )
+    .get(agentId, excludeConvId) as { id: string } | undefined;
+  if (!dm) return [];
+  return listMessages(dm.id, 20)
+    .filter((m) => m.status === 'done' && (m.role === 'user' || m.role === 'assistant'))
+    .slice(-limit);
+}
+
+/** 智能体在某个会话里最后一次发言的时间戳（0 表示没发过），用于「间隔」活跃度的冷却判断 */
+export function lastAgentMessageAt(conversationId: string, agentId: string): number {
+  const row = db
+    .prepare("SELECT MAX(created_at) AS at FROM messages WHERE conversation_id = ? AND author_id = ? AND author_type = 'agent'")
+    .get(conversationId, agentId) as { at: number | null } | undefined;
+  return Number(row?.at ?? 0);
 }
 
 let seq = 0;
@@ -382,7 +408,11 @@ export function setDefaultModel(id: string): void {
 
 /* ---------- 成员 ---------- */
 
-export function updateMember(conversationId: string, agentId: string, patch: { muted?: boolean; talk?: string }): void {
+export function updateMember(
+  conversationId: string,
+  agentId: string,
+  patch: { muted?: boolean; activity?: 'mention' | 'interval' | 'realtime'; intervalSecs?: number },
+): void {
   if (patch.muted !== undefined) {
     db.prepare('UPDATE conversation_members SET muted = ? WHERE conversation_id = ? AND member_id = ?').run(
       patch.muted ? 1 : 0,
@@ -390,21 +420,28 @@ export function updateMember(conversationId: string, agentId: string, patch: { m
       agentId,
     );
   }
-  if (patch.talk !== undefined) {
-    db.prepare('UPDATE conversation_members SET talk = ? WHERE conversation_id = ? AND member_id = ?').run(
-      patch.talk,
+  if (patch.activity !== undefined) {
+    db.prepare('UPDATE conversation_members SET activity = ? WHERE conversation_id = ? AND member_id = ?').run(
+      patch.activity,
+      conversationId,
+      agentId,
+    );
+  }
+  if (patch.intervalSecs !== undefined) {
+    db.prepare('UPDATE conversation_members SET interval_secs = ? WHERE conversation_id = ? AND member_id = ?').run(
+      patch.intervalSecs,
       conversationId,
       agentId,
     );
   }
 }
 
-export function createGroup(title: string, memberIds: string[]): Conversation {
+export function createGroup(title: string, memberIds: string[], discussionMode: 'workflow' | 'free' = 'workflow'): Conversation {
   const id = `cv_g_${Date.now().toString(36)}`;
   const at = Date.now();
   db.prepare(
-    'INSERT INTO conversations (id, type, title, model_id, pinned, muted, max_turns, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, 0, ?, ?)',
-  ).run(id, 'group', title, at, at);
+    'INSERT INTO conversations (id, type, title, model_id, pinned, muted, max_turns, discussion_mode, created_at, updated_at) VALUES (?, ?, ?, NULL, 0, 0, 0, ?, ?, ?)',
+  ).run(id, 'group', title, discussionMode, at, at);
   for (const agentId of memberIds) addMember(id, agentId);
   const names = memberIds.map((m) => getAgent(m)?.name).filter(Boolean).join('、');
   addMessage({
@@ -677,6 +714,7 @@ export function updateConversation(
     autoReply?: boolean;
     supModel?: string | null;
     maxTurns?: number;
+    discussionMode?: 'workflow' | 'free';
   },
 ): void {
   const fields: string[] = [];
@@ -708,6 +746,10 @@ export function updateConversation(
   if (patch.maxTurns !== undefined) {
     fields.push('max_turns = ?');
     values.push(patch.maxTurns);
+  }
+  if (patch.discussionMode !== undefined) {
+    fields.push('discussion_mode = ?');
+    values.push(patch.discussionMode);
   }
   if (!fields.length) return;
   values.push(id);

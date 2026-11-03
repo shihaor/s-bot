@@ -314,7 +314,7 @@ export function NewGroupDialog({
 }: {
   agents: Agent[];
   onCancel: () => void;
-  onCreate: (title: string, memberIds: string[], workflow: GroupWorkflow | null) => void;
+  onCreate: (title: string, memberIds: string[], workflow: GroupWorkflow | null, discussionMode: 'workflow' | 'free') => void;
 }) {
   const [title, setTitle] = useState('');
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -322,6 +322,7 @@ export function NewGroupDialog({
   const [graphBusy, setGraphBusy] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [coachOpen, setCoachOpen] = useState(false);
+  const [mode, setMode] = useState<'workflow' | 'free'>('workflow');
 
   function toggle(id: string) {
     setPicked((prev) => {
@@ -333,7 +334,7 @@ export function NewGroupDialog({
   }
 
   useEffect(() => {
-    if (picked.size < 2) {
+    if (picked.size < 2 || mode === 'free') {
       setGraph(null);
       return;
     }
@@ -353,7 +354,7 @@ export function NewGroupDialog({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [picked]);
+  }, [picked, mode]);
 
   const name = title.trim() || (picked.size === 2 ? '新的评审组' : '新建群聊');
   const stages = graph?.nodes.filter((n) => n.type !== 'start' && n.type !== 'end') ?? [];
@@ -379,28 +380,40 @@ export function NewGroupDialog({
           </div>
 
           <div className="field">
-            <span>聊天逻辑（自动生成，可调整）</span>
-            <div className="wf-preview">
-              {graphBusy && <span className="wf-preview-hint">正在生成…</span>}
-              {!graphBusy && picked.size < 2 && <span className="wf-preview-hint">选满 2 人后自动生成</span>}
-              {!graphBusy && stages.length > 0 && (
-                <div className="wf-preview-chain">
-                  {stages.map((n, i) => (
-                    <span key={n.id} className={`wf-step ${n.type}`}>
-                      {i > 0 && <span className="wf-arrow">→</span>}
-                      {n.label}
-                    </span>
-                  ))}
-                </div>
-              )}
-              <button className="btn" disabled={!graph} onClick={() => setEditorOpen(true)}>编辑聊天逻辑</button>
-              <button className="btn" onClick={() => setCoachOpen(true)}>用对话生成</button>
+            <span>群聊模式</span>
+            <div className="seg">
+              {([['workflow', '工作流'], ['free', '自由讨论']] as const).map(([k, n]) => (
+                <button key={k} className={mode === k ? 'on' : ''} onClick={() => setMode(k)}>{n}</button>
+              ))}
             </div>
+            <div className="wf-preview-hint">{mode === 'free' ? '自由讨论：每个智能体各回一句，最后由主持人给结论' : '工作流：按聊天逻辑图执行（评审/修订/验收等）'}</div>
           </div>
+
+          {mode === 'workflow' && (
+            <div className="field">
+              <span>聊天逻辑（自动生成，可调整）</span>
+              <div className="wf-preview">
+                {graphBusy && <span className="wf-preview-hint">正在生成…</span>}
+                {!graphBusy && picked.size < 2 && <span className="wf-preview-hint">选满 2 人后自动生成</span>}
+                {!graphBusy && stages.length > 0 && (
+                  <div className="wf-preview-chain">
+                    {stages.map((n, i) => (
+                      <span key={n.id} className={`wf-step ${n.type}`}>
+                        {i > 0 && <span className="wf-arrow">→</span>}
+                        {n.label}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <button className="btn" disabled={!graph} onClick={() => setEditorOpen(true)}>编辑聊天逻辑</button>
+                <button className="btn" onClick={() => setCoachOpen(true)}>用对话生成</button>
+              </div>
+            </div>
+          )}
         </div>
         <div className="sheet-foot">
           <button className="btn" onClick={onCancel}>取消</button>
-          <button className="btn primary" disabled={picked.size < 2} onClick={() => onCreate(name, [...picked], graph)}>创建群聊</button>
+          <button className="btn primary" disabled={picked.size < 2} onClick={() => onCreate(name, [...picked], mode === 'workflow' ? graph : null, mode)}>创建群聊</button>
         </div>
       </div>
 
@@ -537,8 +550,8 @@ export function GroupDrawer({
   models: ModelInfo[];
   tasks: Task[];
   onClose: () => void;
-  onPatch: (patch: { title?: string; autoReply?: boolean; supModel?: string | null; maxTurns?: number; modelId?: string | null }) => void;
-  onMemberPatch: (agentId: string, patch: { muted?: boolean; talk?: 'low' | 'normal' | 'high' }) => void;
+  onPatch: (patch: { title?: string; autoReply?: boolean; supModel?: string | null; maxTurns?: number; modelId?: string | null; discussionMode?: 'workflow' | 'free' }) => void;
+  onMemberPatch: (agentId: string, patch: { muted?: boolean; activity?: 'mention' | 'interval' | 'realtime'; intervalSecs?: number }) => void;
   onAdd: (agentId: string) => void;
   onRemove: (agentId: string) => void;
   onDissolve: () => void;
@@ -603,6 +616,14 @@ export function GroupDrawer({
         <div className="dsec">
           <div className="dsec-title">发言规则</div>
           <div className="drow">
+            <div><div className="k">群聊模式</div><div className="d">工作流=按聊天逻辑图执行；自由讨论=每个智能体各回一句，最后由主持人给结论</div></div>
+            <div className="seg">
+              {([['workflow', '工作流'], ['free', '自由讨论']] as const).map(([k, n]) => (
+                <button key={k} className={(conv.discussionMode ?? 'workflow') === k ? 'on' : ''} onClick={() => onPatch({ discussionMode: k })}>{n}</button>
+              ))}
+            </div>
+          </div>
+          <div className="drow">
             <div><div className="k">主持人决定谁说话</div><div className="d">关闭后只有被 @ 才会触发</div></div>
             <div className={`sw ${conv.autoReply ? 'on' : ''}`} onClick={() => onPatch({ autoReply: !conv.autoReply })} />
           </div>
@@ -639,10 +660,10 @@ export function GroupDrawer({
                 <button className="mini danger" title="移出群聊" onClick={() => { if (conv.members.length <= 1) return; onRemove(m.memberId); }}>−</button>
               </div>
               <div className="mem-bot">
-                <span className="lbl">发言</span>
+                <span className="lbl">活跃度</span>
                 <div className="seg">
-                  {([['low', '少'], ['normal', '正常'], ['high', '多']] as const).map(([k, n]) => (
-                    <button key={k} className={m.talk === k ? 'on' : ''} onClick={() => onMemberPatch(m.memberId, { talk: k })}>{n}</button>
+                  {([['mention', '仅@'], ['interval', '间隔'], ['realtime', '实时']] as const).map(([k, n]) => (
+                    <button key={k} className={(m.activity ?? 'realtime') === k ? 'on' : ''} onClick={() => onMemberPatch(m.memberId, { activity: k })}>{n}</button>
                   ))}
                 </div>
                 <span className="lbl" style={{ marginLeft: 'auto' }}>静音</span>
@@ -776,25 +797,9 @@ export function PermissionDialog({
   onDecide: (decision: 'once' | 'always' | 'reject') => void;
 }) {
   const action = ACTION_TEXT[request.action] ?? request.action;
-  const [left, setLeft] = useState(60);
-
-  useEffect(() => {
-    let n = 60;
-    const timer = window.setInterval(() => {
-      n -= 1;
-      if (n <= 0) {
-        window.clearInterval(timer);
-        onDecide('reject');
-      } else {
-        setLeft(n);
-      }
-    }, 1000);
-    return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   return (
-    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onDecide('reject'); }}>
+    <div className="overlay">
       <div className="sheet perm-sheet">
         <div className="sheet-head">
           <h3>需要你确认</h3>
@@ -805,7 +810,7 @@ export function PermissionDialog({
           <div className="perm-list">
             {request.resources.map((r) => <code key={r}>{r}</code>)}
           </div>
-          <div className="perm-hint">允许后它才会继续；<b className="perm-count">{left}</b> 秒不处理会按拒绝处理。</div>
+          <div className="perm-hint">允许后它才会继续；在你做出选择前会一直等待，不会自动关闭。</div>
         </div>
         <div className="sheet-foot perm-foot">
           <button className="btn" onClick={() => onDecide('reject')}>拒绝</button>

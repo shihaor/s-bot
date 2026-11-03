@@ -7,7 +7,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
-import type { ChatIntro, Conversation, Member } from '@sbot/shared';
+import type { ChatIntro, Conversation, GroupWorkflow, Member } from '@sbot/shared';
 import {
   addMember,
   addMessage,
@@ -29,6 +29,8 @@ import {
   ensureHumanDm,
   ensureP2PDm,
   getP2PDmPeer,
+  agentCrossMemory,
+  lastAgentMessageAt,
   getAgent,
   getConversation,
   getDefaultModel,
@@ -1408,13 +1410,21 @@ app.post('/api/conversations', async (c) => {
   const title = String(b?.title ?? '').trim();
   const memberIds = Array.isArray(b?.memberIds) ? b.memberIds.map((s: unknown) => String(s)) : [];
   if (!title || memberIds.length < 2) return c.json({ error: 'title and at least 2 members required' }, 400);
-  const conv = createGroup(title, memberIds);
-  // 新建群：自动生成聊天逻辑图（前端可以传自己改过的）
-  const graph = b?.workflow && Array.isArray(b.workflow.nodes)
-    ? b.workflow
-    : generateWorkflow({ memberIds, title, withHuman: true });
-  const checked = validateWorkflow(graph);
-  if (checked.ok) saveWorkflow(conv.id, graph);
+  const discussionMode = b?.discussionMode === 'free' ? 'free' : 'workflow';
+  const conv = createGroup(title, memberIds, discussionMode);
+  // 让每个智能体各打一句招呼（自我介绍），新建群时也自动发生
+  for (const agentId of memberIds) {
+    void sendJoinEvent(conv.id, 'agent', agentId);
+  }
+  // 自由讨论模式不生成聊天逻辑图；工作流模式自动生成（前端可以传自己改过的）
+  let checked: { ok: boolean; errors: string[] } = { ok: true, errors: [] };
+  if (discussionMode === 'workflow') {
+    const graph: GroupWorkflow = b?.workflow && Array.isArray(b.workflow.nodes)
+      ? b.workflow
+      : generateWorkflow({ memberIds, title, withHuman: true });
+    checked = validateWorkflow(graph);
+    if (checked.ok) saveWorkflow(conv.id, graph);
+  }
   return c.json({ data: conv, workflow: checked.ok ? getWorkflow(conv.id) : null, workflowErrors: checked.errors }, 201);
 });
 
@@ -1448,6 +1458,7 @@ app.patch('/api/conversations/:id', async (c) => {
     autoReply: typeof b?.autoReply === 'boolean' ? b.autoReply : undefined,
     supModel: b?.supModel === null ? null : typeof b?.supModel === 'string' ? b.supModel : undefined,
     maxTurns: typeof b?.maxTurns === 'number' ? b.maxTurns : undefined,
+    discussionMode: b?.discussionMode === 'free' || b?.discussionMode === 'workflow' ? b.discussionMode : undefined,
   });
   return c.json({ data: getConversation(id) });
 });
@@ -1720,7 +1731,8 @@ app.patch('/api/conversations/:id/members/:agentId', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   updateMember(id, agentId, {
     muted: typeof b?.muted === 'boolean' ? b.muted : undefined,
-    talk: typeof b?.talk === 'string' ? b.talk : undefined,
+    activity: ['mention', 'interval', 'realtime'].includes(b?.activity) ? b.activity : undefined,
+    intervalSecs: typeof b?.intervalSecs === 'number' ? b.intervalSecs : undefined,
   });
   return c.json({ data: getConversation(id) });
 });
@@ -2101,12 +2113,29 @@ function pickTargets(conv: Conversation, text: string): string[] {
 
   const mentions = [...text.matchAll(/@([^\s@，,。.！!？?]+)/g)].map((m) => m[1]!);
   if (mentions.length) {
-    const hit = agents.filter((a) => mentions.some((n) => a.name === n || a.name.includes(n) || n.includes(a.name)));
-    if (hit.length) return hit.slice(0, 3).map((a) => a.memberId);
+    const hit = agents.filter((a) => mentions.some((n) => nameMatches(a.name, n)));
+    if (hit.length) return hit.map((a) => a.memberId);
   }
   if (!conv.autoReply) return [];
-  const limit = conv.maxTurns === 0 ? agents.length : Math.min(conv.maxTurns || 3, agents.length);
-  return agents.slice(0, limit).map((a) => a.memberId);
+
+  // 单聊：只有一个智能体，永远让它回
+  if (conv.type === 'dm') return agents.slice(0, 1).map((a) => a.memberId);
+
+  // 自由讨论：按「活跃度」决定谁回（去中心化，不再用 LLM 当主持人）
+  // - mention（仅@）：只有被 @ 才回，这里没 @ 就跳过
+  // - interval（间隔）：冷却窗口内已经回过的就跳过，避免回声
+  // - realtime（实时）：每条都回
+  const now = Date.now();
+  return agents
+    .filter((a) => {
+      if (a.activity === 'mention') return false;
+      if (a.activity === 'interval') {
+        const last = lastAgentMessageAt(conv.id, a.memberId);
+        return !last || now - last > a.intervalSecs * 1000;
+      }
+      return true;
+    })
+    .map((a) => a.memberId);
 }
 
 /** 判断这一轮智能体发言里是否存在明确意见冲突 */
@@ -2277,12 +2306,29 @@ async function postDiscussionConclusion(
   }
 }
 
+/** 名字匹配：忽略空格/大小写，避免模型把「MySQL 助手」写成「MySQL助手」导致 @ 不到人 */
+function nameMatches(name: string, mention: string): boolean {
+  const a = name.replace(/\s+/g, '').toLowerCase();
+  const b = mention.replace(/\s+/g, '').toLowerCase();
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
 /** 找出这条发言里 @ 到的真人成员 */
 function humansMentioned(text: string, conv: Conversation): Member[] {
   const mentions = [...text.matchAll(/@([^\s@，,。.！!？?]+)/g)].map((m) => m[1]!);
   if (!mentions.length) return [];
   return conv.members.filter(
-    (m) => m.memberType === 'human' && mentions.some((n) => m.name === n || m.name.includes(n) || n.includes(m.name)),
+    (m) => m.memberType === 'human' && mentions.some((n) => nameMatches(m.name, n)),
+  );
+}
+
+/** 智能体发言里 @ 的其他智能体（用于「@ 交接 → 被 @ 的人接着跑」） */
+function agentsMentioned(text: string, conv: Conversation): Member[] {
+  const mentions = [...text.matchAll(/@([^\s@，,。.！!？?]+)/g)].map((m) => m[1]!);
+  if (!mentions.length) return [];
+  return conv.members.filter(
+    (m) => m.memberType === 'agent' && !m.muted && mentions.some((n) => nameMatches(m.name, n)),
   );
 }
 
@@ -2602,38 +2648,21 @@ async function buildContextSummary(
   }
 }
 
-/** 新智能体加入后，按自己的擅长方向给群里做一段上下文摘要，并说明准备怎么参与 */
+/** 新智能体加入后，像真人进群一样打一句招呼：我是谁、能做什么 */
 async function buildAgentJoinSummary(
   conv: Conversation,
   agent: { name: string; role: string; systemPrompt: string; skills: string[] },
   askerName: string,
   context: Array<{ text: string; authorType: string; authorId: string | null; authorName?: string | null }>,
 ): Promise<string> {
-  const skill = agent.skills[0] ?? agent.role ?? '我的专业';
   const skills = (agent.skills.length ? agent.skills : [agent.role]).filter(Boolean).join('、');
-  const recent = context.slice(-10);
+  const recent = context.slice(-6);
   const contextText = recent
     .map((m) => `${senderName(conv, m as any)}：${m.text}`)
     .join('\n')
-    .slice(0, 2600);
+    .slice(0, 2000);
 
-  const fallbackLines = [`📋 从${skill}视角看上下文`, ''];
-  if (recent.length) {
-    fallbackLines.push('最近在讨论');
-    for (const m of recent.slice(-3)) {
-      fallbackLines.push(`• ${senderName(conv, m as any)}：${m.text.replace(/\s+/g, ' ').slice(0, 90)}`);
-    }
-    fallbackLines.push('', '我的判断');
-    fallbackLines.push(`• 结合${skills}，现在最需要先把讨论收敛成可执行的分工。`);
-    fallbackLines.push('', '我能接的部分');
-    fallbackLines.push(`• ${skill}相关的问题我来跟，先把上面的分歧拆成明确选项。`);
-  } else {
-    fallbackLines.push('群里还没有历史发言。');
-    fallbackLines.push('', '我能接的部分');
-    fallbackLines.push(`• ${skill}相关的部分我来接，等你们把目标丢进来。`);
-  }
-  fallbackLines.push('', `@${askerName} 我先从${skill}这块跟进，下一步建议把结论落成一条可执行的待办。`);
-  const fallback = fallbackLines.join('\n');
+  const fallback = `Hi，我是${agent.name}，负责${agent.role}${skills ? `，擅长${skills}` : ''}，有事随时 @ 我。`;
 
   const cfg = toConfig(getDefaultModel());
   if (!cfg?.baseUrl || !cfg.apiKey) return fallback;
@@ -2645,30 +2674,21 @@ async function buildAgentJoinSummary(
         {
           role: 'system',
           content: [
-            `你是${agent.name}，${agent.role}，擅长${skills}。你刚被拉进群聊「${conv.title}」。`,
-            '请从你的专业视角，给群里所有人梳理一遍当前上下文，并说明你准备从哪里参与。',
-            '格式要求：',
-            `1. 第一行固定是：📋 从${skill}视角看上下文`,
-            '2. 依次写「最近在讨论」「我的判断」「我能接的部分」三段，没有内容的段可以省略',
-            '3. 每段用 • 列 1~3 条，每条不超过 40 字',
-            '4. 不要用 Markdown 的 #、**、表格，用空行分段',
-            `5. 最后单独一行 @${askerName}，给一个具体的下一步或分工建议`,
-            '6. 总字数控制在 280 字以内，只输出摘要正文',
+            `你是${agent.name}，${agent.role}${skills ? `，擅长${skills}` : ''}。你刚被拉进群聊「${conv.title}」。`,
+            '请像真人刚进群一样，自然地说一句话打个招呼：介绍你是谁、能做什么、准备怎么参与。',
+            '要求：口语化、有人味，就 1~2 句话，控制在 60 字以内；不要用列表、不要 @ 别人布置任务、不要写「摘要」。',
             agent.systemPrompt,
           ].join('\n'),
         },
         {
           role: 'user',
-          content: `最近发言：\n${contextText || '（还没有历史发言）'}\n\n群成员：${conv.members.map((m) => m.name).join('、')}`,
+          content: `群里最近在聊：\n${contextText || '（还没人说话）'}`,
         },
       ],
-      { temperature: 0.4, maxTokens: 600 },
+      { temperature: 0.7, maxTokens: 200 },
     );
-
-    let text = tidySummary(reply || fallback);
-    if (!text.includes('摘要') && !text.includes('视角看上下文')) text = `📋 从${skill}视角看上下文\n\n${text}`;
-    if (!text.includes('@')) text += `\n\n@${askerName} 我先从${skill}这块跟进，下一步建议把结论落成一条可执行的待办。`;
-    return text.slice(0, 1400);
+    const text = (reply || '').trim();
+    return text ? text.slice(0, 200) : fallback;
   } catch {
     return fallback;
   }
@@ -2728,6 +2748,17 @@ function senderName(conv: Conversation, m: { authorId: string | null; authorName
   return mem?.name ?? m.authorName ?? '同事';
 }
 
+/** 智能体的跨会话记忆：把它在私聊里的最近发言带进来，让它在群里也记得之前聊过什么 */
+function crossConversationMemory(agentId: string, currentConvId: string, limit = 6): string {
+  const msgs = agentCrossMemory(agentId, currentConvId, limit);
+  if (!msgs.length) return '';
+  const lines = msgs.map((m) => {
+    const who = m.authorType === 'agent' ? (getAgent(m.authorId ?? '')?.name ?? '智能体') : '用户';
+    return `${who}：${m.text.replace(/\s+/g, ' ').slice(0, 200)}`;
+  });
+  return `【你和用户最近的私聊记录（跨会话记忆，仅供参考，别当成当前群聊上下文）】\n${lines.join('\n')}`;
+}
+
 /** 把「人设 + 群聊最近发言 + 这次要回的话」拼成给 opencode 的 prompt */
 function buildOpencodePrompt(
   conv: Conversation,
@@ -2752,17 +2783,23 @@ function buildOpencodePrompt(
     .filter((m) => m.memberType === 'human')
     .map((m) => `${m.name}${m.role ? `（${m.role}）` : ''}`);
 
+  const mentionedSelf = new RegExp(`@\\s*${agent.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(text) || text.includes(agent.name);
   const persona = [
     `你是${agent.name}，${agent.role}。`,
     agent.systemPrompt,
     '你在一个多人会话里，成员包括用户和其他智能体。只代表你自己发言，不要替别人说话，不要在开头加自己的名字。',
     humans.length ? `群里还有真人同事：${humans.join('、')}。需要拍板时可以用 @名字 征求他们的意见。` : '',
-    '回答控制在 260 字以内：先简要给出判断依据，再给结论，不要只回一句话。',
+    `这条消息${mentionedSelf ? '点名了你，请务必回应' : '没有点名你，你可以自己判断要不要接话；如果与你的职责无关，可以简短说明不参与，不要硬接话'}。`,
+    '如果这件事需要别的智能体接手（比如你只出 SQL/方案、需要别人执行或评审），就在句末 @ 那个智能体的名字，把交接说清楚，不要只丢一句结论就没了。',
+    '回答控制在 260 字以内。如果用户只是给一个简单指示/规则/声明（比如「以后大家听我安排」），就简短确认收到，不要展开长篇；如果要你出方案/给判断，先简要给依据，再给结论。',
     refs ? '如果用了下面的资料，请在句末用 [1][2] 这样的角标标出来。' : '',
   ].filter(Boolean).join('\n');
 
+  const memory = crossConversationMemory(agent.id, conv.id);
+
   return [
     persona,
+    ...(memory ? ['', memory] : []),
     '',
     `【${conv.type === 'group' ? '群聊' : '对话'}最近的发言】`,
     context || '（还没有）',
@@ -3384,6 +3421,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
     if (h?.simulated) void scheduleSimulatedReply(id, h.id, Date.now());
   }
 
+  const defaultModel = getDefaultModel();
   const targets = suppressRun ? [] : pickTargets(conv, text);
   // 群聊还没有任务时，把第一个议题理解成任务并绑定
   let autoTask: ReturnType<typeof createTask> | null = null;
@@ -3401,14 +3439,14 @@ app.post('/api/conversations/:id/messages', async (c) => {
 
   const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const promptText = textWithAttachments(text, parts);
-  const defaultModel = getDefaultModel();
   const fallback = toConfig(defaultModel);
   const runtimeMode = (process.env.SBOT_RUNTIME ?? 'auto').toLowerCase();
+  // 无论什么模型（含本地 vLLM/Ollama 等无 Key 模型），只要有默认模型就走执行引擎，保证智能体始终有 shell/读文件等工具。
+  // 仅在显式指定 SBOT_RUNTIME=llm/mock 时才回退纯 LLM。
   const wantsOpencode =
     runtimeMode !== 'llm' &&
     runtimeMode !== 'mock' &&
-    !!defaultModel?.baseUrl &&
-    (defaultModel.baseUrl === 'opencode://' || !!defaultModel.apiKey);
+    !!defaultModel?.baseUrl;
 
   return streamSSE(c, async (stream) => {
     let aborted = false;
@@ -3455,7 +3493,9 @@ app.post('/api/conversations/:id/messages', async (c) => {
     }
 
     // 流程已跑完（已出结论）的群，后续消息走自由对话，不再按聊天逻辑重跑
-    const workflow = conv.type === 'group' && !suppressRun && !conv.workflowDone ? getWorkflow(id) : null;
+    // 自由讨论模式（discussionMode=free）则直接忽略聊天逻辑图
+    const freeMode = conv.discussionMode === 'free';
+    const workflow = conv.type === 'group' && !suppressRun && !conv.workflowDone && !freeMode ? getWorkflow(id) : null;
     if (workflow?.enabled) {
       const wfResult = await runWorkflow({
         conv,
@@ -3507,24 +3547,22 @@ app.post('/api/conversations/:id/messages', async (c) => {
     }
 
     const produced: Array<ReturnType<typeof addMessage>> = [];
-    // 单聊只有一个智能体，一轮即可；群聊在「不限制」模式下多轮讨论
-    const maxRounds = conv.type === 'dm' ? 1 : (conv.maxTurns === 0 ? 2 : 1);
+    // 自由讨论：@ 交接驱动多轮，最多 6 轮防刷屏；工作流外的普通群聊最多 2 轮
+    const maxRounds = conv.type === 'dm' ? 1 : (freeMode ? 6 : (conv.maxTurns === 0 ? 2 : 1));
     let stopDiscussion = false;
-    // @ 了智能体时：第一轮只让被 @ 的先说，后续轮次让其他智能体也参与进来
-    const hasMention = /@([^\s@，,。.！!？?]+)/.test(text);
-    const allAgentIds = conv.members.filter((m) => m.memberType === 'agent' && !m.muted).map((m) => m.memberId);
+    const spoken = new Set<string>();
+    let roundTargets: string[] = targets;
 
-    for (let round = 0; round < maxRounds && !stopDiscussion; round++) {
+    for (let round = 0; round < maxRounds && !stopDiscussion && roundTargets.length; round++) {
       const roundText = round === 0
         ? promptText
         : `${promptText}\n\n这是第 ${round + 1} 轮讨论。请直接回应其他智能体的观点：同意什么、反对什么、补充依据，不要重复上一轮。`;
-      // 有 @ 且已命中（targets 是子集）时，第二轮换成「其他智能体」参与讨论
-      const roundTargets = round === 0 || !hasMention || !targets.length || targets.length >= allAgentIds.length
-        ? targets
-        : allAgentIds.filter((id) => !targets.includes(id));
+      const nextRoundTargets = new Set<string>();
 
       for (const agentId of roundTargets) {
         if (aborted || stopDiscussion) break;
+        if (spoken.has(agentId)) continue;
+        spoken.add(agentId);
         const agent = getAgent(agentId);
         if (!agent) continue;
 
@@ -3734,11 +3772,16 @@ app.post('/api/conversations/:id/messages', async (c) => {
           break;
         }
       }
+      // 智能体 @ 了其他智能体 → 下一轮让被 @ 的人接着跑
+      for (const m of agentsMentioned(full, conv)) {
+        if (!spoken.has(m.memberId)) nextRoundTargets.add(m.memberId);
       }
+      }
+      roundTargets = [...nextRoundTargets];
     }
 
-    // 无限制模式：多轮讨论后由主持人智能体给出结论
-    if (!aborted && conv.maxTurns === 0 && produced.length >= 2) {
+    // 无限制/自由讨论模式：多轮讨论后由主持人智能体给出结论（有冲突时 @ 所有真人）
+    if (!aborted && (freeMode || conv.maxTurns === 0) && produced.length >= 2) {
       await postDiscussionConclusion(conv, produced, defaultModel);
     }
 

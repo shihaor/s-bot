@@ -184,11 +184,11 @@ export async function ensureHumanDm(humanId: string): Promise<Conversation> {
   return r.data;
 }
 
-export async function createGroup(title: string, memberIds: string[], workflow?: GroupWorkflow | null): Promise<Conversation> {
+export async function createGroup(title: string, memberIds: string[], workflow?: GroupWorkflow | null, discussionMode?: 'workflow' | 'free'): Promise<Conversation> {
   const res = await apiFetch('/api/conversations', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ title, memberIds, workflow }),
+    body: JSON.stringify({ title, memberIds, workflow, discussionMode }),
   });
   if (!res.ok) throw new Error('创建群聊失败');
   const r = (await res.json()) as { data: Conversation };
@@ -271,7 +271,7 @@ export async function approveWorkflow(runId: string, nodeId: string, decision: '
 
 export async function updateConversation(
   id: string,
-  patch: { title?: string; pinned?: boolean; muted?: boolean; modelId?: string | null },
+  patch: { title?: string; pinned?: boolean; muted?: boolean; modelId?: string | null; discussionMode?: 'workflow' | 'free' },
 ): Promise<Conversation> {
   const res = await apiFetch(`/api/conversations/${id}`, {
     method: 'PATCH',
@@ -309,7 +309,7 @@ export async function removeMember(id: string, agentId: string): Promise<Convers
 export async function updateMember(
   id: string,
   agentId: string,
-  patch: { muted?: boolean; talk?: 'low' | 'normal' | 'high' },
+  patch: { muted?: boolean; activity?: 'mention' | 'interval' | 'realtime'; intervalSecs?: number },
 ): Promise<Conversation> {
   const res = await apiFetch(`/api/conversations/${id}/members/${agentId}`, {
     method: 'PATCH',

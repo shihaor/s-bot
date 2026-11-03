@@ -64,12 +64,12 @@ export function generateWorkflow(options: GenerateOptions): GroupWorkflow {
     const design = addAgentStage(
       arch,
       '理解需求并出方案',
-      '先复述目标和约束，再给出方案。写清分层、数据流、选型、风险和待确认问题。不要写代码。',
+      '先判断用户是「给需求」还是「给简单指示/规则」：如果只是简单指示或声明（比如「以后大家听我安排」），就简短确认收到（一两句话，比如「好的，听你安排，需要我出方案时喊我」），不要展开成分层方案。只有用户真的给了需求/目标时，才复述目标和约束并给出方案，写清分层、数据流、选型、风险和待确认问题，不要写代码。',
     );
     const review = addAgentStage(
       reviewer,
       '评审方案',
-      '只评审方案本身（分层、数据流、选型、风险），不要要求这一步出图；架构图由后续节点负责。列出阻塞问题；最后单独输出一行 JSON：{"verdict":"pass" 或 "changes","blocking":[],"suggestions":[]}',
+      '只评审方案本身（分层、数据流、选型、风险），不要要求这一步出图；架构图由后续节点负责。如果上一步的输出只是简单确认、没有实质方案内容，就直接判 pass 放行，不要为了评审而制造阻塞。需要指出问题时列出阻塞问题；最后单独输出一行 JSON：{"verdict":"pass" 或 "changes","blocking":[],"suggestions":[]}',
       true,
     );
 
