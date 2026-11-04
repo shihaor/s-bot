@@ -98,7 +98,7 @@ interface Streaming {
   tools: Array<{ toolId: string; name: string; detail: string; status: 'running' | 'ok' | 'failed' }>;
 }
 
-type Attachment = { type: 'image' | 'file'; name: string; size: number; mime?: string; dataUrl?: string; text?: string };
+type Attachment = { type: 'image' | 'file'; name: string; size: number; mime?: string; dataUrl?: string; text?: string; path?: string };
 
 const TEXT_FILE_EXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|xml|html?|css|js|jsx|ts|tsx|py|go|java|kt|rs|c|cpp|h|hpp|sh|bash|zsh|ps1|sql|log|toml|ini|conf|env)$/i;
 
@@ -596,6 +596,7 @@ export default function App() {
   const [profile, setProfile] = useState<LocalProfile>(loadLocalProfile);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [mention, setMention] = useState<string | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
   const [dragOver, setDragOver] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -646,6 +647,12 @@ export default function App() {
   // 服务端推送：别的客户端发消息 / 任务变化时刷新
   useEffect(() => {
     const es = new EventSource(apiUrl('/api/events'));
+    // 断线重连后补拉一次，避免服务端重启期间漏掉的消息（比如 P2P 触发跑出来的回复）
+    es.onopen = () => {
+      void refreshConversations();
+      const cid = activeIdRef.current;
+      if (cid) void fetchMessages(cid).then(setMessages).catch(() => {});
+    };
     const onEvent = (ev: MessageEvent) => {
       try {
         const e = JSON.parse(ev.data) as { type: string; conversationId?: string; data?: any };
@@ -738,6 +745,8 @@ export default function App() {
             summary: p.summary,
             memberCount: p.memberCount,
           });
+          // 被拉进群时右下角弹提醒
+          notifyDesktop('群聊邀请', `${p.hostName} 邀请你加入「${p.title}」`);
         }
       } catch {
         /* ignore */
@@ -1620,6 +1629,11 @@ export default function App() {
   function readFile(file: File): Promise<Attachment> {
     return new Promise((resolve) => {
       const base: Attachment = { type: 'file', name: file.name, size: file.size, mime: file.type || undefined };
+      // Electron 里拿到本地绝对路径：文件夹（size=0、无 type）靠它让智能体自己去读
+      try {
+        const p = (window as any).sbot?.getPathForFile?.(file);
+        if (p) base.path = String(p);
+      } catch { /* ignore */ }
       if (file.type.startsWith('image/')) {
         base.type = 'image';
         const reader = new FileReader();
@@ -1648,6 +1662,14 @@ export default function App() {
   function insertMention(name: string) {
     setInput((prev) => prev.replace(/@([^\s@]*)$/, `@${name} `));
     setMention(null);
+    // 选完 @ 之后光标回到输入框末尾，方便接着打字
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (!el) return;
+      el.focus();
+      const end = el.value.length;
+      el.setSelectionRange(end, end);
+    });
   }
 
   function insertAtSign() {
@@ -1705,7 +1727,11 @@ export default function App() {
     if ((!text && parts.length === 0) || !activeId || running) return;
 
     const runConv = activeId;
-    if (!override) setInput('');
+    if (!override) {
+      setInput('');
+      // 发完消息后光标留在输入框，方便接着打字
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
     setRunning(true);
     runningRef.current = true;
     setError('');
@@ -1871,6 +1897,8 @@ export default function App() {
       setHumanWait(null);
       abortRef.current = null;
       refreshConversations();
+      // 跑完也把光标放回输入框，方便连续对话
+      requestAnimationFrame(() => inputRef.current?.focus());
     }
   }
 
@@ -2380,7 +2408,7 @@ export default function App() {
                     const isConclusion = Array.isArray(m.parts)
                       && m.parts.some((p) => (p as { type?: string } | null)?.type === 'discussion-conclusion');
                     return (
-                      <div key={m.id} id={`m-${m.id}`} className={`msg ${same ? '' : 'gap'}`}>
+                      <div key={m.id} id={`m-${m.id}`} className={`msg ${m.authorType === 'human' ? 'human' : ''} ${same ? '' : 'gap'}`}>
                         {!same && person ? (
                           <Avatar name={person.name} initial={person.initial} color={person.color} />
                         ) : (
@@ -2504,8 +2532,8 @@ export default function App() {
                 )}
                 {mention !== null && mentionCandidates.length > 0 && (
                   <div className="mention-menu">
-                    {mentionCandidates.map((m) => (
-                      <button key={m.memberId} className="mention-item" onClick={() => insertMention(m.name)}>
+                    {mentionCandidates.map((m, i) => (
+                      <button key={m.memberId} className={`mention-item ${i === mentionIndex ? 'on' : ''}`} onMouseEnter={() => setMentionIndex(i)} onClick={() => insertMention(m.name)}>
                         <span className="nm" style={{ color: m.color }}>{m.name}</span>
                         <span className="rl">{m.role}</span>
                       </button>
@@ -2549,9 +2577,29 @@ export default function App() {
                       const pos = e.target.selectionStart ?? v.length;
                       const hit = v.slice(0, pos).match(/@([^\s@]*)$/);
                       setMention(hit ? hit[1]! : null);
+                      setMentionIndex(0);
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Escape') { setMention(null); return; }
+                      // @ 候选菜单打开时：上下选择、回车/空格确认
+                      if (mention !== null && mentionCandidates.length > 0) {
+                        if (e.key === 'ArrowDown') {
+                          e.preventDefault();
+                          setMentionIndex((i) => (i + 1) % mentionCandidates.length);
+                          return;
+                        }
+                        if (e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          setMentionIndex((i) => (i - 1 + mentionCandidates.length) % mentionCandidates.length);
+                          return;
+                        }
+                        if (e.key === 'Enter' || e.key === 'Tab') {
+                          e.preventDefault();
+                          const picked = mentionCandidates[mentionIndex] ?? mentionCandidates[0];
+                          if (picked) insertMention(picked.name);
+                          return;
+                        }
+                      }
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
                         void handleSend();

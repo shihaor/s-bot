@@ -180,6 +180,16 @@ function migrateUnlimitedTurns() {
 }
 migrateUnlimitedTurns();
 
+/** 一次性：把「远端真人/导入」的历史消息从 author_type=user 纠正为 human，
+ *  否则会渲染成本人消息（右侧 + 「导入」）。本地未登录用户的发言 author_name 为空，不受影响。 */
+function migrateHumanMessages() {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'msg_human_fix_v1'").get();
+  if (done) return;
+  db.exec("UPDATE messages SET author_type = 'human' WHERE author_type = 'user' AND author_name IS NOT NULL AND author_name != ''");
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('msg_human_fix_v1', '1')").run();
+}
+migrateHumanMessages();
+
 function seedModels() {
   const row = db.prepare('SELECT count(*) AS c FROM models').get() as { c: number } | undefined;
   if ((row?.c ?? 0) > 0) return;

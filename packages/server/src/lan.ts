@@ -1,6 +1,7 @@
 import { createSocket, type Socket } from 'node:dgram';
 import { networkInterfaces } from 'node:os';
 import { broadcast } from './events.js';
+import { getOrCreateInstanceId } from './repo.js';
 
 /**
  * 局域网发现（飞秋式）：UDP 广播/组播自己的身份，其他 S-BOT 客户端自动出现。
@@ -30,7 +31,12 @@ interface Identity {
   initial: string;
 }
 
-const instanceId = `sbot_${Math.random().toString(36).slice(2, 10)}`;
+// 本机实例 ID 持久化在 settings 里，重启后不变；否则 P2P 群的群主 ID 会跟着变，导致「本机不是群主」而转发出错
+let cachedInstanceId: string | null = null;
+function instanceId(): string {
+  if (!cachedInstanceId) cachedInstanceId = getOrCreateInstanceId();
+  return cachedInstanceId;
+}
 const peers = new Map<string, LanPeer>();
 const manualPeerIds = new Set<string>();
 let identity: Identity = { name: 'S-BOT 用户', role: '', color: '#5B8CFF', initial: '人' };
@@ -76,7 +82,7 @@ function beacon() {
   const payload = JSON.stringify({
     app: 's-bot',
     v: 1,
-    id: instanceId,
+    id: instanceId(),
     name: identity.name,
     role: identity.role,
     color: identity.color,
@@ -187,7 +193,7 @@ export function getLanPeers(): LanPeer[] {
 }
 
 export function getLanIdentity() {
-  return { id: instanceId, ...identity, port: serverPort, addrs: localAddrs() };
+  return { id: instanceId(), ...identity, port: serverPort, addrs: localAddrs() };
 }
 
 export function setLanIdentity(next: Partial<Identity>): void {

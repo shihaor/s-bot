@@ -664,6 +664,38 @@ export const DEFAULT_OPENCODE_URL = 'http://10.201.1.19:80/artifactory/installer
 export const DEFAULT_OPENCODE_EXTERNAL_URL = 'https://github.com/anomalyco/opencode/releases/latest/download/opencode-windows-x64.zip';
 export const DEFAULT_RAGFLOW_URL = 'http://10.200.25.16:8080';
 
+/** 修正 P2P 群的群主：老版本实例 ID 每次重启都变，导致本地创建的群「群主失联」被转发走。
+ *  判定：本机不在群的 peers 里 → 本机就是群主，把 host 修成当前实例 ID。 */
+let p2pHostFixed = false;
+function fixStaleP2PHosts(localId: string): void {
+  const rows = db
+    .prepare("SELECT id, p2p_host_id, p2p_peers FROM conversations WHERE p2p_group_id IS NOT NULL AND type = 'group'")
+    .all() as Array<{ id: string; p2p_host_id: string | null; p2p_peers: string | null }>;
+  for (const r of rows) {
+    let peers: Array<{ id?: string }> = [];
+    try { peers = JSON.parse(r.p2p_peers ?? '[]'); } catch { peers = []; }
+    const localIsPeer = Array.isArray(peers) && peers.some((p) => p && p.id === localId);
+    if (!localIsPeer && r.p2p_host_id !== localId) {
+      db.prepare('UPDATE conversations SET p2p_host_id = ? WHERE id = ?').run(localId, r.id);
+    }
+  }
+}
+
+/** 本机 LAN 实例 ID：持久化到 settings，重启后不变（否则 P2P 群的群主会「失联」） */
+export function getOrCreateInstanceId(): string {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'lan_instance_id'").get() as { value: string } | undefined;
+  let id = row?.value;
+  if (!id) {
+    id = `sbot_${Math.random().toString(36).slice(2, 10)}`;
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('lan_instance_id', ?)").run(id);
+  }
+  if (!p2pHostFixed) {
+    p2pHostFixed = true;
+    fixStaleP2PHosts(id);
+  }
+  return id;
+}
+
 export function getSettings(): AppSettings {
   const rows = db.prepare('SELECT key, value FROM settings').all() as Array<{ key: string; value: string }>;
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));

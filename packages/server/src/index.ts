@@ -7,7 +7,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
-import type { ChatIntro, Conversation, GroupWorkflow, Member } from '@sbot/shared';
+import type { ChatIntro, Conversation, GroupWorkflow, Member, Message } from '@sbot/shared';
 import {
   addMember,
   addMessage,
@@ -598,12 +598,24 @@ app.post('/api/p2p/receive-message', async (c) => {
   // 把发送方的本地成员 id 映射到本地的影子成员（p_<peerId>_<memberId>）
   const peerId = String(from.id);
   const authorLocalId = String(msg.authorId ?? '');
-  const shadowId = authorLocalId ? `p_${peerId}_${authorLocalId}` : null;
-  const shadow = shadowId ? (getAgent(shadowId) ?? getHuman(shadowId)) : null;
+  let shadowId: string | null = authorLocalId ? `p_${peerId}_${authorLocalId}` : null;
+  let shadow: ReturnType<typeof getAgent> | ReturnType<typeof getHuman> = shadowId ? (getAgent(shadowId) ?? getHuman(shadowId)) : null;
+  // 对方没登录、没有本地成员 id 时：按名字匹配同名的影子真人，保证这边能认出发送者
+  if (!shadow) {
+    const name = String(msg.authorName ?? from.name ?? '').trim();
+    const match = name && Array.isArray(conv.members)
+      ? conv.members.find((m) => m.memberType === 'human' && m.name === name && m.memberId.startsWith(`p_${peerId}`))
+      : null;
+    if (match) {
+      shadowId = match.memberId;
+      shadow = getHuman(match.memberId) ?? getAgent(match.memberId);
+    }
+  }
 
-  addMessage({
+  const saved = addMessage({
     conversationId: conv.id,
-    authorType: msg.authorType === 'agent' ? 'agent' : msg.authorType === 'human' ? 'human' : 'user',
+    // 远端来的一律按「真人」处理：对方没登录时 authorType 可能是 user，但在这边不能当成「我本人」
+    authorType: msg.authorType === 'agent' ? 'agent' : 'human',
     authorId: shadowId,
     authorName: shadow?.name ?? msg.authorName ?? String(from.name ?? '内网同事'),
     authorColor: shadow?.color ?? msg.authorColor ?? null,
@@ -613,6 +625,38 @@ app.post('/api/p2p/receive-message', async (c) => {
     parts: Array.isArray(msg.parts) ? msg.parts : [],
     createdAt: Number(msg.createdAt ?? Date.now()),
   });
+
+  // 群主端跑智能体：远端真人 A 在群里 @ 了智能体，群主要接着讨论，结果再转发回远端
+  const isHost = !state.hostId || state.hostId === p2pOwnId();
+  if (isHost && conv.type === 'group' && saved.authorType !== 'agent') {
+    const port = Number(process.env.PORT ?? 8787);
+    void (async () => {
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/api/conversations/${conv.id}/messages`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            text: String(msg.text),
+            parts: Array.isArray(msg.parts) ? msg.parts : [],
+            skipUserMessage: true,
+            userMessageId: saved.id,
+            userMessageAt: saved.createdAt,
+          }),
+        });
+        // 消费完 SSE，避免连接提前断开导致 run 被 abort
+        if (res.body) {
+          const reader = res.body.getReader();
+          for (;;) {
+            const { done } = await reader.read();
+            if (done) break;
+          }
+        }
+      } catch {
+        /* 触发失败不影响消息落库 */
+      }
+    })();
+  }
+
   return c.json({ ok: true });
 });
 
@@ -2828,7 +2872,7 @@ function attachmentText(parts: unknown, totalLimit = 12_000): string {
 
   for (const raw of parts) {
     if (!raw || typeof raw !== 'object') continue;
-    const p = raw as { type?: string; name?: string; size?: number; mime?: string; text?: string };
+    const p = raw as { type?: string; name?: string; size?: number; mime?: string; text?: string; path?: string };
     const name = p.name?.trim() || '附件';
     const meta = [p.mime, formatBytes(p.size)].filter(Boolean).join('，');
 
@@ -2843,6 +2887,11 @@ function attachmentText(parts: unknown, totalLimit = 12_000): string {
       budget -= clipped.length;
       blocks.push(
         `[文件] ${name}${meta ? `（${meta}）` : ''}\n\`\`\`\n${clipped}${content.length > clipped.length ? '\n…（内容已截断）' : ''}\n\`\`\``,
+      );
+    } else if (p.path) {
+      // 拖进来的文件夹/二进制文件：给出本地绝对路径，让智能体自己用工具读
+      blocks.push(
+        `[${p.size ? '文件' : '文件夹'}] ${name}（本地路径：${p.path}）\n请用 read/shell 工具直接读取该路径下的内容再判断，不要只看文件名就说看不到内容。`,
       );
     } else {
       blocks.push(`[文件] ${name}${meta ? `（${meta}）` : ''}：没有可读取的文本内容`);
@@ -3376,7 +3425,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
   }
 
   const history = listMessages(id, 20)
-    .filter((m) => m.status === 'done' && (m.role === 'user' || m.role === 'assistant'))
+    .filter((m) => m.id !== String(body?.userMessageId ?? '') && m.status === 'done' && (m.role === 'user' || m.role === 'assistant'))
     .map((m) => {
       const extra = m.authorType === 'user' ? attachmentText(m.parts, 2500) : '';
       return {
@@ -3387,20 +3436,37 @@ app.post('/api/conversations/:id/messages', async (c) => {
 
   const uid = c.req.header('x-sbot-user') || null;
   const author = uid ? getHuman(uid) : null;
-  const userMessage = addMessage({
-    conversationId: id,
-    authorType: uid ? 'human' : 'user',
-    authorId: uid,
-    authorName: author?.name ?? null,
-    authorColor: author?.color ?? null,
-    authorInitial: author?.initial ?? null,
-    role: 'user',
-    text,
-    parts,
-  });
-
-  // P2P 群：把用户发言转发给远端真人
-  void forwardGroupMessage(conv, userMessage);
+  const skipUserMessage = body?.skipUserMessage === true;
+  let userMessage: Message;
+  if (skipUserMessage) {
+    // 远端真人经 P2P 发来的消息：P2P 接口已经落库了，这里只借它触发智能体，不再重复加消息/转发
+    userMessage = {
+      id: String(body?.userMessageId ?? `p2p_${Date.now().toString(36)}`),
+      conversationId: id,
+      authorType: 'human',
+      authorId: null,
+      role: 'user',
+      text,
+      parts,
+      modelId: null,
+      status: 'done',
+      createdAt: Number(body?.userMessageAt ?? Date.now()),
+    };
+  } else {
+    userMessage = addMessage({
+      conversationId: id,
+      authorType: uid ? 'human' : 'user',
+      authorId: uid,
+      authorName: author?.name ?? null,
+      authorColor: author?.color ?? null,
+      authorInitial: author?.initial ?? null,
+      role: 'user',
+      text,
+      parts,
+    });
+    // P2P 群：把用户发言转发给远端真人
+    void forwardGroupMessage(conv, userMessage);
+  }
 
   // 真人回复正在软等待的那条发言：让原来的 run 继续，避免再起一轮重复回复
   const pendingWait = findHumanWaitForConversation(id);
@@ -3479,7 +3545,9 @@ app.post('/api/conversations/:id/messages', async (c) => {
 
     // P2P 群且本机不是群主：只把发言转发给群主，由群主跑讨论，避免双端重复回复
     const p2pGroup = conv.type === 'group' ? getP2PState(id) : null;
+    console.log('[run]', JSON.stringify({ conv: conv.title, mode: conv.discussionMode, targets, suppressRun, opencodeOn, p2pHost: p2pGroup?.hostId ?? null, selfId: getLanIdentity().id }));
     if (p2pGroup && p2pGroup.hostId && p2pGroup.hostId !== getLanIdentity().id) {
+      console.log('[run] 本机不是 P2P 群主，转发给群主，不本地跑');
       await stream.writeSSE({ event: 'run.end', data: '{}' });
       return;
     }

@@ -218,6 +218,12 @@ textarea { font-family: inherit; color: inherit; background: none; border: 0; ou
   border-radius: 14px 4px 14px 14px;
   background: linear-gradient(180deg, #2e4fa8, #27428c); border-color: #3b5fc0; color: #eef2ff;
 }
+/* 其他真人（非自己）的发言：和智能体一样靠左，但用不同颜色区分 */
+.msg.human .bubble {
+  background: linear-gradient(180deg, #14261f, #101a16);
+  border-color: rgba(61, 220, 151, 0.34);
+}
+.msg.human .meta .name { font-weight: 600; }
 
 /* ---------- 消息气泡 Markdown 渲染 ---------- */
 .bubble p { margin: 0 0 6px; }
@@ -475,6 +481,7 @@ textarea.input { height: auto; padding: 9px 11px; line-height: 1.6; resize: vert
 .mention-menu { position: absolute; left: 26px; bottom: calc(100% - 4px); width: 280px; background: #141821; border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.45); overflow: hidden; z-index: 40; }
 .mention-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 11px; text-align: left; }
 .mention-item:hover { background: var(--bg-hover); }
+.mention-item.on { background: var(--bg-hover); box-shadow: inset 2px 0 0 var(--accent); }
 .mention-item .nm { font-size: 13px; }
 .mention-item .rl { font-size: 10.5px; color: var(--text-faint); margin-left: auto; }
 .msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 7px; }
@@ -1096,6 +1103,7 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 [data-theme="light"] .bubble.summary { background: linear-gradient(180deg, #f2f6ff, #ffffff); border-color: #c9d9ff; box-shadow: 0 6px 20px rgba(59, 110, 240, 0.08); }
 [data-theme="light"] .bubble.conclusion { background: linear-gradient(180deg, #effaf5, #ffffff); border-color: #bfe8d5; box-shadow: 0 6px 20px rgba(17, 160, 106, 0.08); }
 [data-theme="light"] .msg.user .bubble { background: linear-gradient(180deg, #3f74f5, #2f5fd8); border-color: #2f5fd8; color: #ffffff; }
+[data-theme="light"] .msg.human .bubble { background: linear-gradient(180deg, #eafaf2, #f7fffb); border-color: #bfe8d5; }
 [data-theme="light"] .send:disabled,
 [data-theme="light"] .btn.primary:disabled { background: #e3e8f1; color: #9aa5b8; }
 [data-theme="light"] .overlay { background: rgba(23, 35, 58, 0.36); }
