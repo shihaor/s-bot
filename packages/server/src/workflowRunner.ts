@@ -209,7 +209,7 @@ export async function runWorkflow(input: WorkflowRunInput): Promise<{ produced: 
             : '',
         ].filter(Boolean).join('\n');
 
-        for await (const ev of runAgent({ sessionId: sess.sessionId, prompt: promptText2, signal })) {
+        for await (const ev of runAgent({ sessionId: sess.sessionId, prompt: promptText2, signal, autoApprove: agent?.tools?.shell === true })) {
           if (input.aborted()) break;
           if (ev.type === 'delta') {
             full += ev.text;

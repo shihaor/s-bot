@@ -74,24 +74,37 @@ export function RenameDialog({
   current,
   onCancel,
   onSave,
+  title = '重命名',
+  hint = '名称会同步到所有成员。',
+  placeholder,
+  allowEmpty = false,
 }: {
   current: string;
   onCancel: () => void;
   onSave: (value: string) => void;
+  title?: string;
+  hint?: string;
+  placeholder?: string;
+  /** 允许保存空值（比如清除备注） */
+  allowEmpty?: boolean;
 }) {
   const [value, setValue] = useState(current);
+  const submit = () => {
+    if (!allowEmpty && !value.trim()) return;
+    onSave(value.trim());
+  };
   return (
     <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
       <div className="sheet narrow">
-        <div className="sheet-head"><h3>重命名</h3><p>名称会同步到所有成员。</p></div>
+        <div className="sheet-head"><h3>{title}</h3><p>{hint}</p></div>
         <div className="sheet-body">
-          <label className="field"><span>名称</span>
-            <input className="input" autoFocus value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && value.trim()) onSave(value.trim()); }} />
+          <label className="field"><span>{title === '设置备注' || title === '修改备注' ? '备注' : '名称'}</span>
+            <input className="input" autoFocus value={value} placeholder={placeholder} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') submit(); }} />
           </label>
         </div>
         <div className="sheet-foot">
           <button className="btn" onClick={onCancel}>取消</button>
-          <button className="btn primary" disabled={!value.trim()} onClick={() => onSave(value.trim())}>保存</button>
+          <button className="btn primary" disabled={!allowEmpty && !value.trim()} onClick={submit}>保存</button>
         </div>
       </div>
     </div>
@@ -931,6 +944,113 @@ export function WorkflowApprovalDialog({
         <div className="sheet-foot perm-foot">
           <button className="btn" onClick={() => onDecide('changes')}>要改</button>
           <button className="btn primary" onClick={() => onDecide('pass')}>通过</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- 检查更新弹窗 ---------- */
+
+export interface UpdateInfo {
+  current: string;
+  latest?: string;
+  hasUpdate?: boolean;
+  notes?: string;
+  url?: string;
+  size?: number;
+  error?: string;
+}
+
+function fmtBytes(n: number): string {
+  if (!n || n <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+export function UpdateDialog({ info, onClose }: { info: UpdateInfo; onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [file, setFile] = useState('');
+  const [progress, setProgress] = useState<{ received: number; total: number } | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const sbot = (window as unknown as { sbot?: any }).sbot;
+    const unsub = sbot?.onUpdateProgress?.((p: { received: number; total: number }) => setProgress(p));
+    return () => { if (typeof unsub === 'function') unsub(); };
+  }, []);
+
+  const total = progress?.total || info.size || 0;
+  const percent = total > 0 ? Math.min(100, Math.round(((progress?.received ?? 0) / total) * 100)) : 0;
+
+  async function download() {
+    const sbot = (window as unknown as { sbot?: any }).sbot;
+    if (!sbot?.downloadUpdate || !info.url) {
+      setError('当前环境不支持自动更新，请手动下载安装包');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setProgress({ received: 0, total: info.size ?? 0 });
+    try {
+      const r = await sbot.downloadUpdate(info.url, info.latest ?? '');
+      if (r?.ok && r.path) setFile(r.path);
+      else setError(r?.error || '下载失败');
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function install() {
+    const sbot = (window as unknown as { sbot?: any }).sbot;
+    if (!sbot?.installUpdate || !file) return;
+    try {
+      const r = await sbot.installUpdate(file);
+      if (!r?.ok) setError(r?.error || '启动安装包失败');
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="sheet update-sheet">
+        <div className="sheet-head">
+          <h3>发现新版本 v{info.latest}</h3>
+          <p>
+            当前 v{info.current}
+            {info.size ? ` · 安装包 ${fmtBytes(info.size)}` : ''}
+            {' · 下载完成后会启动安装程序并退出当前客户端'}
+          </p>
+        </div>
+        <div className="sheet-body">
+          <pre className="update-notes">{info.notes || '这一版没有写更新说明。'}</pre>
+          {progress && (
+            <div className="update-progress">
+              <div className="up-bar"><i style={{ width: `${percent || 3}%` }} /></div>
+              <span>
+                {total > 0
+                  ? `${percent}% · ${fmtBytes(progress.received)} / ${fmtBytes(total)}`
+                  : `已下载 ${fmtBytes(progress.received)}`}
+              </span>
+            </div>
+          )}
+          {error && <p className="sub" style={{ color: 'var(--warn)', margin: '8px 0 0' }}>{error}</p>}
+        </div>
+        <div className="sheet-foot">
+          <button className="btn" onClick={onClose}>稍后</button>
+          {file ? (
+            <button className="btn primary" onClick={() => void install()}>立即安装并重启</button>
+          ) : (
+            <button className="btn primary" disabled={busy} onClick={() => void download()}>
+              {busy ? '下载中…' : '下载并安装'}
+            </button>
+          )}
         </div>
       </div>
     </div>

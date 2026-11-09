@@ -42,6 +42,9 @@ import {
   replyForm,
   previewFile,
   revealFile,
+  startPullFile,
+  fileLocalPath,
+  uploadFile,
   resumeHumanWait,
   saveGroupWorkflow,
   restartGroupWorkflow,
@@ -52,6 +55,7 @@ import {
   updateConversation,
   updateMember as updateMemberApi,
   updateTask as updateTaskApi,
+  updateHumanRemark,
   type ExecutionPlan,
   type KbDataset,
   type FormField,
@@ -82,8 +86,10 @@ import {
   RenameDialog,
   SearchPanel,
   TaskDialog,
+  UpdateDialog,
   WorkflowApprovalDialog,
   type MenuItem,
+  type UpdateInfo,
 } from './Panels';
 import './styles.css';
 
@@ -98,7 +104,7 @@ interface Streaming {
   tools: Array<{ toolId: string; name: string; detail: string; status: 'running' | 'ok' | 'failed' }>;
 }
 
-type Attachment = { type: 'image' | 'file'; name: string; size: number; mime?: string; dataUrl?: string; text?: string; path?: string };
+type Attachment = { type: 'image' | 'file'; name: string; size: number; mime?: string; dataUrl?: string; text?: string; path?: string; fileId?: string };
 
 const TEXT_FILE_EXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|yaml|yml|xml|html?|css|js|jsx|ts|tsx|py|go|java|kt|rs|c|cpp|h|hpp|sh|bash|zsh|ps1|sql|log|toml|ini|conf|env)$/i;
 
@@ -120,13 +126,17 @@ function fmtTime(ts: number) {
 }
 
 function celebrate() {
-  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  if (reduce) return;
-  confetti({ particleCount: 120, spread: 70, startVelocity: 42, origin: { x: 0.5, y: 0.7 } });
-  window.setTimeout(() => {
-    confetti({ particleCount: 60, angle: 60, spread: 60, origin: { x: 0.15, y: 0.75 } });
-    confetti({ particleCount: 60, angle: 120, spread: 60, origin: { x: 0.85, y: 0.75 } });
-  }, 180);
+  try {
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) return;
+    confetti({ particleCount: 120, spread: 70, startVelocity: 42, origin: { x: 0.5, y: 0.7 } });
+    window.setTimeout(() => {
+      confetti({ particleCount: 60, angle: 60, spread: 60, origin: { x: 0.15, y: 0.75 } });
+      confetti({ particleCount: 60, angle: 120, spread: 60, origin: { x: 0.85, y: 0.75 } });
+    }, 180);
+  } catch {
+    /* 动画失败不能影响任务状态 */
+  }
 }
 
 function matchQuery(c: Conversation, q: string) {
@@ -143,13 +153,20 @@ const TOOL_LABELS: Record<string, string> = {
   write: '写入',
   edit: '修改',
   patch: '修改',
+  apply_patch: '改文件',
   shell: '执行',
   bash: '执行',
+  execute: '编排',
   glob: '查找',
   grep: '搜索',
+  list: '列出',
   webfetch: '抓取',
   websearch: '搜索',
-  list: '列出',
+  skill: '技能',
+  task: '子任务',
+  subagent: '子任务',
+  todowrite: '清单',
+  question: '提问',
 };
 
 function toolLabel(name: string, detail?: string) {
@@ -220,18 +237,38 @@ function FileToolChip({ tool }: { tool: ToolChip }) {
 }
 
 function ToolRow({ tools }: { tools: ToolChip[] }) {
+  const [openId, setOpenId] = useState<string | null>(null);
   if (!tools.length) return null;
+  const open = openId ? tools.find((t) => t.toolId === openId) : null;
   return (
-    <div className="tool-row">
-      {tools.map((t) => (t.file ? (
-        <FileToolChip key={t.toolId} tool={t} />
-      ) : (
-        <span key={t.toolId} className={`tool-chip ${t.status}`} title={t.name}>
-          <span className="dot" />
-          {toolLabel(t.name, t.detail)}
-        </span>
-      )))}
-    </div>
+    <>
+      <div className="tool-row">
+        {tools.map((t) => (t.file ? (
+          <FileToolChip key={t.toolId} tool={t} />
+        ) : (
+          <span
+            key={t.toolId}
+            className={`tool-chip ${t.status}${t.detail ? ' has-detail' : ''}`}
+            title={t.detail ? `${t.name}\n${t.detail}` : t.name}
+            onClick={() => { if (t.detail) setOpenId((cur) => (cur === t.toolId ? null : t.toolId)); }}
+          >
+            <span className="dot" />
+            {toolLabel(t.name, t.detail)}
+          </span>
+        )))}
+      </div>
+      {open?.detail && (
+        <div className="tool-detail-wrap">
+          <pre className="tool-detail">{open.detail}</pre>
+          <button
+            className="btn tool-detail-copy"
+            onClick={() => { void navigator.clipboard?.writeText(open.detail ?? ''); }}
+          >
+            复制
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -341,6 +378,7 @@ function renderParts(
   onTaskAction: (id: string, status: Task['status']) => void,
   decisions: Record<string, 'done' | 'todo'>,
   onCitation: (c: { n: number; kb: string; doc: string; score: number; text: string }) => void,
+  onSaveFile: (part: any) => void,
 ) {
   if (!Array.isArray(m.parts) || m.parts.length === 0) return null;
 
@@ -421,7 +459,22 @@ function renderParts(
         </div>,
       );
     } else if (part.type === 'file' || part.name) {
-      files.push(<div key={i} className="msg-file">📄 {part.name} · {fmtSize(Number(part.size ?? 0))}</div>);
+      const fileId = (part as any).fileId as string | undefined;
+      const remote = !!(part as any).remote;
+      const origin = (part as any).origin as { host?: string; port?: number } | null;
+      const canSave = !!fileId && (!remote || !!(origin?.host && origin?.port));
+      files.push(
+        <div key={i} className="msg-file">
+          <span className="mf-name">📄 {part.name}</span>
+          <span className="mf-size">{fmtSize(Number(part.size ?? 0))}</span>
+          {remote && <span className="mf-tag">远端文件</span>}
+          {canSave && (
+            <button className="btn" onClick={() => onSaveFile(part)}>
+              {remote ? '接收并保存' : '保存'}
+            </button>
+          )}
+        </div>,
+      );
     }
   });
 
@@ -520,6 +573,12 @@ export default function App() {
   const [view, setView] = useState<'chat' | 'home' | 'agents' | 'skills' | 'settings'>('chat');
   const [toast, setToast] = useState('');
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; conv: Conversation } | null>(null);
+  /** 有新版本时右上角出现的更新入口 */
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  /** 真人右键菜单（备注） */
+  const [humanMenu, setHumanMenu] = useState<{ x: number; y: number; human: { id: string; name: string; remark?: string } } | null>(null);
+  const [remarkTarget, setRemarkTarget] = useState<{ id: string; name: string; remark: string } | null>(null);
   const [renameTarget, setRenameTarget] = useState<Conversation | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -539,6 +598,8 @@ export default function App() {
     memberCount: number;
   } | null>(null);
   const [p2pInviteBusy, setP2pInviteBusy] = useState(false);
+  /** 正在接收远端文件时的进度 */
+  const [fileJob, setFileJob] = useState<{ jobId: string; name: string; received: number; total: number } | null>(null);
   const [findColleaguesOpen, setFindColleaguesOpen] = useState(false);
   const [inviteExternalOpen, setInviteExternalOpen] = useState(false);
   const [inviteExternalUser, setInviteExternalUser] = useState('');
@@ -603,6 +664,11 @@ export default function App() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
+  /** 文件接收任务的等待者：jobId -> resolve/reject（结果由全局 SSE 事件回来） */
+  const pullWaiters = useRef(new Map<string, {
+    resolve: (v: { id: string; name: string; size: number; path: string }) => void;
+    reject: (e: Error) => void;
+  }>());
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const active = useMemo(
@@ -611,6 +677,11 @@ export default function App() {
   );
   const aiCount = active ? active.members.filter((m) => m.memberType === 'agent').length : 0;
   const humanCount = active ? active.members.length - aiCount : 0;
+  /** 当前会话是不是跨机 P2P：只有这种会话才需要把附件传到本机文件中心 */
+  const p2pActive = !!(active && (active.p2pGroupId || active.p2pHostId));
+  const filePercent = fileJob && fileJob.total > 0
+    ? Math.min(100, Math.round((fileJob.received / fileJob.total) * 100))
+    : 0;
   const activeTaskCount = (conversationId: string) =>
     tasks.filter((t) => t.conversationId === conversationId && t.status !== 'done').length;
 
@@ -747,6 +818,21 @@ export default function App() {
           });
           // 被拉进群时右下角弹提醒
           notifyDesktop('群聊邀请', `${p.hostName} 邀请你加入「${p.title}」`);
+        } else if (e.type === 'file.progress') {
+          const p = e.data as { jobId: string; name: string; received: number; total: number };
+          setFileJob((cur) => (cur && cur.jobId === p.jobId
+            ? { ...cur, received: p.received, total: p.total || cur.total }
+            : cur));
+        } else if (e.type === 'file.done') {
+          const p = e.data as { jobId: string; id: string; name: string; size: number; path: string };
+          const waiter = pullWaiters.current.get(p.jobId);
+          pullWaiters.current.delete(p.jobId);
+          waiter?.resolve({ id: p.id, name: p.name, size: p.size, path: p.path });
+        } else if (e.type === 'file.failed') {
+          const p = e.data as { jobId: string; error: string };
+          const waiter = pullWaiters.current.get(p.jobId);
+          pullWaiters.current.delete(p.jobId);
+          waiter?.reject(new Error(p.error || '接收失败'));
         }
       } catch {
         /* ignore */
@@ -758,7 +844,36 @@ export default function App() {
     es.addEventListener('human.wait', onEvent);
     es.addEventListener('human.resume', onEvent);
     es.addEventListener('p2p.invite', onEvent);
+    es.addEventListener('file.progress', onEvent);
+    es.addEventListener('file.done', onEvent);
+    es.addEventListener('file.failed', onEvent);
     return () => es.close();
+  }, []);
+
+  // 启动时静默查一次新版本：有更新才在右上角出现入口
+  useEffect(() => {
+    const sbot = (window as unknown as { sbot?: any }).sbot;
+    if (!sbot?.checkUpdate) return;
+    let cancelled = false;
+    void sbot.checkUpdate()
+      .then((r: UpdateInfo | undefined) => {
+        if (!cancelled && r && !r.error && r.hasUpdate) setUpdateInfo(r);
+      })
+      .catch(() => { /* 内网不通就静默 */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  // 设置页手动检查到新版本时，直接打开右上角的更新弹窗
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as UpdateInfo | undefined;
+      if (detail?.hasUpdate) {
+        setUpdateInfo(detail);
+        setUpdateOpen(true);
+      }
+    };
+    window.addEventListener('sbot:update-available', handler);
+    return () => window.removeEventListener('sbot:update-available', handler);
   }, []);
 
   // 空会话第一次进入：拉开场白和推荐问题；有历史时同一份问题显示在输入框上方
@@ -991,10 +1106,14 @@ export default function App() {
       const q = searchQuery.trim().toLowerCase();
       return !q || peer.name.toLowerCase().includes(q) || (peer.role || '').toLowerCase().includes(q);
     });
-  /** 已聊过但当前不在线的 P2P 单聊（保留历史可继续聊） */
-  const offlineP2pDms = p2pDmConvs.filter((c) => !filteredLanPeers.some((p) => p.id === c.p2pHostId));
+  /** 已聊过但当前不在线的 P2P 单聊：默认不显示（有未读的除外），搜索时才放出来 */
+  const offlineP2pDms = searchQuery.trim()
+    ? p2pDmConvs.filter((c) => !filteredLanPeers.some((p) => p.id === c.p2pHostId))
+    : p2pDmConvs.filter(
+        (c) => !filteredLanPeers.some((p) => p.id === c.p2pHostId) && (unread[c.id] ?? 0) > 0,
+      );
 
-  /** 消息列里的同事：排除自己，在线优先；已经开过单聊的带上最近一条消息（只含本地真人，不含内网影子真人） */
+  /** 消息列里的同事：默认只显示在线的真人（有未读的除外），搜索时放开；已开过单聊的带上最近一条消息 */
   const humanColleagues = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return humans
@@ -1005,8 +1124,10 @@ export default function App() {
         human,
         conv: conversations.find((c) => c.type === 'dm' && c.members.some((m) => m.memberId === human.id)),
       }))
+      // 离线的默认不占位置；但搜索、或有未读消息时仍然显示，别漏消息
+      .filter(({ human, conv }) => !!q || human.online || (conv ? (unread[conv.id] ?? 0) > 0 : false))
       .sort((a, b) => Number(!!b.human.online) - Number(!!a.human.online));
-  }, [humans, conversations, user?.id, searchQuery]);
+  }, [humans, conversations, user?.id, searchQuery, unread]);
 
   async function refreshConversations() {
     try {
@@ -1323,18 +1444,27 @@ export default function App() {
   }
 
   async function handleTaskStatus(id: string, status: Task['status']) {
+    // 先给反馈，再等网络：接口慢（比如后端正在跑智能体）时动画也不会被拖没
+    if (status === 'done') {
+      setTaskDecisions((prev) => ({ ...prev, [id]: 'done' }));
+      celebrate();
+      showToast('任务已完成 🎉');
+    } else {
+      setTaskDecisions((prev) => ({ ...prev, [id]: 'todo' }));
+    }
     try {
       await updateTaskApi(id, { status });
       await refreshTasks();
-      if (status === 'done') {
-        setTaskDecisions((prev) => ({ ...prev, [id]: 'done' }));
-        celebrate();
-        showToast('任务已完成 🎉');
-      } else {
-        setTaskDecisions((prev) => ({ ...prev, [id]: 'todo' }));
-      }
     } catch (e) {
       showToast(String(e));
+      // 失败了把卡片状态改回去，别让人以为已经完成
+      setTaskDecisions((prev) => {
+        const next = { ...prev };
+        if (status === 'done') delete next[id];
+        else next[id] = 'done';
+        return next;
+      });
+      void refreshTasks();
     }
   }
 
@@ -1608,6 +1738,40 @@ export default function App() {
     }
   }
 
+  /** 真人右键：设置/修改/清除备注 */
+  function openHumanMenu(e: React.MouseEvent, human: { id: string; name: string; remark?: string }) {
+    e.preventDefault();
+    e.stopPropagation();
+    setHumanMenu({ x: e.clientX, y: e.clientY, human });
+  }
+
+  async function saveRemark(id: string, remark: string, name?: string) {
+    try {
+      await updateHumanRemark(id, remark, name);
+      await fetchHumans().then(setHumans).catch(() => {});
+      showToast(remark ? '备注已保存' : '已恢复原名');
+    } catch (e) {
+      showToast(String(e));
+    }
+  }
+
+  function humanMenuItems(h: { id: string; name: string; remark?: string }): MenuItem[] {
+    const items: MenuItem[] = [
+      {
+        label: h.remark ? '修改备注' : '设置备注',
+        onClick: () => setRemarkTarget({ id: h.id, name: h.name, remark: h.remark ?? '' }),
+      },
+    ];
+    if (h.remark) items.push({ label: '清除备注', onClick: () => void saveRemark(h.id, '', h.name) });
+    return items;
+  }
+
+  /** 显示名：有备注用备注，否则用原名 */
+  function humanDisplay(id: string, fallback: string): string {
+    const h = humans.find((x) => x.id === id);
+    return (h?.remark && h.remark.trim()) || fallback;
+  }
+
   function convMenuItems(c: Conversation): MenuItem[] {
     const items: MenuItem[] = [
       { label: c.pinned ? '取消置顶' : '置顶聊天', onClick: () => void patchConv(c, { pinned: !c.pinned }) },
@@ -1626,6 +1790,76 @@ export default function App() {
     return items;
   }
 
+  /** 保存消息里的文件：远端文件先回源拉一份到本机（带进度），再走系统保存对话框 */
+  async function saveMessageFile(part: any) {
+    const name = String(part?.name ?? 'file');
+    try {
+      let fileId = String(part?.fileId ?? '');
+      if (!fileId) {
+        showToast('这个文件没有可下载的内容');
+        return;
+      }
+
+      let localPath = '';
+      let localName = name;
+      if (part?.remote) {
+        const origin = part?.origin as { host?: string; port?: number; token?: string } | null;
+        if (!origin?.host || !origin?.port) {
+          showToast('不知道对方地址，接收不了');
+          return;
+        }
+        const { jobId } = await startPullFile({
+          fileId,
+          name,
+          size: Number(part?.size ?? 0),
+          mime: part?.mime,
+          host: origin.host,
+          port: origin.port,
+          token: origin.token,
+        });
+        setFileJob({ jobId, name, received: 0, total: Number(part?.size ?? 0) });
+        // 等 file.done / file.failed 事件回来
+        const done = await new Promise<{ id: string; name: string; size: number; path: string }>((resolve, reject) => {
+          pullWaiters.current.set(jobId, { resolve, reject });
+        });
+        fileId = done.id;
+        localPath = done.path;
+        localName = done.name || name;
+      } else {
+        const local = await fileLocalPath(fileId);
+        localPath = local.path;
+        localName = local.name || name;
+      }
+
+      const sbot = (window as any).sbot;
+      if (sbot?.saveLocalFile && localPath) {
+        // 直接复制磁盘上的文件，不把 200MB 读进渲染进程
+        const saved = await sbot.saveLocalFile(localPath, localName);
+        if (saved) showToast('已保存');
+        return;
+      }
+
+      const res = await fetch(apiUrl(`/api/files/${fileId}`));
+      if (!res.ok) throw new Error(`下载失败 ${res.status}`);
+      const bytes = await res.arrayBuffer();
+      if (sbot?.saveFile) {
+        const saved = await sbot.saveFile(localName, bytes);
+        if (saved) showToast('已保存');
+        return;
+      }
+      const url = URL.createObjectURL(new Blob([bytes]));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = localName;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) {
+      showToast(String((e as Error).message ?? e));
+    } finally {
+      setFileJob(null);
+    }
+  }
+
   function readFile(file: File): Promise<Attachment> {
     return new Promise((resolve) => {
       const base: Attachment = { type: 'file', name: file.name, size: file.size, mime: file.type || undefined };
@@ -1634,18 +1868,31 @@ export default function App() {
         const p = (window as any).sbot?.getPathForFile?.(file);
         if (p) base.path = String(p);
       } catch { /* ignore */ }
+
+      const finish = (att: Attachment) => {
+        // P2P 会话里的附件必须落一份到本机文件中心，对方才有东西可拉
+        if (!p2pActive || !file.size || file.size > 200 * 1024 * 1024) {
+          resolve(att);
+          return;
+        }
+        uploadFile(file)
+          .then((up) => resolve({ ...att, fileId: up.id, size: up.size || att.size }))
+          .catch(() => resolve(att));
+      };
+
       if (file.type.startsWith('image/')) {
         base.type = 'image';
         const reader = new FileReader();
-        reader.onload = () => resolve({ ...base, dataUrl: String(reader.result) });
+        reader.onload = () => finish({ ...base, dataUrl: String(reader.result) });
+        reader.onerror = () => finish(base);
         reader.readAsDataURL(file);
       } else if (isTextFile(file)) {
         const reader = new FileReader();
-        reader.onload = () => resolve({ ...base, text: String(reader.result ?? '').slice(0, 200_000) });
-        reader.onerror = () => resolve(base);
+        reader.onload = () => finish({ ...base, text: String(reader.result ?? '').slice(0, 200_000) });
+        reader.onerror = () => finish(base);
         reader.readAsText(file, 'utf-8');
       } else {
-        resolve(base);
+        finish(base);
       }
     });
   }
@@ -1954,7 +2201,19 @@ export default function App() {
           </span>
           <button className="help-btn" title="使用手册" onClick={() => setManualOpen(true)}>?</button>
         </div>
-        {!isElectron && <div className="winbtns"><i>–</i><i>□</i><i>×</i></div>}
+        <div className="title-actions" style={{ marginRight: isElectron ? 140 : 0 }}>
+          {updateInfo?.hasUpdate && (
+            <button
+              className="update-btn"
+              title={`发现新版本 v${updateInfo.latest}，点击查看更新内容`}
+              onClick={() => setUpdateOpen(true)}
+            >
+              <span className="update-dot" />
+              有新版本 v{updateInfo.latest}
+            </button>
+          )}
+          {!isElectron && <div className="winbtns"><i>–</i><i>□</i><i>×</i></div>}
+        </div>
       </div>
 
       <div className="body">
@@ -2104,6 +2363,7 @@ export default function App() {
                       setDraggingMember(payload);
                     }}
                     onDragEnd={() => { setDraggingMember(null); setDropTargetId(null); }}
+                    onContextMenu={(e) => openHumanMenu(e, { id: h.id, name: h.name, remark: h.remark })}
                     onClick={() => void openHumanDm(h)}
                   >
                     <span className="av-online-wrap">
@@ -2112,7 +2372,7 @@ export default function App() {
                     </span>
                     <div className="conv-main">
                       <div className="conv-top">
-                        <span className="conv-name">{h.name}</span>
+                        <span className="conv-name">{h.remark || h.name}</span>
                         <span className="conv-right">
                           <span className={`conv-time ${h.online ? 'online-text' : ''}`}>{h.online ? '在线' : '离线'}</span>
                           {conv && (unread[conv.id] ?? 0) > 0 && <span className="cb-unread">{unread[conv.id]}</span>}
@@ -2144,6 +2404,11 @@ export default function App() {
                       setDraggingMember(payload);
                     }}
                     onDragEnd={() => { setDraggingMember(null); setDropTargetId(null); }}
+                    onContextMenu={(e) => openHumanMenu(e, {
+                      id: p.id,
+                      name: p.name,
+                      remark: humans.find((x) => x.id === p.id)?.remark,
+                    })}
                     onClick={() => (conv ? (setActiveId(conv.id), setView('chat'), setDrawerOpen(false), setSearchOpen(false)) : openLanPeerDm(p))}
                   >
                     <span className="av-online-wrap">
@@ -2152,7 +2417,7 @@ export default function App() {
                     </span>
                     <div className="conv-main">
                       <div className="conv-top">
-                        <span className="conv-name">{p.name}</span>
+                        <span className="conv-name">{humanDisplay(p.id, p.name)}</span>
                         <span className="conv-right">
                           <span className="conv-time online-text">在线</span>
                           {conv && (unread[conv.id] ?? 0) > 0 && <span className="cb-unread">{unread[conv.id]}</span>}
@@ -2171,6 +2436,10 @@ export default function App() {
                       key={c.id}
                       className={`conv human ${activeId === c.id ? 'active' : ''}`}
                       title={`${m?.name ?? c.title} · 离线，可查看历史`}
+                      onContextMenu={(e) => {
+                        if (!m) return;
+                        openHumanMenu(e, { id: m.memberId, name: m.name, remark: humans.find((x) => x.id === m.memberId)?.remark });
+                      }}
                       onClick={() => { setActiveId(c.id); setView('chat'); setDrawerOpen(false); setSearchOpen(false); }}
                     >
                       <span className="av-online-wrap">
@@ -2178,7 +2447,7 @@ export default function App() {
                       </span>
                       <div className="conv-main">
                         <div className="conv-top">
-                          <span className="conv-name">{m?.name ?? c.title}</span>
+                          <span className="conv-name">{m ? humanDisplay(m.memberId, m.name) : c.title}</span>
                           <span className="conv-right">
                             <span className="conv-time">{c.lastMessage ? fmtTime(c.lastMessage.at) : '离线'}</span>
                             {(unread[c.id] ?? 0) > 0 && <span className="cb-unread">{unread[c.id]}</span>}
@@ -2379,7 +2648,7 @@ export default function App() {
                               <div className="meta user-meta"><span className="name">{m.authorName}</span><span className="role">导入</span></div>
                             )}
                             <div className="bubble">{m.text}</div>
-                            {renderParts(m, (id, status) => void handleTaskStatus(id, status), decidedTasks, (c) => setSelectedCitation(c))}
+                            {renderParts(m, (id, status) => void handleTaskStatus(id, status), decidedTasks, (c) => setSelectedCitation(c), (p) => void saveMessageFile(p))}
                           </div>
                         </div>
                       );
@@ -2426,7 +2695,7 @@ export default function App() {
                             <div className={`bubble ${isSummary ? 'summary' : ''} ${isConclusion ? 'conclusion' : ''}`}><RichText text={m.text} /></div>
                             <button className="copy-btn" title="复制 Markdown 源码" onClick={() => void copyMessage(m.text)}>复制</button>
                           </div>
-                          {renderParts(m, (id, status) => void handleTaskStatus(id, status), decidedTasks, (c) => setSelectedCitation(c))}
+                          {renderParts(m, (id, status) => void handleTaskStatus(id, status), decidedTasks, (c) => setSelectedCitation(c), (p) => void saveMessageFile(p))}
                           {m.status === 'interrupted' && <div className="interrupted">■ 已中断</div>}
                         </div>
                       </div>
@@ -2639,6 +2908,28 @@ export default function App() {
           onClose={() => setCtxMenu(null)}
         />
       )}
+      {updateOpen && updateInfo && (
+        <UpdateDialog info={updateInfo} onClose={() => setUpdateOpen(false)} />
+      )}
+      {humanMenu && (
+        <ContextMenu
+          x={humanMenu.x}
+          y={humanMenu.y}
+          items={humanMenuItems(humanMenu.human)}
+          onClose={() => setHumanMenu(null)}
+        />
+      )}
+      {remarkTarget && (
+        <RenameDialog
+          current={remarkTarget.remark}
+          title={remarkTarget.remark ? '修改备注' : '设置备注'}
+          hint={`只在本机显示，不会同步给对方。原名：${remarkTarget.name}`}
+          placeholder={remarkTarget.name}
+          allowEmpty
+          onCancel={() => setRemarkTarget(null)}
+          onSave={(v) => { const t = remarkTarget; setRemarkTarget(null); void saveRemark(t.id, v, t.name); }}
+        />
+      )}
       {renameTarget && (
         <RenameDialog
           current={renameTarget.title}
@@ -2748,6 +3039,20 @@ export default function App() {
           }}
           onToast={showToast}
         />
+      )}
+      {fileJob && (
+        <div className="file-progress">
+          <div className="fp-head">
+            <span>正在从对方接收</span>
+            <b title={fileJob.name}>{fileJob.name}</b>
+          </div>
+          <div className="fp-bar"><i style={{ width: `${fileJob.total > 0 ? filePercent : 12}%` }} /></div>
+          <div className="fp-meta">
+            {fileJob.total > 0
+              ? `${filePercent}% · ${fmtSize(fileJob.received)} / ${fmtSize(fileJob.total)}`
+              : `已接收 ${fmtSize(fileJob.received)}`}
+          </div>
+        </div>
       )}
       {newGroupOpen && (
         <NewGroupDialog

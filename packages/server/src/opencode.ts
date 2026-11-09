@@ -403,12 +403,13 @@ function writeConfig(preferred?: ModelInfo | null) {
     delete config.model;
   }
 
-  // 读自动放行；写文件和跑命令走审批
-  config.permissions = [
-    { action: 'edit', resource: '*', effect: 'ask' },
-    { action: 'shell', resource: '*', effect: 'ask' },
-    { action: 'external_directory', resource: '*', effect: 'ask' },
-  ];
+  // 注意：v2 的全局审批键是 `permission`（对象），旧的 `permissions`（数组）实测被忽略，
+  // 写了也不会弹审批。这里不再写假配置，保持默认放行；危险操作的确认交给智能体人设
+  // （"先说目的和风险，等确认再执行"）和界面上的确认卡片。
+  delete (config as any).permissions;
+  delete (config as any).permission;
+  // 清掉旧版本误加的自定义 agent（人设改走工作区 AGENTS.md，避免 system 把编码能力整段替换掉）
+  delete config.agents;
 
   const skills = localSkillDirs();
   if (skills.length) config.skills = skills;
@@ -710,7 +711,7 @@ class Channel {
     else this.queue.push(v);
   }
 
-  next(timeout = 300000): Promise<unknown> {
+  next(timeout = 1200000): Promise<unknown> {
     const q = this.queue.shift();
     if (q !== undefined) return Promise.resolve(q);
     return new Promise((res, rej) => {
@@ -759,12 +760,25 @@ export interface EnsureSessionResult {
 export async function ensureSession(conversationId: string, agent: Agent): Promise<EnsureSessionResult> {
   if (!client) throw new Error('执行引擎还没启动');
   const existing = getAgentSession(conversationId, agent.id);
+  const workspace = existing?.workspace ?? agentWorkspaceDir(conversationId, agent.id);
+  mkdirSync(workspace, { recursive: true });
+
+  // 人设写进工作区 AGENTS.md：opencode 会把它作为「项目指令」追加到系统提示，
+  // 而不是像 agent.system 那样把开放的编码能力整段替换掉（那会让人设把工具用废）。
+  const persona = agent.systemPrompt?.trim();
+  if (persona) {
+    try {
+      const personaFile = join(workspace, 'AGENTS.md');
+      if (!existsSync(personaFile) || readFileSync(personaFile, 'utf8') !== persona) {
+        writeFileSync(personaFile, persona, 'utf8');
+      }
+    } catch { /* ignore */ }
+  }
+
   if (existing && existsSync(existing.workspace)) {
     return { sessionId: existing.sessionId, workspace: existing.workspace };
   }
 
-  const workspace = existing?.workspace ?? agentWorkspaceDir(conversationId, agent.id);
-  mkdirSync(workspace, { recursive: true });
   const session = await client.session.create({
     location: { directory: workspace },
     title: `${agent.name} · ${conversationId}`,
@@ -927,32 +941,36 @@ export function resetSkillInventory(): void {
 
 /* ---------- 审批 ---------- */
 
-const pendingPermissions = new Map<string, (decision: 'once' | 'always' | 'reject') => void>();
+const pendingPermissions = new Map<string, { sessionId: string; resolve: (d: 'once' | 'always' | 'reject') => void }>();
 
 export function resolvePermission(requestID: string, decision: 'once' | 'always' | 'reject'): boolean {
-  const fn = pendingPermissions.get(requestID);
-  if (!fn) return false;
+  const entry = pendingPermissions.get(requestID);
+  if (!entry) return false;
   pendingPermissions.delete(requestID);
-  fn(decision);
+  entry.resolve(decision);
   return true;
 }
 
-function waitPermission(requestID: string, timeout = 30 * 60 * 1000): Promise<'once' | 'always' | 'reject'> {
+/** 审批最长等 3 分钟：没人应答就拒绝，免得把整个会话挂住半小时 */
+function waitPermission(sessionId: string, requestID: string, timeout = 3 * 60 * 1000): Promise<'once' | 'always' | 'reject'> {
   return new Promise((res) => {
     const timer = setTimeout(() => {
       pendingPermissions.delete(requestID);
       res('reject');
     }, timeout);
-    pendingPermissions.set(requestID, (decision) => {
-      clearTimeout(timer);
-      res(decision);
+    pendingPermissions.set(requestID, {
+      sessionId,
+      resolve: (decision) => {
+        clearTimeout(timer);
+        res(decision);
+      },
     });
   });
 }
 
 /* ---------- 提问表单 ---------- */
 
-const pendingForms = new Map<string, { form: any; resolve: (answer: Record<string, any>) => void }>();
+const pendingForms = new Map<string, { sessionId: string; form: any; resolve: (answer: Record<string, any>) => void }>();
 
 export function resolveForm(formID: string, answer: Record<string, any>): boolean {
   const entry = pendingForms.get(formID);
@@ -962,13 +980,14 @@ export function resolveForm(formID: string, answer: Record<string, any>): boolea
   return true;
 }
 
-function waitForm(formID: string, form: any, timeout = 120000): Promise<Record<string, any>> {
+function waitForm(sessionId: string, formID: string, form: any, timeout = 120000): Promise<Record<string, any>> {
   return new Promise((res) => {
     const timer = setTimeout(() => {
       pendingForms.delete(formID);
       res(buildFormAnswer(form)); // 超时：默认选第一个选项继续，不卡流程
     }, timeout);
     pendingForms.set(formID, {
+      sessionId,
       form,
       resolve: (answer) => {
         clearTimeout(timer);
@@ -976,6 +995,24 @@ function waitForm(formID: string, form: any, timeout = 120000): Promise<Record<s
       },
     });
   });
+}
+
+/**
+ * 用户点「停止」/ 客户端断流时，把这条会话还在等审批、等表单的挂起请求一次清掉。
+ * 否则生成器会卡在 await 上，__abort 永远读不到，会话一直被占用，
+ * 下一条消息就会立刻失败成「这次没生成成功」。
+ */
+export function abortPendingForSession(sessionId: string): void {
+  for (const [id, entry] of [...pendingPermissions]) {
+    if (entry.sessionId !== sessionId) continue;
+    pendingPermissions.delete(id);
+    entry.resolve('reject');
+  }
+  for (const [id, entry] of [...pendingForms]) {
+    if (entry.sessionId !== sessionId) continue;
+    pendingForms.delete(id);
+    entry.resolve(buildFormAnswer(entry.form));
+  }
 }
 
 export async function interruptSession(sessionId: string): Promise<void> {
@@ -1000,6 +1037,8 @@ interface RunInput {
   signal: AbortSignal;
   /** 本次任务始终允许工具操作，不再逐次等待审批 */
   autoApprove?: boolean;
+  /** opencode 的自定义 agent 名（sbot-<agentId>），用它的 system prompt 作为人设 */
+  opencodeAgent?: string;
 }
 
 /** 自动回答 opencode 弹出的表单（question 工具）：每个字段取第一个选项/默认值 */
@@ -1025,13 +1064,16 @@ function buildFormAnswer(form: any): Record<string, any> {
 export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> {
   if (!client) throw new Error('执行引擎还没启动');
   startPump();
-  const { sessionId, prompt, signal } = input;
+  const { sessionId, prompt, signal, opencodeAgent } = input;
   const ch = channelOf(sessionId);
 
   let aborted = false;
   const onAbort = () => {
     if (aborted) return;
     aborted = true;
+    // 先把还在等审批 / 等表单的挂起请求放掉，否则生成器会卡在 await 上，
+    // __abort 读不到，会话一直被占用（表现就是"停止后卡住 + 下一条立刻失败"）
+    abortPendingForSession(sessionId);
     void interruptSession(sessionId);
     ch.push({ type: '__abort' });
   };
@@ -1041,7 +1083,23 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
   const toolInputDetail = new Map<string, string>();
 
   try {
-    await client.session.prompt({ sessionID: sessionId, text: prompt });
+    const sendPrompt = () =>
+      client!.session.prompt({ sessionID: sessionId, text: prompt, ...(opencodeAgent ? { agent: opencodeAgent } : {}) });
+
+    try {
+      await sendPrompt();
+    } catch (err) {
+      const msg = String((err as Error)?.message ?? err);
+      // 上一轮（被中止的长命令）还占着会话：先请求中断，等它收尾，再重发一次。
+      // 否则就会立刻空失败，界面上只能看到「这次没生成成功，稍后再试。」
+      if (/busy|running|in ?progress|already|执行中|正在/i.test(msg)) {
+        await interruptSession(sessionId);
+        await new Promise((r) => setTimeout(r, 2000));
+        await sendPrompt();
+      } else {
+        throw err;
+      }
+    }
 
     while (true) {
       const raw = await ch.next() as {
@@ -1065,10 +1123,24 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
           break;
         }
         case 'session.tool.input.ended': {
-          const detail = describeInput(String(raw.data.text ?? ''));
-          const file = extractFile(String(raw.data.text ?? ''));
+          const id = String(raw.data.id);
+          const text = String(raw.data.text ?? '');
+          toolInputDetail.set(id, text);
+          const detail = describeInput(text);
+          const file = extractFile(text);
           if (detail || file) {
-            yield { type: 'tool', id: String(raw.data.id), name: toolNames.get(String(raw.data.id)) ?? 'tool', detail, file };
+            yield { type: 'tool', id, name: toolNames.get(id) ?? 'tool', detail, file };
+          }
+          break;
+        }
+        case 'session.tool.called': {
+          // 工具真正开始执行：入参最完整，用它覆盖摘要（比解析流式片段可靠）
+          const id = String(raw.data.id);
+          const input = raw.data.input ?? raw.data.args;
+          const detail = summarizeInput(input);
+          const file = extractFile(input);
+          if (detail || file) {
+            yield { type: 'tool', id, name: toolNames.get(id) ?? 'tool', detail, file };
           }
           break;
         }
@@ -1079,14 +1151,12 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
           yield { type: 'tool-end', id: String(raw.data.id), ok: false };
           break;
         case 'session.tool.input.delta': {
-          // 工具输入的流式增量（比如浏览器插件的输入过程）：累积并实时展示
+          // 工具入参的流式增量：只累积，等 input.ended / tool.called 再给摘要，
+          // 避免把半截 JSON 当描述显示（之前界面上的 {"shellID":...} 就是这么来的）
           const id = String(raw.data.id);
           const delta = String(raw.data.delta ?? '');
           if (delta) {
-            const prev = toolInputDetail.get(id) ?? '';
-            const next = prev + delta;
-            toolInputDetail.set(id, next);
-            yield { type: 'tool', id, name: toolNames.get(id) ?? 'tool', detail: next.slice(-200) };
+            toolInputDetail.set(id, (toolInputDetail.get(id) ?? '') + delta);
           }
           break;
         }
@@ -1112,7 +1182,7 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
               action: String(raw.data.action),
               resources: Array.isArray(raw.data.resources) ? raw.data.resources.map(String) : [],
             };
-            const decision = await waitPermission(requestID);
+            const decision = await waitPermission(sessionId, requestID);
             try {
               await client.permission.reply({ sessionID: sessionId, requestID, decision });
             } catch { /* 请求可能已超时 */ }
@@ -1139,7 +1209,7 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
               title: String(form.title ?? ''),
               fields: Array.isArray(form.fields) ? form.fields : [],
             };
-            const answer = await waitForm(formID, form);
+            const answer = await waitForm(sessionId, formID, form);
             try {
               await client.session.form.reply({ sessionID: sessionId, formID, answer });
             } catch { /* 表单可能已被处理 */ }
@@ -1167,39 +1237,51 @@ export async function generateText(prompt: string): Promise<string> {
 function describeProgress(metadata: any): string {
   if (!metadata || typeof metadata !== 'object') return '';
   const m = metadata as Record<string, any>;
-  for (const k of ['message', 'status', 'step', 'action', 'title', 'text', 'label', 'url']) {
+  // 只取人能看懂的业务字段；shellID / id / status 这类内部信息不再当摘要显示
+  for (const k of ['message', 'title', 'label', 'action', 'step', 'text', 'url']) {
     const v = m[k];
-    if (typeof v === 'string' && v.trim()) return v.slice(0, 120);
+    if (typeof v === 'string' && v.trim()) return clip(v, 120);
   }
-  try {
-    const s = JSON.stringify(m);
-    return s.length > 2 ? s.slice(0, 120) : '';
-  } catch {
-    return '';
+  return '';
+}
+
+function clip(text: string, max: number): string {
+  const one = String(text).replace(/\s+/g, ' ').trim();
+  return one.length > max ? `${one.slice(0, Math.max(0, max - 1))}…` : one;
+}
+
+/** 从工具入参对象里提炼一句人能看懂的话 */
+function summarizeInput(input: any): string {
+  if (!input || typeof input !== 'object') return '';
+  const file = input.filePath ?? input.path ?? input.file ?? input.target;
+  if (typeof file === 'string' && file.trim() && !/^https?:\/\//i.test(file.trim())) {
+    return clip(file, 160);
   }
+  if (typeof input.command === 'string' && input.command.trim()) return clip(input.command, 200);
+  if (typeof input.pattern === 'string' && input.pattern.trim()) return clip(input.pattern, 80);
+  if (typeof input.query === 'string' && input.query.trim()) return clip(input.query, 100);
+  if (typeof input.url === 'string' && input.url.trim()) return clip(input.url, 140);
+  // Code Mode 的 execute：只给代码第一行，够判断在干什么
+  if (typeof input.code === 'string' && input.code.trim()) return clip(input.code.split('\n')[0], 140);
+  if (typeof input.description === 'string' && input.description.trim()) return clip(input.description, 120);
+  if (typeof input.title === 'string' && input.title.trim()) return clip(input.title, 120);
+  return '';
 }
 
 function describeInput(text: string): string {
   if (!text) return '';
   try {
-    const input = JSON.parse(text);
-    const file = input.filePath ?? input.path ?? input.target;
-    if (file) return String(file);
-    if (input.command) return String(input.command).slice(0, 80);
-    if (input.pattern) return String(input.pattern);
-    if (input.query) return String(input.query).slice(0, 60);
-    if (input.url) return String(input.url).slice(0, 80);
-    return '';
+    return summarizeInput(JSON.parse(text));
   } catch {
-    return text.slice(0, 60);
+    return clip(text, 80);
   }
 }
 
 /** 从工具入参里提取文件路径（读/写/改文件类工具），不是文件返回 null */
-function extractFile(text: string): string | null {
+function extractFile(text: string | any): string | null {
   if (!text) return null;
   try {
-    const input = JSON.parse(text);
+    const input = typeof text === 'string' ? JSON.parse(text) : text;
     const file = input.filePath ?? input.path ?? input.file ?? input.target;
     if (typeof file === 'string' && file.trim() && !/^https?:\/\//i.test(file.trim())) {
       return file.trim();

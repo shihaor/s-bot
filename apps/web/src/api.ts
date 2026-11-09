@@ -61,7 +61,21 @@ export interface HumanInfo {
   initial: string;
   simulated?: boolean;
   online?: boolean;
+  /** 本机备注（别名） */
+  remark?: string;
   createdAt: number;
+}
+
+/** 设置/清除真人备注；remark 传空串表示恢复原名 */
+export async function updateHumanRemark(id: string, remark: string, name?: string): Promise<HumanInfo> {
+  const res = await apiFetch(`/api/humans/${id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ remark, name }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { data?: HumanInfo; error?: string };
+  if (!res.ok || !body.data) throw new Error(body.error || `设置备注失败 ${res.status}`);
+  return body.data;
 }
 
 export async function loginHuman(name: string, role: string): Promise<HumanInfo> {
@@ -1089,4 +1103,59 @@ export async function sendMessage(
       }
     }
   }
+}
+
+/* ---------- 文件（真人互传） ---------- */
+
+export interface UploadedFile {
+  id: string;
+  name: string;
+  size: number;
+  mime: string;
+  createdAt: number;
+}
+
+/** 把文件内容传到本机文件中心，消息里只留 fileId */
+export async function uploadFile(file: File): Promise<UploadedFile> {
+  const res = await apiFetch('/api/files', {
+    method: 'POST',
+    headers: {
+      'x-file-name': encodeURIComponent(file.name || 'file'),
+      'x-file-mime': file.type || 'application/octet-stream',
+    },
+    body: file,
+  });
+  const body = (await res.json().catch(() => ({}))) as { data?: UploadedFile; error?: string };
+  if (!res.ok || !body.data) throw new Error(body.error || `上传失败 ${res.status}`);
+  return body.data;
+}
+
+/** 远端文件：让本机去对方机器拉一份回来（异步任务，进度走事件总线 file.progress / file.done / file.failed） */
+export async function startPullFile(input: {
+  fileId: string;
+  name?: string;
+  size?: number;
+  mime?: string;
+  host: string;
+  port: number;
+  token?: string;
+}): Promise<{ jobId: string }> {
+  const res = await apiFetch('/api/p2p/pull-file', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  const body = (await res.json().catch(() => ({}))) as { data?: { jobId: string }; error?: string };
+  if (!res.ok || !body.data?.jobId) throw new Error(body.error || `接收失败 ${res.status}`);
+  return body.data;
+}
+
+/** 本机文件的落盘路径（保存时直接复制，不把大文件读进渲染进程） */
+export async function fileLocalPath(id: string): Promise<{ path: string; name: string }> {
+  const r = await getJson<{ data: { path: string; name: string } }>(`/api/files/${id}/local-path`);
+  return r.data;
+}
+
+export function fileUrl(id: string): string {
+  return apiUrl(`/api/files/${id}`);
 }

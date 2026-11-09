@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Agent, Conversation, Task } from '@sbot/shared';
 import type { HumanInfo } from './api';
 import { setMemberDrag, type MemberPayload } from './drag';
@@ -63,6 +63,11 @@ export default function Home({
   onDragMember,
 }: Props) {
   const [taskTab, setTaskTab] = useState<'todo' | 'done'>('todo');
+  const [appVersion, setAppVersion] = useState('');
+  useEffect(() => {
+    const sbot = (window as unknown as { sbot?: any }).sbot;
+    void sbot?.appInfo?.().then((info: { version: string }) => setAppVersion(info.version)).catch(() => {});
+  }, []);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const toggle = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
   const switchTaskTab = (tab: 'todo' | 'done') => {
@@ -330,8 +335,8 @@ export default function Home({
             </div>
           </div>
           <div className="f-meta">
-            <div>版本 <b>v0.1.3</b></div>
-            <div>发布于 <b>2026-10-27</b></div>
+            <div>版本 <b>v{appVersion || '—'}</b></div>
+            <div>发布于 <b>{appVersion ? '自动更新已启用' : '开发模式'}</b></div>
             <div>Electron 45 · Node 24 · node:sqlite</div>
           </div>
         </div>

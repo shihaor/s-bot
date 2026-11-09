@@ -50,7 +50,7 @@ function membersOf(conversationId: string): Member[] {
   const rows = db
     .prepare(
       `SELECT m.conversation_id, m.member_type, m.member_id, m.muted, m.activity, m.interval_secs,
-              COALESCE(a.name, h.name, m.member_id) AS name,
+              COALESCE(a.name, NULLIF(h.remark, ''), h.name, m.member_id) AS name,
               COALESCE(a.role, h.role, '') AS role,
               COALESCE(a.color, h.color, '#6B7385') AS color,
               COALESCE(a.initial, h.initial, '人') AS initial
@@ -908,6 +908,27 @@ export function ensureP2PDm(peer: {
   return getConversation(dmId)!;
 }
 
+/** 所有 P2P 会话里登记过的对端 IP（用于校验文件回源来源是否可信） */
+export function p2pPeerHosts(): string[] {
+  const rows = db
+    .prepare("SELECT p2p_peers FROM conversations WHERE p2p_peers IS NOT NULL AND p2p_peers <> ''")
+    .all() as Array<{ p2p_peers: string }>;
+  const hosts = new Set<string>();
+  for (const row of rows) {
+    try {
+      const arr = JSON.parse(row.p2p_peers ?? '[]');
+      if (!Array.isArray(arr)) continue;
+      for (const p of arr) {
+        const host = String((p as { host?: string })?.host ?? '').trim();
+        if (host) hosts.add(host);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return [...hosts];
+}
+
 /** 读 P2P 单聊的远端连接信息；不是 P2P 单聊返回 null */
 export function getP2PDmPeer(conversationId: string): P2PPeer | null {
   const conv = getConversation(conversationId);
@@ -976,6 +997,8 @@ export interface Human {
   color: string;
   initial: string;
   simulated?: boolean;
+  /** 备注：本机给这个人起的别名（留空表示用原名） */
+  remark?: string;
   createdAt: number;
 }
 
@@ -988,6 +1011,7 @@ const mapHuman = (r: any): Human => ({
   color: r.color ?? '#5B8CFF',
   initial: r.initial ?? '人',
   simulated: !!r.simulated,
+  remark: r.remark ?? '',
   createdAt: r.created_at,
 });
 
@@ -1000,8 +1024,7 @@ export function listHumans(): Human[] {
   return (db.prepare('SELECT * FROM humans ORDER BY created_at ASC').all() as any[]).map(mapHuman);
 }
 
-/** 按名字找或建一个真人（登录时调用） */
-export function upsertHuman(input: { name: string; role?: string }): Human {
+/** 按名字找或建一个真人（登录时调用） */export function upsertHuman(input: { name: string; role?: string }): Human {
   const name = input.name.trim();
   const existing = db.prepare('SELECT * FROM humans WHERE name = ?').get(name) as any;
   if (existing) {
@@ -1021,6 +1044,37 @@ export function upsertHuman(input: { name: string; role?: string }): Human {
     Date.now(),
   );
   return getHuman(id)!;
+}
+
+/**
+ * 设置真人备注（本机显示用）。
+ * 会话成员名也跟着改，这样聊天里、@ 列表里看到的都是备注；清空则恢复原名。
+ */
+export function setHumanRemark(id: string, remark: string, name?: string): Human | null {
+  if (!id) return null;
+  let human = getHuman(id);
+  if (!human) {
+    // 还没聊过的内网同事：先补一条影子真人，备注才有地方存
+    const display = (name ?? '').trim() || '同事';
+    db.prepare('INSERT OR IGNORE INTO humans (id, name, role, color, initial, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      id,
+      display,
+      '',
+      '#5B8CFF',
+      display.slice(0, 1) || '人',
+      Date.now(),
+    );
+    human = getHuman(id);
+    if (!human) return null;
+  }
+  const value = remark.trim().slice(0, 40);
+  db.prepare('UPDATE humans SET remark = ? WHERE id = ?').run(value, id);
+  // 历史消息里的显示名也一起改，聊天记录看着才一致；清空备注则恢复原名
+  db.prepare("UPDATE messages SET author_name = ? WHERE author_id = ? AND author_type = 'human'").run(
+    value || human.name,
+    id,
+  );
+  return getHuman(id);
 }
 
 /* ---------- 聊天逻辑图 ---------- */

@@ -2,6 +2,7 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { createConnection } from 'node:net';
 import { spawn } from 'node:child_process';
+import { Readable } from 'node:stream';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { Hono } from 'hono';
@@ -29,6 +30,7 @@ import {
   ensureHumanDm,
   ensureP2PDm,
   getP2PDmPeer,
+  p2pPeerHosts,
   agentCrossMemory,
   lastAgentMessageAt,
   getAgent,
@@ -51,6 +53,7 @@ import {
   removeMember,
   saveSettings,
   setDefaultModel,
+  setHumanRemark,
   setWorkflowDone,
   DEFAULT_OPENCODE_URL,
   DEFAULT_OPENCODE_EXTERNAL_URL,
@@ -86,6 +89,7 @@ import {
 } from './opencode.js';
 import { listDatasets, ragflowStatus, retrieve } from './ragflow.js';
 import { getLanIdentity, getLanPeers, registerPeer, setLanIdentity, setLanPort } from './lan.js';
+import { MAX_FILE_BYTES, fileBlobPath, getFileMeta, openFileStream, saveFromResponse, saveUpload } from './files.js';
 import {
   getMattermostStatus,
   getMockMattermostPosts,
@@ -473,6 +477,17 @@ app.post('/api/login', async (c) => {
 
 app.get('/api/humans', (c) => c.json({ data: humansWithPresence() }));
 
+/** 给真人设置/清除备注（本机生效，聊天里的成员名也会跟着变） */
+app.patch('/api/humans/:id', async (c) => {
+  const id = c.req.param('id');
+  const b = await c.req.json().catch(() => ({} as any));
+  if (typeof b?.remark !== 'string') return c.json({ error: 'remark required' }, 400);
+  const human = setHumanRemark(id, b.remark, typeof b?.name === 'string' ? b.name : '');
+  if (!human) return c.json({ error: 'human not found' }, 404);
+  broadcast('humans', {});
+  return c.json({ data: human });
+});
+
 /* ---------- 局域网发现（飞秋式） ---------- */
 app.get('/api/lan/peers', (c) => c.json({ data: getLanPeers(), self: getLanIdentity() }));
 
@@ -525,6 +540,136 @@ app.post('/api/lan/peers', async (c) => {
   }
 });
 
+/* ---------- 文件中心（真人互传） ---------- */
+
+/** 这个 IP 是不是认识的内网同事（防止被本机其它程序当代理打内网） */
+function isKnownPeerHost(host: string): boolean {
+  if (!host) return false;
+  if (getLanPeers().some((p) => p.host === host)) return true;
+  // 广播被屏蔽时，对端只存在于 P2P 会话的 p2p_peers 里
+  return p2pPeerHosts().includes(host);
+}
+
+app.post('/api/files', async (c) => {
+  const rawName = c.req.header('x-file-name') ?? '';
+  let name = 'file';
+  try {
+    name = decodeURIComponent(rawName) || 'file';
+  } catch {
+    name = rawName || 'file';
+  }
+  const mime = c.req.header('x-file-mime') || 'application/octet-stream';
+  const declared = Number(c.req.header('content-length') ?? 0);
+  if (declared > MAX_FILE_BYTES) return c.json({ error: '文件超过 200MB 上限' }, 413);
+  const body = c.req.raw.body;
+  if (!body) return c.json({ error: '空文件' }, 400);
+  try {
+    const meta = await saveUpload(body, name, mime);
+    return c.json({ data: meta });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 400);
+  }
+});
+
+/** 下载/预览本机文件；远端同事也走这个地址回源拉取 */
+app.get('/api/files/:id', (c) => {
+  const id = c.req.param('id');
+  const meta = getFileMeta(id);
+  if (!meta) return c.json({ error: '文件不存在' }, 404);
+  const ascii = meta.name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+  return c.body(Readable.toWeb(openFileStream(id)) as unknown as ReadableStream, 200, {
+    'content-type': meta.mime,
+    'content-length': String(meta.size),
+    // RFC 5987：中文文件名走 filename*
+    'content-disposition': `attachment; filename="${ascii || 'file'}"; filename*=UTF-8''${encodeURIComponent(meta.name)}`,
+    'cache-control': 'private, max-age=0',
+  });
+});
+
+/** 本机文件落盘路径（Electron 保存时直接复制，不用把 200MB 读进渲染进程） */
+app.get('/api/files/:id/local-path', (c) => {
+  const id = c.req.param('id');
+  const meta = getFileMeta(id);
+  if (!meta) return c.json({ error: '文件不存在' }, 404);
+  return c.json({ data: { ...meta, path: fileBlobPath(id) } });
+});
+
+/**
+ * 收到远端文件卡片后点「接收」：后台拉取，进度和结果走事件总线。
+ * 立刻返回 jobId，避免一个 200MB 的请求把界面卡死。
+ */
+app.post('/api/p2p/pull-file', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const fileId = String(b?.fileId ?? '');
+  const host = String(b?.host ?? '');
+  const port = Number(b?.port ?? 0);
+  const token = String(b?.token ?? '');
+  const name = String(b?.name ?? '文件');
+  const mime = String(b?.mime ?? '');
+  if (!fileId || !host || !port) return c.json({ error: '缺少文件来源信息' }, 400);
+  if (!isKnownPeerHost(host)) return c.json({ error: '来源不是已识别的内网同事' }, 403);
+
+  const jobId = `job_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  const expected = Number(b?.size ?? 0);
+
+  void (async () => {
+    try {
+      const res = await fetch(`http://${host}:${port}/api/files/${encodeURIComponent(fileId)}`, {
+        headers: token ? { 'x-sbot-p2p': token } : {},
+        signal: AbortSignal.timeout(10 * 60 * 1000),
+      });
+      if (!res.ok) throw new Error(`对方返回 ${res.status}`);
+      const total = Number(res.headers.get('content-length') ?? expected ?? 0);
+      let lastAt = 0;
+      let lastPct = -1;
+      const meta = await saveFromResponse(res, name, mime, (received, declared) => {
+        const totalBytes = declared || total;
+        const pct = totalBytes > 0 ? Math.floor((received / totalBytes) * 100) : -1;
+        const now = Date.now();
+        // 节流：最多每 150ms 或每 1% 推一次
+        if (now - lastAt < 150 && pct === lastPct) return;
+        lastAt = now;
+        lastPct = pct;
+        broadcast('file.progress', { jobId, fileId, name, received, total: totalBytes });
+      });
+      broadcast('file.done', { jobId, fileId, name: meta.name, size: meta.size, id: meta.id, path: fileBlobPath(meta.id) });
+    } catch (e) {
+      broadcast('file.failed', { jobId, fileId, name, error: String((e as Error).message ?? e).slice(0, 200) });
+    }
+  })();
+
+  return c.json({ data: { jobId } });
+});
+
+/** 走 P2P 发出去时只带引用，不带内容（内容由对方按需回源拉取） */
+function wireParts(parts: unknown): unknown[] {
+  if (!Array.isArray(parts)) return [];
+  return parts.map((raw) => {
+    const p = raw as { type?: string; fileId?: string; name?: string; size?: number; mime?: string };
+    if (!p || typeof p !== 'object') return raw;
+    if (p.fileId && (p.type === 'file' || p.type === 'image')) {
+      return {
+        type: 'file',
+        fileId: p.fileId,
+        name: p.name ?? '文件',
+        size: Number(p.size ?? 0),
+        mime: p.mime ?? 'application/octet-stream',
+      };
+    }
+    return raw;
+  });
+}
+
+/** 收到远端消息：把文件标记成「在对方机器上，需要回源拉取」 */
+function markRemoteParts(parts: unknown, origin: { host: string; port: number; token: string } | null): unknown[] {
+  if (!Array.isArray(parts)) return [];
+  return parts.map((raw) => {
+    const p = raw as { type?: string; fileId?: string };
+    if (!p || typeof p !== 'object' || p.type !== 'file' || !p.fileId) return raw;
+    return { ...(raw as object), remote: true, origin };
+  });
+}
+
 /* ---------- P2P 单聊（局域网直连 1 对 1） ---------- */
 
 /** 打开一个和远端真人的单聊：本地建影子真人和会话，返回会话 */
@@ -549,7 +694,8 @@ app.post('/api/p2p/receive-dm', async (c) => {
   const b = await c.req.json().catch(() => ({} as any));
   const from = b?.from as { id?: string; name?: string; role?: string; color?: string; initial?: string } | undefined;
   const text = String(b?.text ?? '').trim();
-  if (!from?.id || !text) return c.json({ ok: false, error: '消息格式不对' }, 400);
+  const parts = Array.isArray(b?.parts) ? b.parts : [];
+  if (!from?.id || (!text && parts.length === 0)) return c.json({ ok: false, error: '消息格式不对' }, 400);
   const host = p2pRemoteAddress(c) || String((b?.from as any)?.host ?? '');
   const port = Number((b?.from as any)?.port ?? 0);
 
@@ -567,11 +713,12 @@ app.post('/api/p2p/receive-dm', async (c) => {
     conversationId: conv.id,
     authorType: 'human',
     authorId: human?.id ?? null,
-    authorName: human?.name ?? String(from.name ?? '内网同事'),
+    authorName: human?.remark || human?.name || String(from.name ?? '内网同事'),
     authorColor: human?.color ?? String(from.color ?? '#5B8CFF'),
     authorInitial: human?.initial ?? String(from.initial ?? ''),
     role: 'user',
     text,
+    parts: markRemoteParts(parts, host && port ? { host, port, token: '' } : null),
   });
   return c.json({ ok: true });
 });
@@ -588,12 +735,19 @@ app.post('/api/p2p/receive-message', async (c) => {
     authorType?: string; authorId?: string | null; authorName?: string | null; authorColor?: string | null; authorInitial?: string | null;
     role?: string; text?: string; parts?: unknown[]; createdAt?: number;
   } | undefined;
-  if (!groupId || !from?.id || !msg?.text) return c.json({ ok: false, error: '消息格式不对' }, 400);
+  if (!groupId || !from?.id || (!msg?.text && !(Array.isArray(msg?.parts) && msg.parts.length))) {
+    return c.json({ ok: false, error: '消息格式不对' }, 400);
+  }
 
   const conv = findConversationByP2PGroup(groupId);
   if (!conv) return c.json({ ok: false, error: '群不存在' }, 404);
   const state = getP2PState(conv.id);
   if (!state || state.token !== token) return c.json({ ok: false, error: '群 token 不匹配' }, 403);
+
+  // 对方在 P2P 里登记的 host/port（文件回源要用）
+  const peerIdForFile = String(from.id);
+  const peerLink = state.peers.find((p) => p.id === peerIdForFile);
+  const fileOrigin = { host: peerLink?.host || p2pRemoteAddress(c), port: Number(peerLink?.port ?? 0), token: state.token };
 
   // 把发送方的本地成员 id 映射到本地的影子成员（p_<peerId>_<memberId>）
   const peerId = String(from.id);
@@ -617,12 +771,12 @@ app.post('/api/p2p/receive-message', async (c) => {
     // 远端来的一律按「真人」处理：对方没登录时 authorType 可能是 user，但在这边不能当成「我本人」
     authorType: msg.authorType === 'agent' ? 'agent' : 'human',
     authorId: shadowId,
-    authorName: shadow?.name ?? msg.authorName ?? String(from.name ?? '内网同事'),
+    authorName: (shadow && 'remark' in shadow ? shadow.remark : '') || shadow?.name || msg.authorName || String(from.name ?? '内网同事'),
     authorColor: shadow?.color ?? msg.authorColor ?? null,
     authorInitial: shadow?.initial ?? msg.authorInitial ?? null,
     role: msg.role === 'assistant' ? 'assistant' : 'user',
-    text: String(msg.text),
-    parts: Array.isArray(msg.parts) ? msg.parts : [],
+    text: String(msg.text ?? ''),
+    parts: markRemoteParts(msg.parts, fileOrigin && fileOrigin.host && fileOrigin.port ? fileOrigin : null),
     createdAt: Number(msg.createdAt ?? Date.now()),
   });
 
@@ -732,7 +886,7 @@ async function forwardGroupMessage(
       authorInitial: msg.authorInitial ?? null,
       role: msg.role,
       text: msg.text,
-      parts: msg.parts ?? [],
+      parts: wireParts(msg.parts),
       createdAt: msg.createdAt,
     },
   };
@@ -2835,7 +2989,7 @@ function buildOpencodePrompt(
     humans.length ? `群里还有真人同事：${humans.join('、')}。需要拍板时可以用 @名字 征求他们的意见。` : '',
     `这条消息${mentionedSelf ? '点名了你，请务必回应' : '没有点名你，你可以自己判断要不要接话；如果与你的职责无关，可以简短说明不参与，不要硬接话'}。`,
     '如果这件事需要别的智能体接手（比如你只出 SQL/方案、需要别人执行或评审），就在句末 @ 那个智能体的名字，把交接说清楚，不要只丢一句结论就没了。',
-    '回答控制在 260 字以内。如果用户只是给一个简单指示/规则/声明（比如「以后大家听我安排」），就简短确认收到，不要展开长篇；如果要你出方案/给判断，先简要给依据，再给结论。',
+    '根据问题需要给足细节，不要为了「简短」而省略关键判断。只有用户只是简单寒暄/指示（比如「以后大家听我安排」）时才简短确认；要你出方案、给判断、看代码时，该展开就展开，可以写完整代码、长分析和多步操作，不要怕长。',
     refs ? '如果用了下面的资料，请在句末用 [1][2] 这样的角标标出来。' : '',
   ].filter(Boolean).join('\n');
 
@@ -3385,6 +3539,9 @@ app.post('/api/files/reveal', async (c) => {
   }
 });
 
+/** 每条会话同一时刻只允许一轮在跑：新消息先等上一轮收尾，避免打进"忙碌"的会话里立刻失败 */
+const activeRuns = new Map<string, { abort: () => void; done: Promise<void> }>();
+
 app.post('/api/conversations/:id/messages', async (c) => {
   const id = c.req.param('id');
   const conv = getConversation(id);
@@ -3416,6 +3573,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
       await p2pPost(p2pPeer.host, p2pPeer.port, '/api/p2p/receive-dm', {
         from: { id: own.id, name: own.name, role: own.role, color: own.color, initial: own.initial, host: '', port: own.port },
         text,
+        parts: wireParts(parts),
         ts: Date.now(),
       }, '');
       return c.json({ data: msg });
@@ -3517,10 +3675,27 @@ app.post('/api/conversations/:id/messages', async (c) => {
   return streamSSE(c, async (stream) => {
     let aborted = false;
     const abortCtl = new AbortController();
+
+    // 同一条会话还在一轮里：先等它收尾（最多 90 秒），等不到才把它掐掉接管。
+    // 之前这里没有保护，新消息会直接打进还在执行/等审批的会话，几秒内空着失败。
+    let finishRun!: () => void;
+    const runCtl = {
+      abort: () => {
+        aborted = true;
+        abortCtl.abort();
+        resolveHumanWait(runId, 'skip');
+      },
+      done: new Promise<void>((r) => (finishRun = r)),
+    };
+    const prevRun = activeRuns.get(id);
+    if (prevRun) {
+      await Promise.race([prevRun.done, new Promise((r) => setTimeout(r, 90000))]);
+      if (activeRuns.has(id)) prevRun.abort();
+    }
+    activeRuns.set(id, runCtl);
+
     stream.onAbort(() => {
-      aborted = true;
-      abortCtl.abort();
-      resolveHumanWait(runId, 'skip');
+      runCtl.abort();
     });
 
     let opencodeOn = false;
@@ -3664,6 +3839,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
       let full = '';
       let failed = false;
       let usedOpencode = false;
+      /** 执行引擎这一轮是否真的动过（有输出或工具调用）：动过就别偷偷降级成无工具的普通模型 */
+      let sawEvent = false;
       const tools: Array<{ type: 'tool'; toolId: string; name: string; detail: string; file?: string | null; status: string }> = [];
 
       if (opencodeOn) {
@@ -3672,12 +3849,14 @@ app.post('/api/conversations/:id/messages', async (c) => {
           usedOpencode = true;
           const prompt = buildOpencodePrompt(conv, agent, roundText, userMessage.createdAt, citations);
 
-          for await (const ev of runAgent({ sessionId: sess.sessionId, prompt, signal: abortCtl.signal })) {
+          for await (const ev of runAgent({ sessionId: sess.sessionId, prompt, signal: abortCtl.signal, autoApprove: agent.tools?.shell === true })) {
             if (aborted) break;
             if (ev.type === 'delta') {
+              sawEvent = true;
               full += ev.text;
               await stream.writeSSE({ event: 'message.delta', data: JSON.stringify({ id: messageId, delta: ev.text }) });
             } else if (ev.type === 'tool') {
+              sawEvent = true;
               const existing = tools.find((t) => t.toolId === ev.id);
               if (existing) {
                 if (ev.name) existing.name = ev.name;
@@ -3727,8 +3906,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
                 }),
               });
             } else if (ev.type === 'error') {
-              if (!full) {
-                // 一个字都没出就失败 → 回退到普通模型
+              if (!full && !sawEvent) {
+                // 一个字都没出、也没动过工具就失败 → 回退到普通模型
                 usedOpencode = false;
                 failed = false;
               } else {
@@ -3743,8 +3922,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
 
           touchAgentSession(id, agentId, Date.now());
         } catch (err) {
-          if (!full && !aborted) {
-            // 还没吐字就失败 → 回退到普通模型
+          if (!full && !aborted && !sawEvent) {
+            // 还没吐字、也没动过工具就失败 → 回退到普通模型
             usedOpencode = false;
           } else {
             failed = true;
@@ -3896,6 +4075,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
     }
 
     await stream.writeSSE({ event: 'run.end', data: '{}' });
+    finishRun();
+    if (activeRuns.get(id) === runCtl) activeRuns.delete(id);
   });
 });
 

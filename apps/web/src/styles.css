@@ -486,7 +486,11 @@ textarea.input { height: auto; padding: 9px 11px; line-height: 1.6; resize: vert
 .mention-item .rl { font-size: 10.5px; color: var(--text-faint); margin-left: auto; }
 .msg-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 7px; }
 .msg-img { max-width: 230px; max-height: 170px; border-radius: 10px; border: 1px solid var(--border-soft); cursor: zoom-in; }
-.msg-file { display: flex; align-items: center; gap: 6px; background: #12161e; border: 1px solid var(--border-soft); border-radius: 8px; padding: 6px 10px; font-size: 11.5px; color: var(--text-dim); }
+.msg-file { display: flex; align-items: center; gap: 8px; background: #12161e; border: 1px solid var(--border-soft); border-radius: 8px; padding: 6px 10px; font-size: 11.5px; color: var(--text-dim); }
+.msg-file .mf-name { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-file .mf-size { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.msg-file .mf-tag { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border-soft); color: var(--text-faint); }
+.msg-file .btn { padding: 2px 9px; font-size: 11px; }
 .me .online-dot { position: absolute; right: -1px; bottom: -1px; width: 9px; height: 9px; border-radius: 50%; background: var(--success); border: 2px solid var(--bg-soft); }
 
 /* ---------- 设置页补充 ---------- */
@@ -1229,3 +1233,41 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 .wf-coach-input { display: flex; gap: 8px; padding: 10px 20px 0; }
 .wf-coach-input textarea { flex: 1; resize: none; }
 .wf-coach-input .btn { align-self: flex-end; height: 36px; }
+
+/* ---------- 文件接收进度 ---------- */
+.file-progress { position: fixed; right: 22px; bottom: 96px; width: 300px; z-index: 60; background: var(--bg-soft); border: 1px solid var(--border-soft); border-radius: 12px; padding: 10px 12px; box-shadow: 0 14px 34px rgba(0,0,0,0.35); }
+.fp-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+.fp-head b { margin-left: auto; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 500; }
+.fp-bar { height: 6px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
+.fp-bar i { display: block; height: 100%; background: var(--accent); transition: width 0.15s linear; }
+.fp-meta { margin-top: 6px; font-size: 10.5px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+/* ---------- 工具步骤可展开详情 ---------- */
+.tool-chip.has-detail { cursor: pointer; }
+.tool-chip.has-detail:hover { border-color: rgba(91,140,255,0.45); }
+.tool-detail-wrap { position: relative; margin-top: 6px; }
+.tool-detail { margin: 0; padding: 8px 42px 8px 10px; background: #0e1218; border: 1px solid var(--border-soft); border-radius: 8px; font-size: 11px; line-height: 1.55; color: var(--text-dim); white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto; }
+.tool-detail-copy { position: absolute; top: 6px; right: 6px; padding: 2px 8px; font-size: 10.5px; }
+
+/* ---------- 软件更新 ---------- */
+.update-box { margin-top: 12px; border: 1px solid var(--border-soft); border-radius: 10px; padding: 10px 12px; background: rgba(91,140,255,0.04); }
+.update-notes-toggle { background: none; border: none; color: var(--accent); font-size: 12px; padding: 0; cursor: pointer; }
+.update-notes { margin: 8px 0 0; max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: 11.5px; line-height: 1.6; color: var(--text-dim); background: #0e1218; border: 1px solid var(--border-soft); border-radius: 8px; padding: 10px; }
+.update-progress { margin-top: 10px; display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.up-bar { flex: 1; height: 6px; border-radius: 999px; background: rgba(255,255,255,0.08); overflow: hidden; }
+.up-bar i { display: block; height: 100%; background: var(--accent); transition: width 0.2s linear; }
+.update-current { margin-top: 12px; }
+.update-current summary { cursor: pointer; font-size: 12px; color: var(--text-dim); }
+
+/* ---------- 右上角更新入口 ---------- */
+.title-actions { display: flex; align-items: center; gap: 8px; -webkit-app-region: no-drag; }
+.update-btn { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; border-radius: 999px; border: 1px solid rgba(61,220,151,0.35); background: rgba(61,220,151,0.10); color: #8fe3b8; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.update-btn:hover { border-color: rgba(61,220,151,0.65); background: rgba(61,220,151,0.16); }
+.update-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); animation: updatePulse 1.8s ease-out infinite; }
+@keyframes updatePulse {
+  0% { box-shadow: 0 0 0 0 rgba(61,220,151,0.55); }
+  70% { box-shadow: 0 0 0 7px rgba(61,220,151,0); }
+  100% { box-shadow: 0 0 0 0 rgba(61,220,151,0); }
+}
+.update-sheet { width: 560px; max-width: 92vw; }
+.update-sheet .update-notes { margin: 0; max-height: 300px; }

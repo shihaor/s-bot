@@ -114,6 +114,45 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
   const [mmStatus, setMmStatus] = useState<MattermostMeta | null>(null);
   const [mmBusy, setMmBusy] = useState(false);
 
+  /* ---- 软件更新（详细内容在右上角弹窗里，这里只保留版本号和手动检查） ---- */
+  const [appVersion, setAppVersion] = useState('');
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{ latest?: string; hasUpdate?: boolean; error?: string } | null>(null);
+
+  useEffect(() => {
+    const sbot = (window as unknown as { sbot?: any }).sbot;
+    if (!sbot?.appInfo) return;
+    void sbot.appInfo()
+      .then((info: { version: string }) => setAppVersion(info.version))
+      .catch(() => { /* 老版本没有这个接口 */ });
+  }, []);
+
+  async function checkUpdate() {
+    const sbot = (window as unknown as { sbot?: any }).sbot;
+    if (!sbot?.checkUpdate) {
+      onToast('只有桌面客户端支持检查更新');
+      return;
+    }
+    setUpdateBusy(true);
+    try {
+      const r = await sbot.checkUpdate();
+      if (r?.error) {
+        onToast(r.error);
+      } else if (r?.hasUpdate) {
+        setUpdateInfo(r);
+        // 交给右上角的更新弹窗去展示和下载
+        window.dispatchEvent(new CustomEvent('sbot:update-available', { detail: r }));
+      } else {
+        setUpdateInfo(r ?? null);
+        onToast(`已是最新版本 v${r?.current ?? ''}`.trim());
+      }
+    } catch (e) {
+      onToast(String(e));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
   async function refresh() {
     try {
       setModels(await fetchModels());
@@ -878,6 +917,29 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
           <button className="btn" onClick={() => onToast('数据目录：userData/sbot.db')}>查看数据位置</button>
           <button className="btn danger" style={{ width: 'auto' }} onClick={() => onToast('清空数据还没做，避免误删')}>清空本地数据</button>
         </div>
+      </div>
+
+      <div className="set-card">
+        <div className="card-head">
+          <div>
+            <h3>软件更新</h3>
+            <p className="sub" style={{ marginBottom: 0 }}>
+              {appVersion ? `当前版本 v${appVersion}` : '当前版本未知'}
+              {updateInfo?.latest ? ` · 最新 v${updateInfo.latest}${updateInfo.hasUpdate ? '（有新版本）' : ''}` : ''}
+            </p>
+          </div>
+          <button className="btn" disabled={updateBusy} onClick={() => void checkUpdate()}>
+            {updateBusy ? '检查中…' : '检查更新'}
+          </button>
+        </div>
+        {updateInfo?.hasUpdate && (
+          <p className="sub" style={{ margin: '8px 0 0' }}>
+            有更新时，右上角会出现「有新版本」入口，点开即可查看更新内容并下载安装。
+          </p>
+        )}
+        {updateInfo?.error && (
+          <p className="sub" style={{ margin: '8px 0 0', color: 'var(--warn)' }}>{updateInfo.error}</p>
+        )}
       </div>
 
       <div className="set-card warn">

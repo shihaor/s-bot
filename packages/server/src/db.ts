@@ -166,6 +166,8 @@ ensureColumn('agents', 'owner_id', 'owner_id TEXT');
 ensureColumn('agents', 'agent_group', "agent_group TEXT NOT NULL DEFAULT ''");
 ensureColumn('agents', 'tags', "tags TEXT NOT NULL DEFAULT '[]'");
 ensureColumn('humans', 'simulated', 'simulated INTEGER NOT NULL DEFAULT 0');
+/** 备注：给真人起的别名，只在本机显示 */
+ensureColumn('humans', 'remark', "remark TEXT NOT NULL DEFAULT ''");
 ensureColumn('conversations', 'workflow_done', 'workflow_done INTEGER NOT NULL DEFAULT 0');
 ensureColumn('conversations', 'discussion_mode', "discussion_mode TEXT NOT NULL DEFAULT 'workflow'");
 ensureColumn('conversation_members', 'activity', "activity TEXT NOT NULL DEFAULT 'realtime'");
@@ -189,6 +191,32 @@ function migrateHumanMessages() {
   db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('msg_human_fix_v1', '1')").run();
 }
 migrateHumanMessages();
+
+/** 一次性：清掉历史消息里那些没意义的工具摘要（旧的 {"shellID":"sh_..."}） */
+function migrateToolDetails() {
+  const done = db.prepare("SELECT value FROM settings WHERE key = 'tool_detail_shellid_v1'").get();
+  if (done) return;
+  const rows = db.prepare("SELECT id, parts FROM messages WHERE parts IS NOT NULL AND parts LIKE '%shellID%'").all() as Array<{ id: string; parts: string }>;
+  const update = db.prepare('UPDATE messages SET parts = ? WHERE id = ?');
+  for (const row of rows) {
+    try {
+      const parts = JSON.parse(row.parts);
+      if (!Array.isArray(parts)) continue;
+      let changed = false;
+      for (const p of parts) {
+        if (p && p.type === 'tool' && typeof p.detail === 'string' && /^\s*\{\s*"(shellID|id|sessionID)"/.test(p.detail)) {
+          delete p.detail;
+          changed = true;
+        }
+      }
+      if (changed) update.run(JSON.stringify(parts), row.id);
+    } catch {
+      /* ignore */
+    }
+  }
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('tool_detail_shellid_v1', '1')").run();
+}
+migrateToolDetails();
 
 function seedModels() {
   const row = db.prepare('SELECT count(*) AS c FROM models').get() as { c: number } | undefined;
