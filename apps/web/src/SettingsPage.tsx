@@ -323,6 +323,9 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
         return;
       }
       setModelIdOptions(ids);
+      // 关键：下拉框渲染后视觉上会显示第一项，但 form.model 还是空的。
+      // 不自动补上，用户不动下拉直接保存就会提示「模型 ID 不能为空」。
+      setForm((f) => (f && (!f.model || !ids.includes(f.model)) ? { ...f, model: ids[0] } : f));
     } catch (e) {
       onToast(String((e as Error).message ?? e));
     } finally {
@@ -332,8 +335,13 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
 
   async function saveModel() {
     if (!form || busy) return;
-    if (!form.name.trim() || !form.model.trim() || !form.baseUrl.trim()) {
-      onToast('名称、模型 ID、Base URL 都不能为空');
+    const missing = [
+      !form.name.trim() ? '显示名称' : '',
+      !form.model.trim() ? '模型 ID' : '',
+      !form.baseUrl.trim() ? 'Base URL' : '',
+    ].filter(Boolean);
+    if (missing.length) {
+      onToast(`请填写：${missing.join('、')}`);
       return;
     }
     setBusy(true);
@@ -502,7 +510,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
             >
               内置模型
             </button>
-            <button className="btn primary" onClick={() => setForm({ ...EMPTY_MODEL })}>+ 添加模型</button>
+            <button className="btn primary" onClick={() => { setModelIdOptions(null); setForm({ ...EMPTY_MODEL }); }}>+ 添加模型</button>
           </div>
         </div>
         <div className="model-list">
@@ -524,7 +532,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
               <span className="test-inline">{testMsg[m.id] ?? ''}</span>
               <button className="mini" title="测试" onClick={() => void runTest(m)}>◌</button>
               <button className={`mini${m.isDefault ? ' star-on' : ''}`} title={m.isDefault ? '当前默认' : '设为默认'} onClick={async () => { if (m.isDefault) return; await setDefaultModel(m.id); await refresh(); onSaved(); onToast('已设为默认'); }}>★</button>
-              <button className="mini" title="编辑" onClick={() => setForm({ ...m, apiKey: '' })}>✎</button>
+              <button className="mini" title="编辑" onClick={() => { setModelIdOptions(null); setForm({ ...m, apiKey: '' }); }}>✎</button>
               <button className="mini danger" title="删除" onClick={() => onConfirm({ title: '删除模型', message: `删除模型「${m.name}」？`, danger: true, onConfirm: () => { void (async () => { await deleteModel(m.id); await refresh(); onSaved(); onToast('模型已删除'); })(); } })}>×</button>
             </div>
           ))}
@@ -1104,6 +1112,7 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
                   <div className="model-id-picker">
                     {modelIdOptions ? (
                       <select className="input" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })}>
+                        <option value="">请选择模型（{modelIdOptions.length} 个）</option>
                         {modelIdOptions.map((id) => <option key={id} value={id}>{id}</option>)}
                       </select>
                     ) : (
