@@ -1302,3 +1302,22 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 @keyframes avSpin {
   to { transform: rotate(360deg); }
 }
+
+/* ---------- Markdown 表格 / 分隔线 ---------- */
+.md-table-wrap { margin: 8px 0; max-width: 100%; overflow-x: auto; }
+.md-table { border-collapse: collapse; font-size: 12px; line-height: 1.5; min-width: 50%; }
+.md-table th, .md-table td { border: 1px solid var(--border-soft); padding: 5px 9px; text-align: left; vertical-align: top; }
+.md-table th { background: rgba(91, 140, 255, 0.10); color: var(--text); font-weight: 600; white-space: nowrap; }
+.md-table tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.02); }
+.md-hr { border: none; border-top: 1px solid var(--border-soft); margin: 10px 0; }
+
+/* ---------- 执行过程折叠 ---------- */
+.tool-toggle { display: inline-flex; align-items: center; gap: 7px; margin-top: 6px; padding: 3px 9px; font-size: 10.5px; color: var(--text-faint); background: transparent; border: 1px solid var(--border-soft); border-radius: 999px; cursor: pointer; transition: color 0.15s, border-color 0.15s; }
+.tool-toggle:hover { color: var(--text-dim); border-color: rgba(91, 140, 255, 0.45); }
+.tool-toggle .chev { display: inline-block; transition: transform 0.15s; }
+.tool-toggle.open .chev { transform: rotate(90deg); }
+.tool-dots { display: inline-flex; align-items: center; gap: 3px; }
+.tool-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--success); opacity: 0.85; }
+.tool-dots i.failed { background: #f5525d; }
+.tool-dots i.running { background: #9fbbff; animation: toolPulse 1s ease-in-out infinite; }
+.tool-toggle-state { color: var(--text-faint); opacity: 0.8; }

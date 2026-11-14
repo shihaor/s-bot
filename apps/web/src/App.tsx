@@ -238,27 +238,51 @@ function FileToolChip({ tool }: { tool: ToolChip }) {
   );
 }
 
-function ToolRow({ tools }: { tools: ToolChip[] }) {
+function ToolRow({ tools, collapsible = false }: { tools: ToolChip[]; collapsible?: boolean }) {
   const [openId, setOpenId] = useState<string | null>(null);
+  // 已完成的回复默认收起执行过程，只留一行摘要，点一下再展开
+  const [expanded, setExpanded] = useState(!collapsible || tools.length < 2);
   if (!tools.length) return null;
-  const open = openId ? tools.find((t) => t.toolId === openId) : null;
+  const open = expanded && openId ? tools.find((t) => t.toolId === openId) : null;
+  const failed = tools.some((t) => t.status === 'failed');
+  const running = tools.some((t) => t.status === 'running');
   return (
     <>
-      <div className="tool-row">
-        {tools.map((t) => (t.file ? (
-          <FileToolChip key={t.toolId} tool={t} />
-        ) : (
-          <span
-            key={t.toolId}
-            className={`tool-chip ${t.status}${t.detail ? ' has-detail' : ''}`}
-            title={t.detail ? `${t.name}\n${t.detail}` : t.name}
-            onClick={() => { if (t.detail) setOpenId((cur) => (cur === t.toolId ? null : t.toolId)); }}
-          >
-            <span className="dot" />
-            {toolLabel(t.name, t.detail)}
+      {collapsible && tools.length >= 2 && (
+        <button
+          className={`tool-toggle ${expanded ? 'open' : ''}`}
+          onClick={() => { setExpanded((v) => !v); if (expanded) setOpenId(null); }}
+          title={expanded ? '收起执行过程' : '展开执行过程'}
+        >
+          <span className="chev">▸</span>
+          <span>执行过程 · {tools.length} 步</span>
+          <span className="tool-dots">
+            {tools.slice(0, 12).map((t) => (
+              <i key={t.toolId} className={`${t.status === 'failed' ? 'failed' : t.status === 'running' ? 'running' : ''}`} />
+            ))}
           </span>
-        )))}
-      </div>
+          <span className="tool-toggle-state">
+            {running ? '进行中' : failed ? '有失败' : '完成'}
+          </span>
+        </button>
+      )}
+      {expanded && (
+        <div className="tool-row">
+          {tools.map((t) => (t.file ? (
+            <FileToolChip key={t.toolId} tool={t} />
+          ) : (
+            <span
+              key={t.toolId}
+              className={`tool-chip ${t.status}${t.detail ? ' has-detail' : ''}`}
+              title={t.detail ? `${t.name}\n${t.detail}` : t.name}
+              onClick={() => { if (t.detail) setOpenId((cur) => (cur === t.toolId ? null : t.toolId)); }}
+            >
+              <span className="dot" />
+              {toolLabel(t.name, t.detail)}
+            </span>
+          )))}
+        </div>
+      )}
       {open?.detail && (
         <div className="tool-detail-wrap">
           <pre className="tool-detail">{open.detail}</pre>
@@ -483,7 +507,7 @@ function renderParts(
   return (
     <>
       {files.length > 0 && <div className="msg-files">{files}</div>}
-      <ToolRow tools={tools} />
+      <ToolRow tools={tools} collapsible />
       {citations.length > 0 && (
         <div className="cites">
           {citations.map((c) => (

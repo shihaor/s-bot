@@ -6,7 +6,7 @@ import type { ReactNode } from 'react';
  * 用 React 元素渲染（不做 dangerouslySetInnerHTML），文本由 React 自动转义，天然防 XSS。
  */
 
-const INLINE_RE = /(\*\*[^*]+\*\*|\*[^*\n]+\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\)|\[\d+\])/g;
+const INLINE_RE = /(\*\*[^*]+\*\*|\*[^*\n]+\*|`[^`]+`|~~[^~\n]+~~|\[[^\]]+\]\([^)\s]+\)|\[\d+\])/g;
 
 function renderInline(text: string, keyBase: string): ReactNode[] {
   const parts = text.split(INLINE_RE);
@@ -16,6 +16,7 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
     if (/^\[\d+\]$/.test(p)) return <sup key={key} className="cite-mark">{p}</sup>;
     if (/^\*\*[^*]+\*\*$/.test(p)) return <strong key={key}>{p.slice(2, -2)}</strong>;
     if (/^\*[^*\n]+\*$/.test(p)) return <em key={key}>{p.slice(1, -1)}</em>;
+    if (/^~~[^~\n]+~~$/.test(p)) return <del key={key}>{p.slice(2, -2)}</del>;
     if (/^`[^`]+`$/.test(p)) return <code key={key} className="md-code">{p.slice(1, -1)}</code>;
     const link = p.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
     if (link) {
@@ -27,6 +28,23 @@ function renderInline(text: string, keyBase: string): ReactNode[] {
     }
     return <span key={key}>{p}</span>;
   });
+}
+
+/** 表格分隔行：|---|---| 或 | :--- | ---: | */
+function isTableSep(line: string): boolean {
+  const s = line.trim();
+  if (!s.includes('|')) return false;
+  if (!/^[\s|:-]+$/.test(s)) return false;
+  return /-{2,}/.test(s);
+}
+
+function splitRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((c) => c.trim());
 }
 
 export function Markdown({ text }: { text: string }): ReactNode {
@@ -75,6 +93,50 @@ export function Markdown({ text }: { text: string }): ReactNode {
       continue;
     }
 
+    // 表格（GFM：| 表头 | 下一行 |---|）
+    if (line.trim().startsWith('|') && i + 1 < lines.length && isTableSep(lines[i + 1]!)) {
+      flushList();
+      const header = splitRow(line);
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i]!.trim().startsWith('|')) {
+        rows.push(splitRow(lines[i]!));
+        i++;
+      }
+      const tk = key++;
+      out.push(
+        <div className="md-table-wrap" key={`tbl-${tk}`}>
+          <table className="md-table">
+            <thead>
+              <tr>
+                {header.map((cell, ci) => (
+                  <th key={ci}>{renderInline(cell, `th${tk}-${ci}`)}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, ri) => (
+                <tr key={ri}>
+                  {header.map((_, ci) => (
+                    <td key={ci}>{renderInline(row[ci] ?? '', `td${tk}-${ri}-${ci}`)}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
+    // 分隔线
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) {
+      flushList();
+      out.push(<hr key={`hr-${key++}`} className="md-hr" />);
+      i++;
+      continue;
+    }
+
     // 标题
     const h = line.match(/^(#{1,6})\s+(.+)/);
     if (h) {
@@ -99,9 +161,9 @@ export function Markdown({ text }: { text: string }): ReactNode {
       continue;
     }
 
-    // 列表
-    const bullet = line.match(/^[-*+]\s+(.+)/);
-    const num = line.match(/^\d+\.\s+(.+)/);
+    // 列表（允许缩进，避免嵌套列表被当成普通段落）
+    const bullet = line.match(/^\s*[-*+]\s+(.+)/);
+    const num = line.match(/^\s*\d+\.\s+(.+)/);
     if (bullet || num) {
       if (bullet) {
         if (!list || list.ordered) {
