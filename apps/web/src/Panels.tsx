@@ -249,7 +249,7 @@ export function LoginDialog({
                   <span>{user ? `已登录：${user.name}` : '不登录也能继续用本地和内网功能'}</span>
                 </div>
                 <div className="cloud-list">
-                  {['云端智能体库', '跨设备同步', '团队通讯录', '外网中继'].map((item) => (
+                  {['云端智能体库', '跨设备同步', '团队通讯录'].map((item) => (
                     <div key={item} className="cloud-row">
                       <span>{item}</span>
                       <em>即将上线</em>

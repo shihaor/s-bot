@@ -94,6 +94,8 @@ import {
 import './styles.css';
 
 interface Streaming {
+  /** 这一轮属于哪个会话：切到别的会话时不显示，避免看起来「没切过去」 */
+  conversationId: string;
   id: string;
   agentId: string;
   name: string;
@@ -564,8 +566,10 @@ export default function App() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [streaming, setStreaming] = useState<Streaming | null>(null);
-  const [running, setRunning] = useState(false);
+  /** 每个会话各自的流式回复：两个会话可以同时跑，互不覆盖 */
+  const [streamingMap, setStreamingMap] = useState<Record<string, Streaming>>({});
+  /** 每个会话各自是否在跑：一条会话在回复，不影响去别的会话发消息 */
+  const [runningIds, setRunningIds] = useState<string[]>([]);
   const [input, setInput] = useState('');
   const [runtime, setRuntime] = useState('');
   const [error, setError] = useState('');
@@ -630,11 +634,14 @@ export default function App() {
   const [workflowApproval, setWorkflowApproval] = useState<{ runId: string; nodeId: string; title: string; nodeLabel: string } | null>(null);
   const [workflowEditor, setWorkflowEditor] = useState<{ conversationId: string; graph: GroupWorkflow } | null>(null);
   const [workflowCoach, setWorkflowCoach] = useState<{ conversationId: string; agents: Agent[] } | null>(null);
-  const [ocSetup, setOcSetup] = useState<{ url: string; externalUrl: string; busy: boolean; error?: string } | null>(null);
+  const [ocSetup, setOcSetup] = useState<{ url: string; busy: boolean; error?: string } | null>(null);
   const [confirmState, setConfirmState] = useState<{ title: string; message: string; danger?: boolean; onConfirm: () => void } | null>(null);
   const [unread, setUnread] = useState<Record<string, number>>({});
   const activeIdRef = useRef<string | null>(null);
-  const runningRef = useRef(false);
+  /** 正在跑的会话 id 集合（同步读，给事件回调/发送判断用） */
+  const runningIdsRef = useRef<Set<string>>(new Set());
+  /** 每个会话自己的中断句柄：多会话可以同时在跑 */
+  const abortMap = useRef<Map<string, AbortController>>(new Map());
   const agentsRef = useRef<Agent[]>([]);
   const conversationsRef = useRef<Conversation[]>([]);
   const [draggingMember, setDraggingMember] = useState<MemberPayload | null>(null);
@@ -663,7 +670,6 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const abortRef = useRef<AbortController | null>(null);
   /** 文件接收任务的等待者：jobId -> resolve/reject（结果由全局 SSE 事件回来） */
   const pullWaiters = useRef(new Map<string, {
     resolve: (v: { id: string; name: string; size: number; path: string }) => void;
@@ -682,6 +688,25 @@ export default function App() {
   const filePercent = fileJob && fileJob.total > 0
     ? Math.min(100, Math.round((fileJob.received / fileJob.total) * 100))
     : 0;
+  /** 当前会话是否正在跑（其它会话在跑不影响这里） */
+  const isRunning = !!activeId && runningIds.includes(activeId);
+  /** 当前会话的流式内容（别的会话在流不显示） */
+  const streaming = activeId ? (streamingMap[activeId] ?? null) : null;
+  function markRunning(id: string, on: boolean) {
+    const set = runningIdsRef.current;
+    if (on) set.add(id);
+    else set.delete(id);
+    setRunningIds([...set]);
+  }
+  /** 清掉某个会话的流式回复（不影响别的会话） */
+  function clearStreaming(convId: string) {
+    setStreamingMap((m) => {
+      if (!m[convId]) return m;
+      const next = { ...m };
+      delete next[convId];
+      return next;
+    });
+  }
   const activeTaskCount = (conversationId: string) =>
     tasks.filter((t) => t.conversationId === conversationId && t.status !== 'done').length;
 
@@ -744,17 +769,17 @@ export default function App() {
             setUnread((prev) => ({ ...prev, [p.conversationId]: (prev[p.conversationId] ?? 0) + 1 }));
           }
           // 收到别人（同事/其他端的智能体）的消息：弹桌面提醒。
-          // 自己的 run 已在 message.end 里提醒，这里用 runningRef 排除，避免重复弹。
+          // 自己的 run 已在 message.end 里提醒，这里用「该会话是否在跑」排除，避免重复弹。
           const incoming = p.authorType === 'agent' || p.authorType === 'human';
           const ownHuman = p.authorType === 'human' && !!p.authorId && p.authorId === localStorage.getItem('sbot.user');
-          if (incoming && !ownHuman && !runningRef.current) {
+          if (incoming && !ownHuman && !runningIdsRef.current.has(p.conversationId)) {
             const who = p.authorType === 'agent'
               ? (agentsRef.current.find((a) => a.id === p.authorId)?.name ?? '智能体')
               : (p.authorName ?? '同事');
             const where = conversationsRef.current.find((c) => c.id === p.conversationId)?.title ?? 'S-BOT';
             notifyDesktop(`${who} · ${where}`, (p.text ?? '').slice(0, 90));
           }
-          if (p.conversationId === activeIdRef.current && !runningRef.current) {
+          if (p.conversationId === activeIdRef.current && !runningIdsRef.current.has(p.conversationId)) {
             void fetchMessages(p.conversationId).then(setMessages).catch(() => {});
           } else if (
             p.conversationId === activeIdRef.current &&
@@ -966,14 +991,16 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [humanWait]);
 
-  // 托盘退出时中断当前会话
+  // 托盘退出时中断所有正在跑的会话
   useEffect(() => {
     const sbot = (window as any).sbot;
     if (!sbot?.onAbort) return;
     return sbot.onAbort(() => {
-      abortRef.current?.abort();
-      setRunning(false);
-      setStreaming(null);
+      for (const ctl of abortMap.current.values()) ctl.abort();
+      abortMap.current.clear();
+      runningIdsRef.current.clear();
+      setRunningIds([]);
+      setStreamingMap({});
     });
   }, []);
 
@@ -1031,18 +1058,16 @@ export default function App() {
         setRuntime(r.mode === 'mock' ? '本地模式' : r.label);
         setActiveId(c.find((x) => x.type === 'group')?.id ?? c[0]?.id ?? null);
         void loadKbs();
-        // 首次启动探测 opencode：没有就提示装离线包（内网 / 外网都可）
+        // 首次启动探测 opencode：没有就提示装离线包
         void fetchOpencodeStatus()
           .then(async (oc) => {
             if (oc.available) return;
             let url = 'http://10.201.1.19:80/artifactory/installer/opencode/OpenCode.zip';
-            let externalUrl = 'https://github.com/anomalyco/opencode/releases/latest/download/opencode-windows-x64.zip';
             try {
               const s = await fetchSettings();
               url = s.opencodeUrl || url;
-              externalUrl = s.opencodeExternalUrl || externalUrl;
             } catch { /* ignore */ }
-            setOcSetup({ url, externalUrl, busy: false });
+            setOcSetup({ url, busy: false });
           })
           .catch(() => {});
       } catch (e) {
@@ -1971,7 +1996,9 @@ export default function App() {
   async function handleSend(override?: string) {
     const text = (override ?? input).trim();
     const parts = override ? [] : attachments.map((a) => ({ ...a }));
-    if ((!text && parts.length === 0) || !activeId || running) return;
+    if ((!text && parts.length === 0) || !activeId) return;
+    // 只拦「同一个会话」重复发；别的会话在跑不影响这里
+    if (runningIdsRef.current.has(activeId)) return;
 
     const runConv = activeId;
     if (!override) {
@@ -1979,8 +2006,7 @@ export default function App() {
       // 发完消息后光标留在输入框，方便接着打字
       requestAnimationFrame(() => inputRef.current?.focus());
     }
-    setRunning(true);
-    runningRef.current = true;
+    markRunning(runConv, true);
     setError('');
     setAttachments([]);
 
@@ -1999,7 +2025,7 @@ export default function App() {
     setMessages((prev) => [...prev, optimistic]);
 
     const controller = new AbortController();
-    abortRef.current = controller;
+    abortMap.current.set(runConv, controller);
 
     try {
       await sendMessage(
@@ -2008,26 +2034,35 @@ export default function App() {
         (e) => {
           if (e.type === 'message.start') {
             setRetrievingAgent(null);
-            setStreaming({
-              id: e.id,
-              agentId: e.agentId,
-              name: e.name,
-              role: e.role,
-              color: e.color,
-              initial: e.initial,
-              text: '',
-              tools: [],
-            });
+            setStreamingMap((m) => ({
+              ...m,
+              [runConv]: {
+                conversationId: runConv,
+                id: e.id,
+                agentId: e.agentId,
+                name: e.name,
+                role: e.role,
+                color: e.color,
+                initial: e.initial,
+                text: '',
+                tools: [],
+              },
+            }));
           } else if (e.type === 'retrieval.start') {
             setRetrievingAgent(e.agentId);
           } else if (e.type === 'retrieval.done') {
             setRetrievingAgent(null);
           } else if (e.type === 'message.delta') {
-            setStreaming((s) => (s ? { ...s, text: s.text + e.delta } : s));
+            setStreamingMap((m) => {
+              const cur = m[runConv];
+              if (!cur) return m;
+              return { ...m, [runConv]: { ...cur, text: cur.text + e.delta } };
+            });
           } else if (e.type === 'tool') {
-            setStreaming((s) => {
-              if (!s) return s;
-              const tools = [...s.tools];
+            setStreamingMap((m) => {
+              const cur = m[runConv];
+              if (!cur) return m;
+              const tools = [...cur.tools];
               const idx = tools.findIndex((t) => t.toolId === e.toolId);
               if (idx >= 0) {
                 tools[idx] = {
@@ -2039,7 +2074,7 @@ export default function App() {
               } else {
                 tools.push({ toolId: e.toolId, name: e.name ?? 'tool', detail: e.detail ?? '', status: e.status });
               }
-              return { ...s, tools };
+              return { ...m, [runConv]: { ...cur, tools } };
             });
           } else if (e.type === 'permission.ask') {
             setPermissionReq({
@@ -2092,7 +2127,7 @@ export default function App() {
             setWorkflowRun(null);
             setWorkflowApproval(null);
           } else if (e.type === 'message.end') {
-            setStreaming(null);
+            clearStreaming(runConv);
             const who = agents.find((a) => a.id === e.agentId)?.name ?? '智能体';
             const where = conversations.find((c) => c.id === runConv)?.title ?? 'S-BOT';
             notifyDesktop(`${who} · ${where}`, e.text.slice(0, 90));
@@ -2136,13 +2171,9 @@ export default function App() {
     } catch (e) {
       if (!controller.signal.aborted) setError(String(e));
     } finally {
-      setRunning(false);
-      runningRef.current = false;
-      setStreaming(null);
-      setPermissionReq(null);
-      setFormReq(null);
-      setHumanWait(null);
-      abortRef.current = null;
+      markRunning(runConv, false);
+      clearStreaming(runConv);
+      abortMap.current.delete(runConv);
       refreshConversations();
       // 跑完也把光标放回输入框，方便连续对话
       requestAnimationFrame(() => inputRef.current?.focus());
@@ -2150,13 +2181,15 @@ export default function App() {
   }
 
   function handleStop() {
-    if (streaming?.text) {
+    const convId = activeId;
+    if (!convId) return;
+    if (streaming?.conversationId === convId && streaming.text) {
       const s = streaming;
       setMessages((prev) => [
         ...prev,
         {
           id: `partial_${Date.now()}`,
-          conversationId: activeId ?? '',
+          conversationId: convId,
           authorType: 'agent',
           authorId: s.agentId,
           role: 'assistant',
@@ -2168,9 +2201,9 @@ export default function App() {
         },
       ]);
     }
-    setStreaming(null);
-    runningRef.current = false;
-    abortRef.current?.abort();
+    clearStreaming(convId);
+    abortMap.current.get(convId)?.abort();
+    // running 标记由 handleSend 的 finally 统一清理
   }
 
   if (loading) return (
@@ -2289,7 +2322,7 @@ export default function App() {
                   if (payload) void dropMemberIntoGroup(c.id, payload);
                 }}
               >
-                <div className="stack">
+                <div className={`stack ${runningIds.includes(c.id) ? 'running' : ''}`}>
                   {c.members.slice(0, 3).map((m) => (
                     <Avatar key={m.memberId} name={m.name} initial={m.initial} color={m.color} size={22} />
                   ))}
@@ -2330,7 +2363,11 @@ export default function App() {
                   onClick={() => { setActiveId(c.id); setView('chat'); setDrawerOpen(false); setSearchOpen(false); }}
                   onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, conv: c }); }}
                 >
-                  {m && <Avatar name={m.name} initial={m.initial} color={m.color} />}
+                  {m && (
+                    <span className={`av-wrap ${runningIds.includes(c.id) ? 'running' : ''}`}>
+                      <Avatar name={m.name} initial={m.initial} color={m.color} />
+                    </span>
+                  )}
                   <div className="conv-main">
                     <div className="conv-top">
                       <span className="conv-name">{c.title}</span>
@@ -2366,7 +2403,7 @@ export default function App() {
                     onContextMenu={(e) => openHumanMenu(e, { id: h.id, name: h.name, remark: h.remark })}
                     onClick={() => void openHumanDm(h)}
                   >
-                    <span className="av-online-wrap">
+                    <span className={`av-online-wrap ${conv && runningIds.includes(conv.id) ? 'running' : ''}`}>
                       <Avatar name={h.name} initial={h.initial} color={h.color} />
                       {h.online && <span className="human-online" />}
                     </span>
@@ -2411,7 +2448,7 @@ export default function App() {
                     })}
                     onClick={() => (conv ? (setActiveId(conv.id), setView('chat'), setDrawerOpen(false), setSearchOpen(false)) : openLanPeerDm(p))}
                   >
-                    <span className="av-online-wrap">
+                    <span className={`av-online-wrap ${conv && runningIds.includes(conv.id) ? 'running' : ''}`}>
                       <Avatar name={p.name} initial={p.initial || p.name.slice(0, 1)} color={p.color} />
                       <span className="human-online" />
                     </span>
@@ -2442,7 +2479,7 @@ export default function App() {
                       }}
                       onClick={() => { setActiveId(c.id); setView('chat'); setDrawerOpen(false); setSearchOpen(false); }}
                     >
-                      <span className="av-online-wrap">
+                      <span className={`av-online-wrap ${runningIds.includes(c.id) ? 'running' : ''}`}>
                         <Avatar name={m?.name ?? c.title} initial={m?.initial ?? ''} color={m?.color ?? '#6B7385'} />
                       </span>
                       <div className="conv-main">
@@ -2626,7 +2663,7 @@ export default function App() {
               )}
 
               <div className={`messages ${messages.length === 0 ? 'with-intro' : ''}`} ref={scrollRef}>
-                {messages.length === 0 && !running && (
+                {messages.length === 0 && !isRunning && (
                   <Intro
                     intro={intro}
                     members={active.members}
@@ -2702,7 +2739,7 @@ export default function App() {
                     );
                   })}
 
-                  {running && !streaming && (
+                  {isRunning && !(streaming && streaming.conversationId === activeId) && (
                     <div className="msg gap">
                       <div className="typing">
                         <span className="dots"><i /><i /><i /></span>
@@ -2711,7 +2748,7 @@ export default function App() {
                     </div>
                   )}
 
-                  {streaming && (() => {
+                  {streaming && streaming.conversationId === activeId && (() => {
                     const activeTool = [...streaming.tools].reverse().find((t) => t.status === 'running') ?? null;
                     return (
                       <div className="msg gap">
@@ -2793,7 +2830,7 @@ export default function App() {
                 {messages.length > 0 && intro && intro.suggestions.length > 0 && (
                   <div className="suggest-bar">
                     {intro.suggestions.map((q) => (
-                      <button key={q} className="sugg bar-chip" disabled={running} onClick={() => void handleSend(q)}>
+                      <button key={q} className="sugg bar-chip" disabled={isRunning} onClick={() => void handleSend(q)}>
                         {q}
                       </button>
                     ))}
@@ -2883,7 +2920,7 @@ export default function App() {
                     <button className="tool at" title="提及智能体" onClick={insertAtSign}>@</button>
                     <input ref={fileRef} type="file" multiple hidden onChange={(e) => { void handleFiles(e.target.files); e.target.value = ''; }} />
                     <div className="spacer" />
-                    {running ? (
+                    {isRunning ? (
                       <button className="send stop" onClick={handleStop} title="停止">■</button>
                     ) : (
                       <button className="send" onClick={() => void handleSend()} disabled={!input.trim() && attachments.length === 0} title="发送">↑</button>
@@ -3150,22 +3187,6 @@ export default function App() {
             <div className="sheet-foot">
               <button className="btn" onClick={() => { setOcSetup(null); setView('settings'); }}>去设置里指定目录</button>
               <button className="btn" onClick={() => setOcSetup(null)}>稍后</button>
-              <button
-                className="btn"
-                disabled={ocSetup.busy}
-                onClick={async () => {
-                  setOcSetup({ ...ocSetup, busy: true, error: undefined });
-                  const r = await installOpencodeRuntime(ocSetup.externalUrl.trim());
-                  if (r.ok) {
-                    showToast(`执行引擎 ${r.version ?? ''} 安装完成`);
-                    setOcSetup(null);
-                  } else {
-                    setOcSetup({ ...ocSetup, busy: false, error: r.error ?? '外网下载失败，试试内网地址或去设置里指定目录' });
-                  }
-                }}
-              >
-                从外网下载
-              </button>
               <button
                 className="btn primary"
                 disabled={ocSetup.busy}

@@ -167,8 +167,8 @@ textarea { font-family: inherit; color: inherit; background: none; border: 0; ou
 .stack .av { margin-left: -11px; box-shadow: 0 0 0 2px var(--bg-elev); }
 .stack .av:first-child { margin-left: 0; }
 .conv-main { flex: 1; min-width: 0; }
-.conv-top { display: flex; justify-content: space-between; gap: 8px; }
-.conv-name { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conv-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.conv-name { flex: 1 1 auto; min-width: 0; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .conv-time { font-size: 10.5px; color: var(--text-faint); }
 .conv-sub { font-size: 11.5px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
 
@@ -761,11 +761,11 @@ kbd { font-family: var(--font); font-size: 10px; background: #181d26; border: 1p
 .suggest-bar .sugg.bar-chip { color: #a9b3c7; background: #151a22; border-color: #2a3242; }
 .suggest-bar .sugg.bar-chip:hover:not(:disabled) { color: #e6eaf2; border-color: #3a5490; background: #1b2230; }
 
-/* ---------- 会话卡片右侧：任务数 / 未读 ---------- */
-.conv-right { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: 0 0 auto; }
+/* ---------- 会话卡片右侧：任务数 / 未读（同一行，不额外占高度） ---------- */
+.conv-right { display: flex; flex-direction: row; align-items: center; gap: 6px; flex: 0 0 auto; height: 16px; }
 .conv-badges { display: flex; align-items: center; gap: 4px; }
-.cb-task { font-size: 9.5px; color: #9fbbff; background: rgba(91, 140, 255, 0.1); border: 1px solid rgba(91, 140, 255, 0.22); border-radius: 4px; padding: 0 4px; line-height: 14px; }
-.cb-unread { min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: #ff4d4f; color: #fff; font-size: 9.5px; font-weight: 600; display: grid; place-items: center; box-shadow: 0 0 0 2px var(--bg, #0e1116); }
+.cb-task { font-size: 9.5px; color: #9fbbff; background: rgba(91, 140, 255, 0.1); border: 1px solid rgba(91, 140, 255, 0.22); border-radius: 4px; padding: 0 4px; line-height: 13px; height: 14px; display: inline-flex; align-items: center; white-space: nowrap; }
+.cb-unread { min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; background: #ff4d4f; color: #fff; font-size: 9.5px; font-weight: 600; display: grid; place-items: center; box-shadow: 0 0 0 2px var(--bg, #0e1116); line-height: 15px; }
 
 /* ---------- 引用 ---------- */
 .cites { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
@@ -1271,3 +1271,34 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 }
 .update-sheet { width: 560px; max-width: 92vw; }
 .update-sheet .update-notes { margin: 0; max-height: 300px; }
+
+/* ---------- 正在执行任务的会话：头像外圈转动光点 ---------- */
+.av-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+.av-online-wrap .human-online { z-index: 2; }
+.av-wrap.running::before,
+.av-online-wrap.running::before,
+.stack.running .av:first-child::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  pointer-events: none;
+  background: conic-gradient(
+    from 0deg,
+    rgba(91, 140, 255, 0) 0deg,
+    rgba(91, 140, 255, 0.1) 40deg,
+    rgba(91, 140, 255, 0.75) 120deg,
+    #cfe0ff 150deg,
+    rgba(91, 140, 255, 0.55) 185deg,
+    rgba(91, 140, 255, 0) 230deg
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  animation: avSpin 1.4s linear infinite;
+  filter: drop-shadow(0 0 4px rgba(110, 160, 255, 0.75));
+  z-index: 1;
+}
+.stack.running .av:first-child { position: relative; }
+@keyframes avSpin {
+  to { transform: rotate(360deg); }
+}
