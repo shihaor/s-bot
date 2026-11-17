@@ -2494,7 +2494,12 @@ export default function App() {
                         </span>
                       </div>
                       <div className="conv-sub">
-                        {conv?.lastMessage ? `${conv.lastMessage.authorName}：${conv.lastMessage.text}` : `${p.role || '同事'} · ${p.host}`}
+                        <span className="peer-ip" title={`真实 IP：${p.host}`}>{p.host}</span>
+                        {conv?.lastMessage ? (
+                          <> · {conv.lastMessage.authorName}：{conv.lastMessage.text}</>
+                        ) : (
+                          p.role ? <> · {p.role}</> : null
+                        )}
                       </div>
                     </div>
                   </div>
