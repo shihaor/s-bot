@@ -1054,17 +1054,23 @@ export function setHumanRemark(id: string, remark: string, name?: string): Human
   if (!id) return null;
   let human = getHuman(id);
   if (!human) {
-    // 还没聊过的内网同事：先补一条影子真人，备注才有地方存
+    // 还没聊过的内网同事：先补一条影子真人，备注才有地方存。
+    // humans.name 是 UNIQUE：同名记录已存在时 INSERT OR IGNORE 会被静默丢弃，
+    // 所以要在冲突时退回到「带后缀的名字」，否则备注永远存不进去（表现为点了没反应）。
     const display = (name ?? '').trim() || '同事';
-    db.prepare('INSERT OR IGNORE INTO humans (id, name, role, color, initial, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
-      id,
-      display,
-      '',
-      '#5B8CFF',
-      display.slice(0, 1) || '人',
-      Date.now(),
-    );
-    human = getHuman(id);
+    const candidates = [display, `${display}（内网）`, `${display}（${id.slice(-4)}）`];
+    for (const candidate of candidates) {
+      db.prepare('INSERT OR IGNORE INTO humans (id, name, role, color, initial, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+        id,
+        candidate,
+        '',
+        '#5B8CFF',
+        display.slice(0, 1) || '人',
+        Date.now(),
+      );
+      human = getHuman(id);
+      if (human) break;
+    }
     if (!human) return null;
   }
   const value = remark.trim().slice(0, 40);
