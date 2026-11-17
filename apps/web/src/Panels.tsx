@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Agent, Conversation, GroupWorkflow, Message, ModelInfo, Task } from '@sbot/shared';
 import { previewGroupWorkflow } from './api';
 import WorkflowEditor from './WorkflowEditor';
@@ -11,6 +11,9 @@ export interface MenuItem {
 }
 
 export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; items: MenuItem[]; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState({ left: x, top: y });
+
   useEffect(() => {
     const close = () => onClose();
     window.addEventListener('mousedown', close);
@@ -21,10 +24,21 @@ export function ContextMenu({ x, y, items, onClose }: { x: number; y: number; it
     };
   }, [onClose]);
 
+  // 量出真实尺寸再夹到视口里：不能按固定 280 估高，否则靠下的位置会被顶上去，看着像没跟着鼠标
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const left = Math.max(8, Math.min(x, window.innerWidth - r.width - 8));
+    const top = Math.max(8, Math.min(y, window.innerHeight - r.height - 8));
+    setPos({ left, top });
+  }, [x, y, items.length]);
+
   return (
     <div
+      ref={ref}
       className="ctx-menu"
-      style={{ left: Math.min(x, window.innerWidth - 230), top: Math.min(y, window.innerHeight - 280) }}
+      style={{ left: pos.left, top: pos.top }}
       onMouseDown={(e) => e.stopPropagation()}
     >
       {items.map((it, i) => (
