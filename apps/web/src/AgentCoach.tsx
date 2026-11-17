@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { coachAgent, type AgentCoachDraft } from './api';
+import { Markdown } from './markdown';
 
 interface Turn {
   role: 'user' | 'assistant';
@@ -97,7 +98,7 @@ export default function AgentCoach({ onClose, onUse }: Props) {
               <div key={i} className="coach-msg assistant">
                 <div className="coach-avatar">S</div>
                 <div className="coach-bubble">
-                  {text || '草案已经生成，见下方。'}
+                  {text ? <Markdown text={text} /> : '草案已经生成，见下方。'}
                   {drafts.length > 0 && i === messages.length - 1 && (
                     <div className="coach-draft-tag">✓ 已生成 {drafts.length} 个智能体草案</div>
                   )}

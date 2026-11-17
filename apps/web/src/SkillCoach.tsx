@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { coachSkill, createSkill, type SkillDraft } from './api';
+import { Markdown } from './markdown';
 
 interface Turn {
   role: 'user' | 'assistant';
@@ -204,7 +205,7 @@ export default function SkillCoach({ onClose, onSaved, onToast }: Props) {
               <div key={i} className="coach-msg assistant">
                 <div className="coach-avatar">S</div>
                 <div className="coach-bubble">
-                  {text || '已生成技能草案，见下方。'}
+                  {text ? <Markdown text={text} /> : '已生成技能草案，见下方。'}
                   {skillBlocks(m.content).length > 0 && i === messages.length - 1 && (
                     <div className="coach-draft-tag">✓ 草案已生成，确认后才会写入</div>
                   )}

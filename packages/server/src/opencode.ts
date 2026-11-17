@@ -997,11 +997,34 @@ function waitForm(sessionId: string, formID: string, form: any, timeout = 120000
   });
 }
 
+/** 已送达但还没跑完的「中途插话」次数：run 结束时要继续等它的输出 */
+const pendingSteers = new Map<string, number>();
+
 /**
- * 用户点「停止」/ 客户端断流时，把这条会话还在等审批、等表单的挂起请求一次清掉。
- * 否则生成器会卡在 await 上，__abort 永远读不到，会话一直被占用，
- * 下一条消息就会立刻失败成「这次没生成成功」。
+ * 往正在执行的会话里插一句话（steer）：模型会在下一步看到，
+ * 用来中途纠正方向，不用等这一轮结束。
  */
+export async function steerSession(sessionId: string, text: string): Promise<boolean> {
+  if (!client) return false;
+  try {
+    await client.session.prompt({ sessionID: sessionId, text, delivery: 'steer' } as never);
+    pendingSteers.set(sessionId, (pendingSteers.get(sessionId) ?? 0) + 1);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 还有没有未消费的插话（内部给 runAgent 判断要不要继续等） */
+function takePendingSteer(sessionId: string): boolean {
+  const n = pendingSteers.get(sessionId) ?? 0;
+  if (!n) return false;
+  if (n <= 1) pendingSteers.delete(sessionId);
+  else pendingSteers.set(sessionId, n - 1);
+  return true;
+}
+
+
 export function abortPendingForSession(sessionId: string): void {
   for (const [id, entry] of [...pendingPermissions]) {
     if (entry.sessionId !== sessionId) continue;
@@ -1068,6 +1091,8 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
   const ch = channelOf(sessionId);
 
   let aborted = false;
+  /** 插话后等待续跑输出的事件超时（毫秒）；0 表示用默认 */
+  let steerGrace = 0;
   const onAbort = () => {
     if (aborted) return;
     aborted = true;
@@ -1102,10 +1127,18 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
     }
 
     while (true) {
-      const raw = await ch.next() as {
-        type: string;
-        data?: any;
-      };
+      let raw: { type: string; data?: any };
+      try {
+        raw = await ch.next(steerGrace || undefined) as { type: string; data?: any };
+      } catch (err) {
+        // 插话后等续跑：一段时间没动静就收尾，别把这条 run 一直挂着
+        if (steerGrace) {
+          yield { type: 'done' };
+          return;
+        }
+        throw err;
+      }
+      steerGrace = 0;
 
       if (raw.type === '__abort') {
         yield { type: 'done', interrupted: true };
@@ -1190,6 +1223,11 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
           break;
         }
         case 'session.execution.succeeded':
+          // 中途插过话：这一轮结束后模型可能还会继续跑一轮，先等一会儿
+          if (takePendingSteer(sessionId)) {
+            steerGrace = 10000;
+            break;
+          }
           yield { type: 'done' };
           return;
         case 'session.execution.interrupted':

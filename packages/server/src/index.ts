@@ -85,6 +85,7 @@ import {
   runAgent,
   scanBinaryCandidates,
   shutdown as shutdownOpencode,
+  steerSession,
   syncModelConfig,
 } from './opencode.js';
 import { listDatasets, ragflowStatus, retrieve } from './ragflow.js';
@@ -3541,6 +3542,8 @@ app.post('/api/files/reveal', async (c) => {
 
 /** 每条会话同一时刻只允许一轮在跑：新消息先等上一轮收尾，避免打进"忙碌"的会话里立刻失败 */
 const activeRuns = new Map<string, { abort: () => void; done: Promise<void> }>();
+/** 每个会话当前正在执行的 opencode session：新消息可以中途插话（steer）进去 */
+const activeAgentSessions = new Map<string, string>();
 
 app.post('/api/conversations/:id/messages', async (c) => {
   const id = c.req.param('id');
@@ -3671,6 +3674,13 @@ app.post('/api/conversations/:id/messages', async (c) => {
     runtimeMode !== 'llm' &&
     runtimeMode !== 'mock' &&
     !!defaultModel?.baseUrl;
+
+  // 这一轮还在跑：把新消息直接插进正在执行的会话（steer），不另起一轮
+  const runningSession = activeAgentSessions.get(id);
+  if (runningSession && !suppressRun && !skipUserMessage) {
+    const steered = await steerSession(runningSession, textWithAttachments(text, parts));
+    return c.json({ data: { queued: true, steered, message: userMessage } });
+  }
 
   return streamSSE(c, async (stream) => {
     let aborted = false;
@@ -3847,6 +3857,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
         try {
           const sess = await ensureSession(id, agent);
           usedOpencode = true;
+          // 记下这一轮正在用哪个会话：新消息可以中途插话（steer）进来
+          activeAgentSessions.set(id, sess.sessionId);
           const prompt = buildOpencodePrompt(conv, agent, roundText, userMessage.createdAt, citations);
 
           for await (const ev of runAgent({ sessionId: sess.sessionId, prompt, signal: abortCtl.signal, autoApprove: agent.tools?.shell === true })) {
@@ -4075,6 +4087,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
     }
 
     await stream.writeSSE({ event: 'run.end', data: '{}' });
+    activeAgentSessions.delete(id);
     finishRun();
     if (activeRuns.get(id) === runCtl) activeRuns.delete(id);
   });

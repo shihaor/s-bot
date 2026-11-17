@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Agent, GroupWorkflow } from '@sbot/shared';
 import { coachWorkflow } from './api';
+import { Markdown } from './markdown';
 
 interface Msg {
   role: 'user' | 'assistant';
@@ -71,7 +72,9 @@ export default function WorkflowCoach({
         <div className="wf-coach-list" ref={listRef}>
           {messages.map((m, i) => (
             <div key={i} className={`wf-coach-msg ${m.role}`}>
-              <div className="wf-coach-bubble">{m.content}</div>
+              <div className="wf-coach-bubble">
+                {m.role === 'assistant' ? <Markdown text={m.content} /> : m.content}
+              </div>
             </div>
           ))}
           {busy && <div className="wf-coach-msg assistant"><div className="wf-coach-bubble wf-coach-typing"><span className="dots"><i /><i /><i /></span></div></div>}

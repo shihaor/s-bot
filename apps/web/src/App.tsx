@@ -2021,17 +2021,19 @@ export default function App() {
     const text = (override ?? input).trim();
     const parts = override ? [] : attachments.map((a) => ({ ...a }));
     if ((!text && parts.length === 0) || !activeId) return;
-    // 只拦「同一个会话」重复发；别的会话在跑不影响这里
-    if (runningIdsRef.current.has(activeId)) return;
 
     const runConv = activeId;
+    // 这一轮还在跑：不另起一轮，把消息插进去（steer），让它马上看到
+    const isSteer = runningIdsRef.current.has(runConv);
     if (!override) {
       setInput('');
       // 发完消息后光标留在输入框，方便接着打字
       requestAnimationFrame(() => inputRef.current?.focus());
     }
-    markRunning(runConv, true);
-    setError('');
+    if (!isSteer) {
+      markRunning(runConv, true);
+      setError('');
+    }
     setAttachments([]);
 
     const optimistic: Message = {
@@ -2049,13 +2051,18 @@ export default function App() {
     setMessages((prev) => [...prev, optimistic]);
 
     const controller = new AbortController();
-    abortMap.current.set(runConv, controller);
+    if (!isSteer) abortMap.current.set(runConv, controller);
 
     try {
       await sendMessage(
         activeId,
         { text, parts },
         (e) => {
+          if (e.type === 'queued') {
+            showToast(e.steered ? '已插话，它会马上看到' : '这条没送进去，请稍后重试');
+            void refreshConversations();
+            return;
+          }
           if (e.type === 'message.start') {
             setRetrievingAgent(null);
             setStreamingMap((m) => ({
@@ -2195,9 +2202,11 @@ export default function App() {
     } catch (e) {
       if (!controller.signal.aborted) setError(String(e));
     } finally {
-      markRunning(runConv, false);
-      clearStreaming(runConv);
-      abortMap.current.delete(runConv);
+      if (!isSteer) {
+        markRunning(runConv, false);
+        clearStreaming(runConv);
+        abortMap.current.delete(runConv);
+      }
       refreshConversations();
       // 跑完也把光标放回输入框，方便连续对话
       requestAnimationFrame(() => inputRef.current?.focus());
@@ -2935,7 +2944,7 @@ export default function App() {
                         void handleSend();
                       }
                     }}
-                    placeholder="发消息…  输入 @ 指定某个智能体，文件可直接拖进来"
+                    placeholder={isRunning ? '它正在回复，可以补充或纠正，回车插话…' : '发消息…  输入 @ 指定某个智能体，文件可直接拖进来'}
                     rows={1}
                   />
 
@@ -2944,11 +2953,17 @@ export default function App() {
                     <button className="tool at" title="提及智能体" onClick={insertAtSign}>@</button>
                     <input ref={fileRef} type="file" multiple hidden onChange={(e) => { void handleFiles(e.target.files); e.target.value = ''; }} />
                     <div className="spacer" />
-                    {isRunning ? (
+                    {isRunning && (
                       <button className="send stop" onClick={handleStop} title="停止">■</button>
-                    ) : (
-                      <button className="send" onClick={() => void handleSend()} disabled={!input.trim() && attachments.length === 0} title="发送">↑</button>
                     )}
+                    <button
+                      className="send"
+                      onClick={() => void handleSend()}
+                      disabled={!input.trim() && attachments.length === 0}
+                      title={isRunning ? '插话，发给正在回复的智能体' : '发送'}
+                    >
+                      ↑
+                    </button>
                   </div>
                 </div>
 

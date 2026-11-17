@@ -1059,6 +1059,7 @@ export type ChatEvent =
   | { type: 'task.confirm'; message: Message; task: Task }
   | { type: 'task.bound'; task: Task }
   | { type: 'execution.plan'; message: Message }
+  | { type: 'queued'; queued: true; steered: boolean; message?: Message }
   | { type: 'run.end' };
 
 export async function sendMessage(
@@ -1074,6 +1075,14 @@ export async function sendMessage(
     signal,
   });
   if (!res.ok || !res.body) throw new Error(`send failed: ${res.status}`);
+
+  // 这一轮还在跑：服务端直接返回 JSON（已插进执行队列），不走 SSE
+  const contentType = res.headers.get('content-type') ?? '';
+  if (contentType.includes('application/json')) {
+    const body = (await res.json().catch(() => ({}))) as { data?: { queued?: boolean; steered?: boolean; message?: Message } };
+    onEvent({ type: 'queued', queued: true, steered: !!body.data?.steered, message: body.data?.message });
+    return;
+  }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
