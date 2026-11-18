@@ -246,10 +246,14 @@
         var ORG = null;
         /* 每个工位块对应群组的任务完成比例（null = 没有相关任务） */
         var GPCT = null;
+        /* 每个智能体当前的真实任务（名字 → {title,status}），外壳推过来 */
+        var ATASK = {};
         /* 正在等授权的智能体名字（外壳推过来） */
         var AUTH = null;
         /* 休息开关：开了之后更频繁去休息区做梦 */
         var REST = false;
+        /* 2.5D 流畅模式：楼层只烘一次，人物用 2D 画布绘制（低配默认开） */
+        var SPRITE = LOW, SPR_DIRTY = true, SPR_T = 0;
         /* RAGFlow 是否已对接；没对接资料查询区熄灯，也进不去 */
         var RAG = false;
         var KBAGENTS = null;
@@ -1008,7 +1012,9 @@
             "}"
         ].join("\n");
 
-        var P_MAIN, P_SH, P_FX, P_DOWN, P_BLUR, P_COMP, B = {}, FB = null, SHT = null, SHS = LOW ? 1024 : 2048;
+        var P_MAIN, P_SH, P_FX, P_DOWN, P_BLUR, P_COMP, P_COPY, B = {}, FB = null, SHT = null, SHS = LOW ? 1024 : 2048;
+        /* 低配用：楼层/家具烘焙成一张静态图，每帧只画人 */
+        var SFB = null, SF_KEY = null;
         function U(p, n) { if (!(n in p.u)) p.u[n] = gl.getUniformLocation(p, n); return p.u[n]; }
         function A(p, n) { if (!(n in p.a)) p.a[n] = gl.getAttribLocation(p, n); return p.a[n]; }
         var BOUND = [];
@@ -1027,6 +1033,7 @@
             function prog(vs, fs) { var p = gl.createProgram(); gl.attachShader(p, shd(gl.VERTEX_SHADER, vs)); gl.attachShader(p, shd(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) console.error(gl.getProgramInfoLog(p)); p.u = {}; p.a = {}; return p; }
             P_MAIN = prog(VS_MAIN, FS_MAIN); P_SH = prog(VS_SH, FS_SH); P_FX = prog(VS_FX, FS_FX);
             P_DOWN = prog(VS_Q, FS_DOWN); P_BLUR = prog(VS_Q, FS_BLUR); P_COMP = prog(VS_Q, FS_COMP);
+        P_COPY = prog(VS_Q, "precision mediump float; varying vec2 vUV; uniform sampler2D uT; void main(){ gl_FragColor = texture2D(uT, vUV); }");
             UINT = GL2 || !!gl.getExtension("OES_element_index_uint");
             GEO_ALL.forEach(function (g) { if (g.n > 65535 && !UINT) { g.I = g.I.slice(0, 0); } upload(g); });
             B.fxa = gl.createBuffer(); B.fxb = gl.createBuffer();
@@ -1137,9 +1144,9 @@
             }
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, g.ib);
         }
-        function drawList(P, full, castOnly) {
+        function drawList(P, full, castOnly, mode) {
             var i, lastG = null;
-            for (i = 0; i < DRAWS.length; i++) {
+            for (i = 0; mode !== "dyn" && i < DRAWS.length; i++) {
                 var d = DRAWS[i], g = d.g;
                 if (castOnly && !d.cast) continue;
                 if (g !== lastG) { unbindAll(); bindGeo(P, g, full); lastG = g; }
@@ -1149,7 +1156,7 @@
             }
             unbindAll();
             /* 工单箱批量 */
-            if (BAT.ni) {
+            if (BAT.ni && mode !== "static") {
                 gl.bindBuffer(gl.ARRAY_BUFFER, B.bv);
                 if (BAT.dirty) { gl.bufferData(gl.ARRAY_BUFFER, BAT.v.subarray(0, BAT.nv * 11), gl.STREAM_DRAW); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, B.bi); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, BAT.i.subarray(0, BAT.ni), gl.STREAM_DRAW); BAT.dirty = false; gl.bindBuffer(gl.ARRAY_BUFFER, B.bv); }
                 var l = A(P, "aP"); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, 3, gl.FLOAT, false, 44, 0); BOUND.push(l);
@@ -1172,6 +1179,49 @@
             attr(P, "aP", X === FXA ? B.fxa : B.fxb, 3, 40, 0); attr(P, "aUV", X === FXA ? B.fxa : B.fxb, 2, 40, 12); attr(P, "aC", X === FXA ? B.fxa : B.fxb, 4, 40, 20); attr(P, "aK", X === FXA ? B.fxa : B.fxb, 1, 40, 36);
             gl.drawArrays(gl.TRIANGLES, 0, X.n); unbindAll();
         }
+        function ensureSFB() {
+            var w = glc.width, h = glc.height;
+            if (!w || !h) return null;
+            if (SFB && SFB.w === w && SFB.h === h) return SFB;
+            try {
+                if (SFB) { gl.deleteTexture(SFB.t); gl.deleteFramebuffer(SFB.f); if (SFB.rb) gl.deleteRenderbuffer(SFB.rb); }
+                var tex = gl.createTexture();
+                gl.bindTexture(gl.TEXTURE_2D, tex);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                var rb = gl.createRenderbuffer();
+                gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
+                gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, w, h);
+                var fb = gl.createFramebuffer();
+                gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+                gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
+                var ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+                if (!ok) { gl.deleteFramebuffer(fb); gl.deleteTexture(tex); gl.deleteRenderbuffer(rb); SFB = null; return null; }
+                SFB = { f: fb, t: tex, rb: rb, w: w, h: h };
+                SF_KEY = null;
+                return SFB;
+            } catch (e) { SFB = null; return null; }
+        }
+        function setMainUniforms(t) {
+            var P = P_MAIN; gl.useProgram(P);
+            gl.uniformMatrix4fv(U(P, "uVP"), false, VP);
+            gl.uniform3fv(U(P, "uCam"), CAMP); gl.uniform1f(U(P, "uTime"), t);
+            gl.uniform1f(U(P, "uNight"), E.night); gl.uniform1f(U(P, "uWin"), E.win); gl.uniform1f(U(P, "uExp"), E.exp);
+            gl.uniform3fv(U(P, "uSunDir"), E.sunDir); gl.uniform3fv(U(P, "uSunC"), E.sunC); gl.uniform3fv(U(P, "uSkyC"), E.skyC); gl.uniform3fv(U(P, "uGndC"), E.gndC);
+            gl.uniform3fv(U(P, "uFogC"), E.fogL); gl.uniform3fv(U(P, "uSkyTop"), E.top); gl.uniform3fv(U(P, "uHorz"), E.hor);
+            gl.uniform3fv(U(P, "uBgT"), E.bgT); gl.uniform3fv(U(P, "uBgB"), E.bgB); gl.uniform2f(U(P, "uRes"), glc.width, glc.height);
+            gl.uniform1f(U(P, "uFogD"), E.fogD); gl.uniform1f(U(P, "uCloud"), E.cloud || 0); gl.uniform1f(U(P, "uFogS"), E.fogS);
+            gl.uniform1f(U(P, "uShOn"), E.shOn && SHT.ok ? 1 : 0); gl.uniform1f(U(P, "uShB"), E.shB); gl.uniform1f(U(P, "uShN"), E.shN); gl.uniform2f(U(P, "uShPx"), 1 / SHS, 1 / SHS);
+            if (SMAT) gl.uniformMatrix4fv(U(P, "uSM"), false, SMAT);
+            gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, SHT.t); gl.uniform1i(U(P, "uShadow"), 1); gl.activeTexture(gl.TEXTURE0);
+            gl.uniform3fv(U(P, "uLP[0]"), LPA); gl.uniform3fv(U(P, "uLC[0]"), LCA);
+            return P;
+        }
         function drawAll(t) {
             var post = ensureFB(), P, i;
             /* 1. 阴影 */
@@ -1188,23 +1238,43 @@
             gl.bindFramebuffer(gl.FRAMEBUFFER, tgt); gl.viewport(0, 0, glc.width, glc.height);
             gl.clearColor(E.bgB[0], E.bgB[1], E.bgB[2], 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
             gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true); gl.disable(gl.BLEND); gl.disable(gl.CULL_FACE);
-            P = P_MAIN; gl.useProgram(P);
-            gl.uniformMatrix4fv(U(P, "uVP"), false, VP);
-            gl.uniform3fv(U(P, "uCam"), CAMP); gl.uniform1f(U(P, "uTime"), t);
-            gl.uniform1f(U(P, "uNight"), E.night); gl.uniform1f(U(P, "uWin"), E.win); gl.uniform1f(U(P, "uExp"), E.exp);
-            gl.uniform3fv(U(P, "uSunDir"), E.sunDir); gl.uniform3fv(U(P, "uSunC"), E.sunC); gl.uniform3fv(U(P, "uSkyC"), E.skyC); gl.uniform3fv(U(P, "uGndC"), E.gndC);
-            gl.uniform3fv(U(P, "uFogC"), E.fogL); gl.uniform3fv(U(P, "uSkyTop"), E.top); gl.uniform3fv(U(P, "uHorz"), E.hor);
-            gl.uniform3fv(U(P, "uBgT"), E.bgT); gl.uniform3fv(U(P, "uBgB"), E.bgB); gl.uniform2f(U(P, "uRes"), glc.width, glc.height);
-            gl.uniform1f(U(P, "uFogD"), E.fogD); gl.uniform1f(U(P, "uCloud"), E.cloud || 0); gl.uniform1f(U(P, "uFogS"), E.fogS);
-            gl.uniform1f(U(P, "uShOn"), E.shOn && SHT.ok ? 1 : 0); gl.uniform1f(U(P, "uShB"), E.shB); gl.uniform1f(U(P, "uShN"), E.shN); gl.uniform2f(U(P, "uShPx"), 1 / SHS, 1 / SHS);
-            if (SMAT) gl.uniformMatrix4fv(U(P, "uSM"), false, SMAT);
-            gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, SHT.t); gl.uniform1i(U(P, "uShadow"), 1); gl.activeTexture(gl.TEXTURE0);
-            gl.uniform3fv(U(P, "uLP[0]"), LPA); gl.uniform3fv(U(P, "uLC[0]"), LCA);
-            /* 天空先画、不写深度 */
-            gl.depthMask(false);
-            bindGeo(P, SKY, true); gl.uniformMatrix4fv(U(P, "uModel"), false, m4T(CAMP[0], 0, CAMP[2])); gl.drawElements(gl.TRIANGLES, SKY.cnt, gl.UNSIGNED_SHORT, 0); unbindAll();
-            gl.depthMask(true);
-            drawList(P, true, false);
+            /* ---- 低配：先把「楼层 + 家具」烘进静态层，每帧只重画人物 ---- */
+            var cacheOn = false;
+            /* 高配也走静态层（省掉每帧提交整栋楼），只有显式关掉时才逐帧重画 */
+            if (!window.__labNoCache) {
+                var sf = ensureSFB();
+                if (sf) {
+                    var skey = VP.join(",") + "|" + E.night.toFixed(2) + "|" + E.sunC[0].toFixed(2) + "|" + E.lamp.toFixed(2);
+                    if (skey !== SF_KEY) {
+                        gl.bindFramebuffer(gl.FRAMEBUFFER, sf.f); gl.viewport(0, 0, sf.w, sf.h);
+                        gl.clearColor(E.bgB[0], E.bgB[1], E.bgB[2], 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                        gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true); gl.disable(gl.BLEND); gl.disable(gl.CULL_FACE);
+                        P = setMainUniforms(t);
+                        gl.depthMask(false);
+                        bindGeo(P, SKY, true); gl.uniformMatrix4fv(U(P, "uModel"), false, m4T(CAMP[0], 0, CAMP[2])); gl.drawElements(gl.TRIANGLES, SKY.cnt, gl.UNSIGNED_SHORT, 0); unbindAll();
+                        gl.depthMask(true);
+                        drawList(P, true, false, "static");
+                        SF_KEY = skey;
+                    }
+                    cacheOn = true;
+                    gl.bindFramebuffer(gl.FRAMEBUFFER, tgt); gl.viewport(0, 0, glc.width, glc.height);
+                }
+            }
+            P = setMainUniforms(t);
+            if (cacheOn) {
+                /* 贴静态层（不写深度），再画人物 */
+                gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+                gl.useProgram(P_COPY); quadDraw(P_COPY, SFB.t);
+                gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(true);
+                P = setMainUniforms(t);
+                drawList(P, true, false, "dyn");
+            } else {
+                /* 天空先画、不写深度 */
+                gl.depthMask(false);
+                bindGeo(P, SKY, true); gl.uniformMatrix4fv(U(P, "uModel"), false, m4T(CAMP[0], 0, CAMP[2])); gl.drawElements(gl.TRIANGLES, SKY.cnt, gl.UNSIGNED_SHORT, 0); unbindAll();
+                gl.depthMask(true);
+                drawList(P, true, false);
+            }
             /* 特效 */
             gl.enable(gl.BLEND); gl.depthMask(false);
             P = P_FX; gl.useProgram(P); gl.uniformMatrix4fv(U(P, "uVP"), false, VP);
@@ -1253,7 +1323,7 @@
    ===================================================================== */
         var L = { w: 1, h: 1, bs: 0.5, frX: 0, frY: 0, dpr: 1, dpr2: 1, narrow: false, ok: false, rx0: 0, rx1: 1, ry0: 0, ry1: 1 };
         var fx = fxc.getContext("2d");
-        var wasNarrow = null, Q = { sh: !LOW, ms: !LOW, bloom: !LOW, dpr: LOW ? 0.8 : 0, auto: true };
+        var wasNarrow = null, Q = { sh: !LOW, ms: !LOW, bloom: !LOW, dpr: LOW ? 0.66 : 0, auto: true };
         /* 外壳（S-BOT 实验室）可以调整 3D 画面的留白：顶部导航 / 左右面板 / 底部一条 */
         var HUD = { l: 330, r: 330, t: 70, b: 236, ratio: 1.05, minW: 760, zoom: 1 };
         var DOCK_FULL = 268, DOCK_MIN = false, DOCK_INIT = false;
@@ -1278,7 +1348,7 @@
             board.style.setProperty("--s", L.bs);
             L.frX = fr.left - appR.left; L.frY = fr.top - appR.top;
             var d0 = Math.min(window.devicePixelRatio || 1, 1.5);
-            var budget = LOW ? 1.5e6 : 3.4e6;
+            var budget = LOW ? 1.0e6 : 3.4e6;
             L.dpr = Q.dpr || Math.max(0.55, Math.min(d0, Math.sqrt(budget / Math.max(1, L.w * L.h))));
             L.dpr2 = Math.min(window.devicePixelRatio || 1, 2);
             glc.width = Math.round(L.w * L.dpr); glc.height = Math.round(L.h * L.dpr);
@@ -1288,6 +1358,7 @@
             else { L.rx0 = 0; L.rx1 = L.w; L.ry0 = 70; L.ry1 = L.h - 170; }
             LABELS.concat(RLAB, [CHL, BOSS_LB]).forEach(function (Lb) { Lb.w = Lb.el.offsetWidth || 180; Lb.h = Lb.el.offsetHeight || 56; });
             L.ok = true;
+            SPR_DIRTY = true;
             if (wasNarrow !== L.narrow) { wasNarrow = L.narrow; snapCam(); }
         }
 
@@ -1473,9 +1544,9 @@
         function mkTag(p) {
             var d = document.createElement("div");
             d.className = "tg"; d.setAttribute("data-pid", p.id);
-            d.innerHTML = '<div class="t1"><span class="bd"></span><b></b><em>—</em></div><div class="t2">—</div><div class="bar"><i></i></div>';
+            d.innerHTML = '<div class="t1"><span class="bd"></span><b></b><em>—</em></div><div class="t2">—</div>';
             $("tags").appendChild(d);
-            p.tag = { el: d, bd: d.querySelector(".bd"), nm: d.querySelector(".t1 b"), st: d.querySelector(".t1 em"), t2: d.querySelector(".t2"), bar: d.querySelector(".bar i"), vis: false, tf: "", w: 120, h: 50 };
+            p.tag = { el: d, bd: d.querySelector(".bd"), nm: d.querySelector(".t1 b"), st: d.querySelector(".t1 em"), t2: d.querySelector(".t2"), vis: false, tf: "", w: 120, h: 50 };
             tagSync(p);
         }
         function tagSync(p) { if (p.nt) setTxt(p.nt.el, p.n); if (!p.tag) return; p.tag.el.setAttribute("style", "--ring:" + (p.ai ? "var(--ai)" : "var(--hu)")); setHTML(p.tag.bd, badge(p)); setTxt(p.tag.nm, p.n); }
@@ -2060,6 +2131,7 @@
         }
         function tourStep(dt) { TOUR.t -= dt; if (TOUR.t <= 0) tourNext(); }
         function goView(k, i, fromTour) {
+            SPR_DIRTY = true;
             var pk = V.k, same = pk === k && (k === "ov" || (k === "dp" && V.d === i) || (k === "pj" && V.P === i) || (k === "ps" && V.p === i));
             if (!fromTour && view === 1) view = 0;
             if (same) { syncButtons(); return; }
@@ -2302,7 +2374,17 @@
                 if (want.indexOf(p) < 0) { hideLabel(T0); return; }
                 var q = proj(headPt(p, 0.42));
                 if (!q || !inRegion(q, 20)) { hideLabel(T0); return; }
-                rects.push({ T: T0, p: p, x: bx(q) - T0.w / 2, y: Math.max(TOPY, by(q) - T0.h), ax: q[0], ay: q[1] });
+                /* 状态跟实际状态同步 */
+                var stt = pStatus(p), rt = realTask(p);
+                var stText = rt ? (rt.status === "done" ? "已完成" : rt.status === "awaiting" ? "待审核" : "进行中") : stt[0];
+                setTxt(T0.st, stText); T0.st.style.color = rt ? (rt.status === "awaiting" ? "var(--warn)" : rt.status === "done" ? "var(--ok)" : "var(--fg-2)") : STC[stt[1]];
+                setHTML(T0.t2, rt ? esc(rt.title) : (p.isChief ? "拆解 · 派单 · 终审" : (p.ai ? "暂无任务" : "督办本部门")));
+                if (!T0.w) T0.w = T0.el.offsetWidth || 120;
+                T0.h = T0.el.offsetHeight || 50;
+                /* 名字标签在名字上方，简介卡再往上放一层，互不重合 */
+                var nq = proj(headPt(p, 0.5));
+                var nameTop = nq ? by(nq) - (p.nt && p.nt.h ? p.nt.h : 22) : by(q);
+                rects.push({ T: T0, p: p, x: bx(q) - T0.w / 2, y: Math.max(TOPY, nameTop - T0.h - 8), ax: q[0], ay: q[1] });
             });
             rects.sort(function (a, b) { return b.y - a.y; });
             var placed = [];
@@ -2588,10 +2670,10 @@
             /* 3D 名牌 */
             PEOPLE.forEach(function (p) {
                 var T0 = p.tag; if (!T0.vis && !(V.k === "dp" || V.k === "pj" || V.k === "ps")) return;
-                var s = pStatus(p), it = pTask(p);
-                setTxt(T0.st, s[0]); T0.st.style.color = STC[s[1]];
-                setHTML(T0.t2, it ? taskHTML(it) : (p.isChief ? "拆解 · 派单 · 终审" : (p.ai ? "暂无任务" : "督办本部门")));
-                setW(T0.bar, p.cur ? p.cur.prog : 0);
+                var s = pStatus(p), rt2 = realTask(p);
+                setTxt(T0.st, rt2 ? (rt2.status === "done" ? "已完成" : rt2.status === "awaiting" ? "待审核" : "进行中") : s[0]);
+                T0.st.style.color = rt2 ? (rt2.status === "awaiting" ? "var(--warn)" : rt2.status === "done" ? "var(--ok)" : "var(--fg-2)") : STC[s[1]];
+                setHTML(T0.t2, rt2 ? esc(rt2.title) : (p.isChief ? "拆解 · 派单 · 终审" : (p.ai ? "暂无任务" : "督办本部门")));
                 var w = T0.el.offsetWidth; if (w) { T0.w = w; T0.h = T0.el.offsetHeight; }
             });
             if (V.k === "ov") {
@@ -2604,7 +2686,8 @@
                 MTR.forEach(function (R) {
                     var p = R.p, s = pStatus(p), it = pTask(p), off = it === p.q[0] ? 1 : 0;
                     setTxt(R.st, s[0]); R.st.style.color = STC[s[1]];
-                    setHTML(R.tk, it ? taskHTML(it) + (p.q.length > off ? ' <em style="font-style:normal;color:var(--fg-3)">+' + (p.q.length - off) + " 排队</em>" : "") : "—");
+                    var rtk = realTask(p);
+                setHTML(R.tk, rtk ? esc(rtk.title) + (p.q.length > off ? ' <em style="font-style:normal;color:var(--fg-3)">+' + (p.q.length - off) + " 排队</em>" : "") : "—");
                     setW(R.bar, p.cur ? p.cur.prog : 0);
                     setTxt(R.d, p.ai ? String(p.doneN) : "审 " + p.revN); setTxt(R.t, p.ai ? fmtK(p.tok) : "—");
                 });
@@ -2665,11 +2748,12 @@
             setHTML(PF.kv, "<div><span>" + (p.ai ? "今日完成" : "今日审核") + "</span><b>" + (p.ai ? p.doneN : p.revN) + "</b></div><div><span>" + (p.ai ? "审核" : "退回") + "</span><b>" + (p.ai ? p.revN : p.rejN) + "</b></div><div><span>Token</span><b>" + (p.ai ? fmtK(p.tok) : "—") + "</b></div>");
             if (PF.stc !== STC[s[1]]) { PF.stc = STC[s[1]]; PF.st.style.color = PF.stc; }
             setTxt(PF.st, "● " + s[0] + (p.task === "meet" && MT ? " · " + MT.title : ""));
-            setHTML(PF.now, it ? taskHTML(it) : (p.isChief ? "拆解任务 · 派单 · 终审" : "暂无任务"));
+            var pfr = realTask(p);
+            setHTML(PF.now, pfr ? esc(pfr.title) : (p.isChief ? "拆解任务 · 派单 · 终审" : "暂无任务"));
             var bc = it ? it.P.c : "var(--hi)"; if (PF.bc !== bc) { PF.bc = bc; PF.bar.style.setProperty("--c", bc); }
             setW(PF.bi, p.cur ? p.cur.prog : 0);
             var qs = p.q.slice(it === p.q[0] ? 1 : 0, 2);
-            setHTML(PF.q, (qs.length ? qs.map(function (x) { return "<div><span>排队</span><span>" + taskHTML(x) + "</span></div>"; }).join("") : "<div><span>排队</span><span>无</span></div>") + (p.inb ? "<div><span>在途</span><span>" + p.inb + " 份文件正在送来</span></div>" : ""));
+            setHTML(PF.q, '<div><span>状态</span><span>' + (pfr ? (pfr.status === "done" ? "已完成" : pfr.status === "awaiting" ? "待审核" : "进行中") : "空闲") + "</span></div>");
             setHTML(PF.hi, p.hist.length ? p.hist.slice(0, 4).map(function (x) { return "<div><span>" + x.t + "</span><span>" + esc(x.s) + "</span></div>"; }).join("") : "<div><span>—</span><span>暂无记录</span></div>");
         }
         function todSync() {
@@ -2876,8 +2960,10 @@
         /* =====================================================================
    26. 渲染循环
    ===================================================================== */
-        var last = 0, uiAcc = 0, fpsAcc = 0, fpsN = 0, todAcc = 1, FC = 0;
-        var FRAME_MIN = LOW ? 1000 / 30 : 0;
+        var last = 0, uiAcc = 0, fpsAcc = 0, fpsN = 0, todAcc = 1, FC = 0, hudAcc = 0;
+        var HUD_EVERY = LOW ? 0.1 : 0;
+        var UI_EVERY = LOW ? 1.0 : 0.2;
+        var FRAME_MIN = LOW ? 1000 / 20 : 0;
         var GOV = { t: 0, acc: 0, n: 0, bad: 0, lvl: 0, run: 0 };
         function govern(raw) {
             if (!Q.auto) return;
@@ -2903,10 +2989,20 @@
             last = ts; now += dt; FC++;
             if (raw < 1) govern(raw);
             step(dt);
-            if (gl) { buildScene(now, dt); shadowSetup(); drawAll(now); }
-            placeHud();
+            if (gl) {
+                if (SPRITE) {
+                    /* 静态层按需重烘（镜头/昼夜/尺寸变化），其余帧几乎不碰 GPU */
+                    if (SPR_DIRTY || now - SPR_T > 4) { SPR_DIRTY = false; SPR_T = now; buildScene(now, dt); shadowSetup(); drawAll(now); }
+                    drawSprites();
+                } else {
+                    buildScene(now, dt); shadowSetup(); drawAll(now);
+                }
+            }
+            /* 低配：名字/气泡定位降到 10Hz，面板 1Hz，省下大量 DOM 重排 */
+            hudAcc += dt;
+            if (!HUD_EVERY || hudAcc >= HUD_EVERY) { hudAcc = 0; placeHud(); }
             uiAcc += dt; fpsAcc += dt; fpsN++; todAcc += dt;
-            if (uiAcc > 0.2) { uiAcc = 0; updatePanels(); }
+            if (uiAcc > UI_EVERY) { uiAcc = 0; updatePanels(); }
             if (fpsAcc > 0.5) { setTxt($("sFps"), String(Math.round(fpsN / fpsAcc))); fpsAcc = 0; fpsN = 0; }
             if (todAcc > 1) { todAcc = 0; todSync(); }
         }
@@ -2959,13 +3055,10 @@
         function personAct(p) {
             if (p.isChief) { newTaskAct(); return; }
             if (AUTH && p.n === AUTH) { openChatFor(p); return; }
-            var line;
-            if (p.cur) {
-                var pc2 = Math.round(clamp(p.cur.prog || 0, 0, 1) * 100);
-                line = stageNm(p.cur) + " · " + pc2 + "%" + (p.q.length ? " · 还有 " + p.q.length + " 项…" : "");
-            } else if (p.q.length) line = "排队 " + p.q.length + " 项…";
+            var line, rt = realTask(p);
+            if (rt) line = (rt.status === "done" ? "已完成：" : rt.status === "awaiting" ? "待审核：" : "在做：") + rt.title;
             else line = pStatus(p)[0];
-            sayClick(p, (p.cur ? "在做：" : "") + line, function () { openChatFor(p); }, 10);
+            sayClick(p, line, function () { openChatFor(p); }, 10);
         }
         function openChatFor(p) {
             if (typeof host.__openChat === "function") host.__openChat(p.n);
@@ -3020,6 +3113,13 @@
         }
         /* 新增任务：外壳（S-BOT）接管时用它自己的新建任务弹窗 */
         /* 底部一条收起 / 展开：收起后 3D 视口自动往下铺开 */
+        function toggleSprite() {
+            SPRITE = !SPRITE;
+            SPR_DIRTY = true;
+            var b = $("spriteBtn");
+            if (b) b.classList.toggle("on", SPRITE);
+            if (!SPRITE) { var c2 = $("p2d"); if (c2) c2.getContext("2d").clearRect(0, 0, c2.width, c2.height); }
+        }
         function toggleRest() {
             REST = !REST;
             var b = $("restBtn");
@@ -3042,6 +3142,7 @@
             else if (name === "task") newTaskAct();
             else if (name === "dock") toggleDock();
             else if (name === "rest") toggleRest();
+            else if (name === "sprite") toggleSprite();
             else if (name === "hr") openHR(V.k === "dp" ? V.d : undefined);
             syncButtons();
         }
@@ -3103,6 +3204,7 @@
             log(hrh.n, pcol(hrh), "人员日报 · 在岗 " + living().length + " 人（Agent " + nA + " · 真人督办 " + (living().length - nA) + "）", "", { d: [HRD], p: [hrh.id] });
             log(CHIEF.n, CHIEF_C, "HQ 10 自动运行 · " + living().length + " 名成员在线 · 点我可以派新任务", "", { d: [], p: [CHIEF.id] });
         })();
+        if (SPRITE) { var sb0 = $("spriteBtn"); if (sb0) sb0.classList.add("on"); }
         setTxt($("clock"), hms()); var clockT = setInterval(function () { if (!host.hidden) setTxt($("clock"), hms()); }, 1000);
         buildStaff(); buildProjRows(); buildBottom(); syncButtons();
         envUpdate(); todSync();
@@ -3127,6 +3229,58 @@
         host.__q = function (o) { if (o.auto !== undefined) Q.auto = o.auto; if (o.sh !== undefined) Q.sh = o.sh; if (o.ms !== undefined) Q.ms = o.ms; if (o.dpr) { Q.dpr = o.dpr; layout(); } return Q; };
         host.__E = function (k, v) { E[k] = v; return E[k]; };
         host.__fc = function () { return FC; };
+        /* 2.5D：人物用 2D 画布画，不再走 WebGL */
+        function drawSprites() {
+            var c2 = $("p2d"); if (!c2) return;
+            var w = glc.width, h = glc.height;
+            if (c2.width !== w || c2.height !== h) { c2.width = w; c2.height = h; }
+            var g = c2.getContext("2d"); if (!g) return;
+            g.setTransform(1, 0, 0, 1, 0, 0);
+            g.clearRect(0, 0, w, h);
+            if (!SPRITE) return;
+            var SC2 = L.dpr || 1;
+            for (var i = 0; i < PEOPLE.length; i++) {
+                var p = PEOPLE[i];
+                if (p.gone) continue;
+                var feet0 = proj([p.x, groundY(p.x, p.z) + 0.02, p.z]);
+                var head0 = proj(headPt(p, 0.42));
+                if (!feet0 || !head0) continue;
+                var feet = [feet0[0] * SC2, feet0[1] * SC2], head = [head0[0] * SC2, head0[1] * SC2];
+                var k = Math.max(8, Math.abs(feet[1] - head[1]));
+                var cx = head[0], cy = head[1];
+                /* 影子 */
+                g.beginPath(); g.ellipse(feet[0], feet[1], k * 0.34, k * 0.14, 0, 0, Math.PI * 2);
+                g.fillStyle = "rgba(0,0,0,.22)"; g.fill();
+                /* 身体 */
+                g.beginPath();
+                g.roundRect ? g.roundRect(cx - k * 0.24, cy + k * 0.16, k * 0.48, k * 0.62, k * 0.16) : g.rect(cx - k * 0.24, cy + k * 0.16, k * 0.48, k * 0.62);
+                g.fillStyle = p.sc || "#cfc7b8"; g.fill();
+                /* 头 */
+                g.beginPath(); g.arc(cx, cy, k * 0.28, 0, Math.PI * 2);
+                g.fillStyle = p.skin || "#f3cfb0"; g.fill();
+                g.lineWidth = Math.max(1, k * 0.05);
+                g.strokeStyle = p.ai ? "#6fdcff" : "#ffd060"; g.stroke();
+                /* 眼睛/朝向：一个小点，表示面朝方向 */
+                g.beginPath();
+                g.arc(cx + Math.sin(p.yaw) * k * 0.12, cy + Math.cos(p.yaw) * k * 0.1, k * 0.06, 0, Math.PI * 2);
+                g.fillStyle = "rgba(30,24,18,.75)"; g.fill();
+            }
+        }
+        host.__readFB = function (x, y) {
+            var px = new Uint8Array(4);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, FB && FB.a ? FB.a.f : null);
+            gl.readPixels(x | 0, y | 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            return [px[0], px[1], px[2], px[3]];
+        };
+        /* 调试：直接把静态层贴到屏幕上，看烘焙结果 */
+        host.__sfb = function () {
+            if (!SFB) return "none";
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, glc.width, glc.height);
+            gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+            gl.useProgram(P_COPY); quadDraw(P_COPY, SFB.t);
+            return [SFB.w, SFB.h];
+        };
         host.__proj = function (pts) { snapCam(); camUpdate(0); return { L: [L.rx0, L.rx1, L.ry0, L.ry1, L.w, L.h], p: pts.map(function (p) { var q = proj(p); return q ? [Math.round(q[0]), Math.round(q[1])] : null; }) }; };
         host.__screen = function (n) { camUpdate(0); var p = byName(n); var q = p ? proj(headPt(p, 0)) : null; return q ? [Math.round(q[0]), Math.round(q[1])] : null; };
         host.__task = function (name, tpl, n, urgent, chain) { return createTask(name, tpl, TPL[tpl].S || customStages(chain || [3, 6, -1]), n, !!urgent).id; };
@@ -3174,6 +3328,13 @@
         host.__tasks = function (items) { TASKS = (items instanceof Array) ? items : []; projDirty = true; return TASKS.length; };
         host.__org = function (o) { ORG = o || null; return !!ORG; };
         host.__groupPct = function (list) { GPCT = (list instanceof Array) ? list : null; return GPCT ? GPCT.length : 0; };
+        host.__agentTasks = function (map) { ATASK = (map && typeof map === "object") ? map : {}; };
+        /* 真实任务 → 卡片文案；没有就返回 null */
+        function realTask(p) {
+            var t = ATASK[p.n];
+            if (!t || !t.title) return null;
+            return t;
+        }
         host.__auth = function (name) { AUTH = name ? String(name) : null; };
         /* 外壳注入：人员管理里的「新增成员」走对话式创建 */
         host.__newAgent = null;

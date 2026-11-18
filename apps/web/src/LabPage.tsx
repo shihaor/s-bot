@@ -43,6 +43,8 @@ type LabHost = HTMLDivElement & {
   __openSettings?: (() => void) | null;
   /** 人员管理里的「新增成员」交给外壳（对话式创建） */
   __newAgent?: (() => void) | null;
+  /** 真实任务映射 */
+  __agentTasks?: (map: Record<string, { title: string; status: string }>) => void;
   /** 做梦：按最近记忆生成梦境（name, role, 回调） */
   __dreamAsk?: ((name: string, role: string, cb: (lines: string[]) => void) => void) | null;
 };
@@ -153,6 +155,8 @@ type Props = {
   authAgent?: string | null;
   /** 人员管理里新增成员 → 交给 S-BOT 的对话式创建 */
   onNewAgent?: () => void;
+  /** 每个智能体当前的真实任务（名字 → {title,status}） */
+  agentTasks?: Record<string, { title: string; status: string }>;
   /** RAGFlow 是否已对接（没对接资料区熄灯） */
   ragflowReady?: boolean;
   /** 挂了知识库的智能体名字（只有它们能进资料区） */
@@ -174,6 +178,7 @@ export default function LabPage({
   org,
   authAgent,
   onNewAgent,
+  agentTasks,
   ragflowReady,
   kbAgentNames,
   onOpenSettings,
@@ -269,6 +274,15 @@ export default function LabPage({
       host.__tasks?.(tasks ?? []);
     } catch { /* 推不进去不影响场景 */ }
   }, [tasks]);
+
+  // 人物卡片上的任务 = S-BOT 的真实任务
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    try {
+      host.__agentTasks?.(agentTasks ?? {});
+    } catch { /* 推不进去不影响场景 */ }
+  }, [agentTasks]);
 
   // RAGFlow 对接状态 + 有知识库的智能体 + 打开设置
   useEffect(() => {

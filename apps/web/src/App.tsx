@@ -2348,6 +2348,19 @@ export default function App() {
     [tasks, agents],
   );
 
+  /** 实验室：智能体 → 真实任务（同一人有多条时取未完成的那条） */
+  const labAgentTasks = useMemo(() => {
+    const map: Record<string, { title: string; status: string }> = {};
+    for (const t of tasks) {
+      if (!t.assigneeId) continue;
+      const ag = agents.find((x) => x.id === t.assigneeId);
+      if (!ag) continue;
+      const prev = map[ag.name];
+      if (!prev || (prev.status === 'done' && t.status !== 'done')) map[ag.name] = { title: t.title, status: t.status };
+    }
+    return map;
+  }, [tasks, agents]);
+
   /** 实验室左上「智能组织」：真实任务 / 成员统计 */
   const labOrg = useMemo(() => {
     const total = tasks.length;
@@ -2768,6 +2781,7 @@ export default function App() {
                 org={labOrg}
                 authAgent={permissionReq ? (agents.find((x) => x.id === permissionReq.agentId)?.name ?? null) : null}
                 onNewAgent={() => setLabCoachOpen(true)}
+                agentTasks={labAgentTasks}
                 ragflowReady={kbs.length > 0}
                 kbAgentNames={agents.filter((x) => (x.kbIds ?? []).length > 0).map((x) => x.name)}
                 onOpenSettings={() => setView('settings')}

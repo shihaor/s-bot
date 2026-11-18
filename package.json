@@ -1,7 +1,7 @@
 {
   "name": "s-bot",
   "private": true,
-  "version": "0.2.23",
+  "version": "0.2.24",
   "license": "AGPL-3.0",
   "type": "module",
   "workspaces": [

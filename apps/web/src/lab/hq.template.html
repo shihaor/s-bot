@@ -21,6 +21,7 @@
         .gl.drag{cursor:default}
         .gl.pick{cursor:pointer}
         .fx{position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none}
+        .p2d{position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none}
         .vig{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 78% 82% at 50% 50%,transparent 62%,rgba(0,0,0,.38) 100%)}
         .nr{position:absolute;inset:0;pointer-events:none}
         .fit{position:absolute;inset:0;padding-left:env(safe-area-inset-left,0px);padding-right:env(safe-area-inset-right,0px);pointer-events:none}
@@ -390,6 +391,7 @@
     <div class="app" id="app">
         <canvas class="gl" id="gl" aria-label="智能总部：一层开放式办公层（固定俯视），左上资料查询区、左下休息区、右上任务分配区、其余是工位区。点 Chief 新增任务，点人事负责人管理成员，点工位块或人物看进度，Esc 返回"></canvas>
         <canvas class="fx" id="fx" aria-hidden="true"></canvas>
+        <canvas class="p2d" id="p2d" aria-hidden="true"></canvas>
         <div class="vig" aria-hidden="true"></div>
         <div class="nr" id="nr">
             <div class="fit"><div class="fit-in" id="fitIn">
@@ -416,6 +418,9 @@
                         <button class="tb" type="button" data-act="home">← 返回全局</button>
                         <button class="tb sw" type="button" data-act="rest" id="restBtn" title="休息开关：开启后休息区开灯，智能体可以去休息区做梦（加强记忆整理）；关闭后休息区熄灯、不做梦">
                             <span class="sw-track"><span class="sw-knob"></span></span><em>休息</em>
+                        </button>
+                        <button class="tb sw" type="button" data-act="sprite" id="spriteBtn" title="2.5D 流畅模式：楼层预烘焙成图，人物用 2D 绘制，低配机器基本不卡；关掉回到 3D 画面">
+                            <span class="sw-track"><span class="sw-knob"></span></span><em>2.5D</em>
                         </button>
                     </div>
                     <div class="bgl">
