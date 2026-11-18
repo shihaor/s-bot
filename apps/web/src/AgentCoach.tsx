@@ -10,6 +10,8 @@ interface Turn {
 interface Props {
   onClose: () => void;
   onUse: (drafts: AgentCoachDraft[]) => void;
+  /** 带着任务上下文进来：自动发出第一句，教练直接开始追问 */
+  seed?: string;
 }
 
 const STARTERS = [
@@ -26,7 +28,7 @@ function stripAgentBlock(text: string): string {
     .trim();
 }
 
-export default function AgentCoach({ onClose, onUse }: Props) {
+export default function AgentCoach({ onClose, onUse, seed }: Props) {
   const [messages, setMessages] = useState<Turn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -37,6 +39,13 @@ export default function AgentCoach({ onClose, onUse }: Props) {
   useEffect(() => {
     if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
   }, [messages, busy]);
+
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (seeded.current || !seed) return;
+    seeded.current = true;
+    void send(seed);
+  }, [seed]);
 
   async function runCoach(next: Turn[]) {
     setBusy(true);

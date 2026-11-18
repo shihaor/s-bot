@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Agent, Conversation, GroupWorkflow, Message, ModelInfo, Task } from '@sbot/shared';
+import type { AgentCoachDraft } from './api';
+import AgentCoach from './AgentCoach';
 import { previewGroupWorkflow } from './api';
 import WorkflowEditor from './WorkflowEditor';
 import WorkflowCoach from './WorkflowCoach';
@@ -472,32 +474,148 @@ export function NewGroupDialog({
   );
 }
 
+/** 按任务标题 / 描述给现有智能体打分，挑最像的几个 */
+function rankAgents(agents: Agent[], title: string, description: string) {
+  const kw = `${title} ${description}`.toLowerCase();
+  const toks = kw.split(/[\s,，。;；、:：/|()（）\[\]]+/).filter((t) => t.length >= 2);
+  return agents
+    .map((a) => {
+      const hay = [a.name, a.role, a.group ?? '', ...(a.tags ?? []), ...(a.skills ?? [])].join(' ').toLowerCase();
+      let score = 0;
+      for (const t of toks) if (hay.includes(t)) score += 2;
+      for (const sk of a.skills ?? []) if (sk && kw.includes(sk.toLowerCase())) score += 3;
+      return { a, score };
+    })
+    .filter((x) => x.score > 0)
+    .sort((x, y) => y.score - x.score)
+    .slice(0, 3);
+}
+
+/** 任务弹窗里的「推荐智能体」窗口：推荐 + 全部列表 + 招聘新智能体（对话式） */
+function AgentPicker({
+  title,
+  description,
+  agents,
+  pickedId,
+  onPick,
+  onHire,
+  onClose,
+}: {
+  title: string;
+  description: string;
+  agents: Agent[];
+  pickedId: string;
+  onPick: (a: Agent) => void;
+  onHire: () => void;
+  onClose: () => void;
+}) {
+  const [q, setQ] = useState('');
+  const recs = useMemo(() => rankAgents(agents, title, description), [agents, title, description]);
+  const list = useMemo(() => {
+    const kw = q.trim().toLowerCase();
+    const base = kw
+      ? agents.filter((a) => [a.name, a.role, a.group ?? '', ...(a.tags ?? []), ...(a.skills ?? [])].join(' ').toLowerCase().includes(kw))
+      : agents;
+    return base.slice(0, 40);
+  }, [agents, q]);
+
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="sheet" style={{ maxWidth: 540 }}>
+        <div className="sheet-head">
+          <h3>推荐智能体</h3>
+          <p>按任务标题和描述匹配；没有合适的，可以让教练现场招一个。</p>
+        </div>
+        <div className="sheet-body" style={{ maxHeight: '52vh', overflowY: 'auto' }}>
+          <div className="field">
+            <span>{recs.length ? '为你推荐' : '还没有太合适的'}</span>
+            {recs.length ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {recs.map(({ a, score }) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    className="btn"
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, padding: '8px 10px', textAlign: 'left', height: 'auto' }}
+                    onClick={() => onPick(a)}
+                  >
+                    <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2 }}>
+                      <b style={{ fontSize: 12.5 }}>{a.name}{a.id === pickedId ? '（已选）' : ''}</b>
+                      <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{[a.role, ...(a.skills ?? []).slice(0, 3)].filter(Boolean).join(' · ') || '智能体'}</span>
+                    </span>
+                    <span style={{ fontSize: 10.5, color: 'var(--accent)', flex: 'none' }}>{score >= 6 ? '很匹配' : score >= 3 ? '较匹配' : '匹配'}</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 12, color: 'var(--text-faint)' }}>现有智能体里没有太合适的，建议直接招聘一个。</div>
+            )}
+          </div>
+          <div className="field">
+            <span>全部智能体</span>
+            <input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索名字 / 岗位 / 技能" />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 6 }}>
+              {list.map((a) => (
+                <button
+                  key={a.id}
+                  type="button"
+                  className="btn"
+                  style={{ justifyContent: 'flex-start', textAlign: 'left', padding: '6px 9px', fontSize: 11.5, height: 'auto' }}
+                  onClick={() => onPick(a)}
+                >
+                  {a.name}{a.role ? ` · ${a.role}` : ''}{a.id === pickedId ? '（已选）' : ''}
+                </button>
+              ))}
+              {list.length === 0 && <div style={{ fontSize: 11.5, color: 'var(--text-faint)' }}>没搜到</div>}
+            </div>
+          </div>
+        </div>
+        <div className="sheet-foot">
+          <button className="btn" onClick={onClose}>取消</button>
+          <button className="btn primary" onClick={onHire}>招聘新智能体（对话式）</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function TaskDialog({
   task,
   conversations,
+  agents,
   defaultConversationId,
   onCancel,
   onSave,
+  onHireDraft,
 }: {
   task: Task | null;
   conversations: Conversation[];
+  agents: Agent[];
   defaultConversationId: string | null;
   onCancel: () => void;
-  onSave: (input: { title: string; description: string; conversationId: string | null; priority: 'high' | 'mid' | 'low' }) => void;
+  onSave: (input: { title: string; description: string; conversationId: string | null; priority: 'high' | 'mid' | 'low'; assigneeId: string | null }) => void;
+  /** 对话式创建的草案 → 真正生成智能体 */
+  onHireDraft?: (draft: AgentCoachDraft) => Promise<Agent | null>;
 }) {
   const groups = conversations.filter((c) => c.type === 'group');
   const [title, setTitle] = useState(task?.title ?? '');
   const [description, setDescription] = useState(task?.description ?? '');
   const [conversationId, setConversationId] = useState<string>(task?.conversationId ?? defaultConversationId ?? '');
+  const [assigneeId, setAssigneeId] = useState<string>(task?.assigneeId ?? '');
   const [priority, setPriority] = useState<'high' | 'mid' | 'low'>(task?.priority ?? 'mid');
   const [error, setError] = useState('');
+  const [pickOpen, setPickOpen] = useState(false);
+  const [coachOpen, setCoachOpen] = useState(false);
+
+  const picked = agents.find((a) => a.id === assigneeId) ?? null;
+  const seed = `帮我招一个能完成「${title.trim() || '这个任务'}」的智能体。${description.trim() ? `任务背景：${description.trim()}` : ''}`;
 
   return (
     <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}>
       <div className="sheet">
         <div className="sheet-head">
           <h3>{task ? '编辑任务' : '新建任务'}</h3>
-          <p>把任务分给一个群聊，智能体和同事都能在群里看到它。</p>
+          <p>写清楚要做什么，可以指派给某个智能体，也可以交给群聊。</p>
         </div>
         <div className="sheet-body">
           <label className="field"><span>任务标题 <i className="req">*</i></span>
@@ -514,9 +632,19 @@ export function TaskDialog({
               rows={3}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="补充背景、验收标准"
+              placeholder="补充背景、验收标准；写得越具体，推荐 / 招聘的智能体越准"
             />
           </label>
+          <div className="field">
+            <span>分配给智能体</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: picked ? 'var(--text)' : 'var(--text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {picked ? `${picked.name}${picked.role ? ` · ${picked.role}` : ''}` : '不指定（交给群聊）'}
+              </div>
+              {picked && <button type="button" className="btn" style={{ padding: '5px 9px' }} onClick={() => setAssigneeId('')}>清空</button>}
+              <button type="button" className="btn" style={{ padding: '5px 10px' }} onClick={() => setPickOpen(true)}>推荐智能体</button>
+            </div>
+          </div>
           <label className="field"><span>分配给群聊</span>
             <select className="input" value={conversationId} onChange={(e) => setConversationId(e.target.value)}>
               <option value="">不分配</option>
@@ -539,13 +667,37 @@ export function TaskDialog({
             onClick={() => {
               const t = title.trim();
               if (!t) { setError('任务标题不能为空'); return; }
-              onSave({ title: t, description: description.trim(), conversationId: conversationId || null, priority });
+              onSave({ title: t, description: description.trim(), conversationId: conversationId || null, priority, assigneeId: assigneeId || null });
             }}
           >
             {task ? '保存' : '创建'}
           </button>
         </div>
       </div>
+
+      {pickOpen && (
+        <AgentPicker
+          title={title}
+          description={description}
+          agents={agents}
+          pickedId={assigneeId}
+          onPick={(a) => { setAssigneeId(a.id); setPickOpen(false); }}
+          onHire={() => { setPickOpen(false); setCoachOpen(true); }}
+          onClose={() => setPickOpen(false)}
+        />
+      )}
+
+      {coachOpen && (
+        <AgentCoach
+          seed={seed}
+          onClose={() => setCoachOpen(false)}
+          onUse={(drafts) => {
+            const d = drafts[0];
+            if (!d || !onHireDraft) { setCoachOpen(false); return; }
+            void onHireDraft(d).then((a) => { if (a) setAssigneeId(a.id); setCoachOpen(false); });
+          }}
+        />
+      )}
     </div>
   );
 }

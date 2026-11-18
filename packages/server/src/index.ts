@@ -1572,6 +1572,7 @@ app.post('/api/tasks', async (c) => {
     conversationId: b?.conversationId ? String(b.conversationId) : null,
     creatorName: String(b?.creatorName ?? '未知'),
     priority: ['high', 'mid', 'low'].includes(b?.priority) ? b.priority : 'mid',
+    assigneeId: b?.assigneeId ? String(b.assigneeId) : null,
   });
   broadcast('task', task, task.conversationId ?? undefined);
   return c.json({ data: task }, 201);
@@ -1587,6 +1588,7 @@ app.patch('/api/tasks/:id', async (c) => {
     conversationId: b?.conversationId === null ? null : typeof b?.conversationId === 'string' ? b.conversationId : undefined,
     priority: ['high', 'mid', 'low'].includes(b?.priority) ? b.priority : undefined,
     status: ['todo', 'awaiting', 'done'].includes(b?.status) ? b.status : undefined,
+    assigneeId: b?.assigneeId === null ? null : typeof b?.assigneeId === 'string' ? b.assigneeId : undefined,
   });
   const task = getTask(id);
   broadcast('task', task, task?.conversationId ?? undefined);
@@ -1598,6 +1600,94 @@ app.delete('/api/tasks/:id', (c) => {
   if (!getTask(id)) return c.json({ error: 'task not found' }, 404);
   deleteTask(id);
   return c.json({ ok: true });
+});
+
+/* ---------- 实验室：智能体做梦（记忆去噪 / 去重 / 摘要 → 梦境） ---------- */
+const dreamCache = new Map<string, { at: number; lines: string[] }>();
+
+app.post('/api/lab/dream', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const name = String(b?.name ?? '').trim();
+  const role = String(b?.role ?? '').trim();
+  if (!name) return c.json({ error: 'name required' }, 400);
+
+  const hit = dreamCache.get(name);
+  if (hit && Date.now() - hit.at < 5 * 60_000) return c.json({ data: { lines: hit.lines, cached: true } });
+
+  // 1) 取这个智能体最近参与过的会话消息
+  const convs = listConversations().filter((cv) =>
+    cv.members.some((m) => m.memberType === 'agent' && (m.name === name || m.memberId === name)),
+  );
+  const raw: string[] = [];
+  for (const cv of convs.slice(0, 4)) {
+    for (const m of listMessages(cv.id, 40)) {
+      if (m.authorType === 'system') continue;
+      if (m.status === 'error') continue;
+      raw.push(`${m.authorName ?? '成员'}: ${m.text}`);
+    }
+  }
+
+  // 2) 去噪 + 去重 + 截断（只留最近一小段做摘要素材）
+  const seen = new Set<string>();
+  const memory: string[] = [];
+  for (const line of raw) {
+    const t = line.replace(/\s+/g, ' ').trim();
+    if (t.length < 8) continue;
+    if (/^(system|工具|执行|思考)[:：]/.test(t)) continue;
+    const key = t.slice(0, 40);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    memory.push(t.slice(0, 160));
+  }
+  const digest = memory.slice(-12);
+
+  // 3) 让模型做摘要并编 3 句梦
+  const model = getDefaultModel();
+  const fallback = role.includes('测试')
+    ? ['梦见所有用例一次通过', '醒来发现只是做梦', '还是得手动点一遍']
+    : ['梦见任务自己干完了', '醒来发现进度条没动', '只好接着干'];
+  if (!model?.baseUrl || !model.apiKey) return c.json({ data: { lines: fallback, memory: digest.length } });
+
+  try {
+    const res = await fetch(`${model.baseUrl.replace(/\/$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${model.apiKey}` },
+      body: JSON.stringify({
+        model: model.model,
+        temperature: 0.9,
+        max_tokens: 200,
+        messages: [
+          {
+            role: 'system',
+            content:
+              '你在给一个 AI 智能体生成"休息时做的梦"。先在心里对它最近的记忆做去噪、去重、摘要，再据此编 3 句很短的梦。每句不超过 18 个汉字，有画面感，必须和它的岗位或最近做的事有关，不要解释、不要客套。只输出 JSON 数组，例如 ["...","...","..."]。',
+          },
+          {
+            role: 'user',
+            content: `智能体：${name}${role ? `（${role}）` : ''}\n最近的记忆（已粗筛，仍可能有噪声）：\n${digest.length ? digest.join('\n') : '（最近没有留下什么记录）'}`,
+          },
+        ],
+      }),
+    });
+    if (!res.ok) return c.json({ data: { lines: fallback, memory: digest.length } });
+    const j = (await res.json()) as any;
+    let text = String(j?.choices?.[0]?.message?.content ?? '').trim();
+    text = text.replace(/```json|```/gi, '').trim();
+    let lines: string[] = [];
+    const mArr = text.match(/\[[\s\S]*\]/);
+    if (mArr) {
+      try {
+        const arr = JSON.parse(mArr[0]);
+        if (Array.isArray(arr)) lines = arr.map((x) => String(x)).filter(Boolean).slice(0, 4);
+      } catch { /* 解析失败用换行切 */ }
+    }
+    if (!lines.length) lines = text.split(/\n+/).map((x) => x.replace(/^[-*\d.\s]+/, '').trim()).filter(Boolean).slice(0, 4);
+    if (!lines.length) lines = fallback;
+    dreamCache.set(name, { at: Date.now(), lines });
+    return c.json({ data: { lines, memory: digest.length } });
+  } catch {
+    return c.json({ data: { lines: fallback, memory: digest.length } });
+  }
 });
 
 /* ---------- 会话 ---------- */

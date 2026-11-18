@@ -431,6 +431,7 @@ export async function createTask(input: {
   description?: string;
   conversationId?: string | null;
   priority?: 'high' | 'mid' | 'low';
+  assigneeId?: string | null;
 }): Promise<Task> {
   const res = await apiFetch('/api/tasks', {
     method: 'POST',
@@ -444,7 +445,7 @@ export async function createTask(input: {
 
 export async function updateTask(
   id: string,
-  patch: { title?: string; description?: string; conversationId?: string | null; priority?: string; status?: Task['status'] },
+  patch: { title?: string; description?: string; conversationId?: string | null; priority?: string; status?: Task['status']; assigneeId?: string | null },
 ): Promise<Task> {
   const res = await apiFetch(`/api/tasks/${id}`, {
     method: 'PATCH',
@@ -459,6 +460,18 @@ export async function updateTask(
 export async function deleteTask(id: string): Promise<void> {
   const res = await apiFetch(`/api/tasks/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error('删除任务失败');
+}
+
+/** 实验室：让服务端按这个智能体最近的记忆生成梦境（去噪 / 去重 / 摘要 → 3 句梦） */
+export async function fetchLabDream(name: string, role: string): Promise<string[]> {
+  const res = await apiFetch('/api/lab/dream', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name, role }),
+  });
+  if (!res.ok) return [];
+  const r = (await res.json()) as { data?: { lines?: string[] } };
+  return Array.isArray(r.data?.lines) ? (r.data!.lines as string[]) : [];
 }
 
 /* ---------- 交接 ---------- */

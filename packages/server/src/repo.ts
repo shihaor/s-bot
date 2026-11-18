@@ -464,6 +464,7 @@ const mapTask = (r: any): Task => ({
   creatorName: r.creator_name ?? '未知',
   status: r.status,
   priority: r.priority,
+  assigneeId: r.assignee_id ?? null,
   createdAt: r.created_at,
   completedAt: r.completed_at ?? null,
 });
@@ -486,10 +487,11 @@ export function createTask(input: {
   conversationId?: string | null;
   creatorName?: string;
   priority?: 'high' | 'mid' | 'low';
+  assigneeId?: string | null;
 }): Task {
   const id = `task_${Date.now().toString(36)}`;
   db.prepare(
-    'INSERT INTO tasks (id, title, description, conversation_id, creator_name, status, priority, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)',
+    'INSERT INTO tasks (id, title, description, conversation_id, creator_name, status, priority, assignee_id, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)',
   ).run(
     id,
     input.title,
@@ -498,6 +500,7 @@ export function createTask(input: {
     input.creatorName ?? '未知',
     'todo',
     input.priority ?? 'mid',
+    input.assigneeId ?? null,
     Date.now(),
   );
   return getTask(id)!;
@@ -510,6 +513,7 @@ export function updateTask(
     description?: string;
     conversationId?: string | null;
     priority?: string;
+    assigneeId?: string | null;
     status?: Task['status'];
   },
 ): void {
@@ -519,6 +523,7 @@ export function updateTask(
   if (patch.description !== undefined) { fields.push('description = ?'); values.push(patch.description); }
   if (patch.conversationId !== undefined) { fields.push('conversation_id = ?'); values.push(patch.conversationId); }
   if (patch.priority !== undefined) { fields.push('priority = ?'); values.push(patch.priority); }
+  if (patch.assigneeId !== undefined) { fields.push('assignee_id = ?'); values.push(patch.assigneeId); }
   if (patch.status !== undefined) {
     fields.push('status = ?');
     values.push(patch.status);

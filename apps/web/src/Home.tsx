@@ -158,6 +158,7 @@ export default function Home({
           ) : (
             visibleTasks.map((t) => {
               const groupName = convTitle(t.conversationId);
+              const owner = t.assigneeId ? agents.find((a) => a.id === t.assigneeId) ?? null : null;
               return (
                 <div key={t.id} className={`task ${t.status === 'done' ? 'done' : ''}`} onClick={() => onEditTask(t)}>
                   <div
@@ -169,7 +170,11 @@ export default function Home({
                   </div>
                   <div className="tt">{t.title}</div>
                   <div className="meta">
-                    {groupName ? (
+                    {owner ? (
+                      <span className="grp" title="指派给的智能体" onClick={(e) => { e.stopPropagation(); onOpenAgent(owner.id); }}>
+                        {owner.name}
+                      </span>
+                    ) : groupName ? (
                       <span
                         className="grp"
                         onClick={(e) => { e.stopPropagation(); if (t.conversationId) onOpenConv(t.conversationId); }}

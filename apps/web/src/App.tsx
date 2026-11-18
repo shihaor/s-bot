@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from 'react';
+﻿import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import type { Agent, ChatIntro, Conversation, GroupWorkflow, Member, Message, ModelInfo, Task } from '@sbot/shared';
 import confetti from 'canvas-confetti';
 import {
@@ -61,12 +61,17 @@ import {
   type FormField,
   type HumanInfo,
   type LanPeer,
+  type AgentCoachDraft,
 } from './api';
 import { hasMemberDrag, readMemberDrag, setMemberDrag, type MemberPayload } from './drag';
 import Home from './Home';
 import Intro from './Intro';
 import AgentsPage from './AgentsPage';
 import SkillsPage from './SkillsPage';
+import AgentCoach from './AgentCoach';
+
+/** 实验室只在进入时才加载（里面是一整套 3D 大屏，别拖慢首屏） */
+const LabPage = lazy(() => import('./LabPage'));
 import SettingsPage from './SettingsPage';
 import WorkflowEditor from './WorkflowEditor';
 import WorkflowCoach from './WorkflowCoach';
@@ -598,7 +603,7 @@ export default function App() {
   const [runtime, setRuntime] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'chat' | 'home' | 'agents' | 'skills' | 'settings'>('chat');
+  const [view, setView] = useState<'chat' | 'home' | 'agents' | 'skills' | 'lab' | 'settings'>('chat');
   const [toast, setToast] = useState('');
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; conv: Conversation } | null>(null);
   /** 有新版本时右上角出现的更新入口 */
@@ -614,6 +619,10 @@ export default function App() {
   const [kbs, setKbs] = useState<KbDataset[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskDialog, setTaskDialog] = useState<{ task: Task | null } | null>(null);
+  /** 实验室：新建任务成功后 +1，触发“进门领任务”动画 */
+  const [labTaskSignal, setLabTaskSignal] = useState(0);
+  /** 实验室人员管理里的“新增成员” → 对话式创建智能体 */
+  const [labCoachOpen, setLabCoachOpen] = useState(false);
   const [taskDecisions, setTaskDecisions] = useState<Record<string, 'done' | 'todo'>>({});
   const [newGroupOpen, setNewGroupOpen] = useState(false);
   const [loginOpen, setLoginOpen] = useState(false);
@@ -1475,6 +1484,7 @@ export default function App() {
     description: string;
     conversationId: string | null;
     priority: 'high' | 'mid' | 'low';
+    assigneeId?: string | null;
   }) {
     const editing = taskDialog?.task ?? null;
     try {
@@ -1483,8 +1493,52 @@ export default function App() {
       await refreshTasks();
       setTaskDialog(null);
       showToast(editing ? '任务已更新' : '任务已创建');
+      if (!editing) {
+        setLabTaskSignal((n) => n + 1);
+        if (input.assigneeId) void dispatchTaskToAgent(input.assigneeId, input.title, input.description);
+      }
     } catch (e) {
       showToast(String(e));
+    }
+  }
+
+  /** 对话式创建出来的草案 → 真正生成智能体 */
+  async function createAgentFromDraft(draft: AgentCoachDraft): Promise<Agent | null> {
+    try {
+      const agent = await createAgentApi({
+        name: (draft.name || '新智能体').slice(0, 12),
+        role: (draft.role || '').slice(0, 20),
+        color: /^#[0-9a-f]{6}$/i.test(draft.color) ? draft.color : '#5B8CFF',
+        description: draft.description ?? '',
+        skills: draft.skills ?? [],
+        systemPrompt: draft.systemPrompt ?? '',
+        modelId: null,
+        visibility: 'team',
+        tools: { read: true, web: true, shell: false },
+        kbIds: [],
+        group: draft.group,
+        tags: draft.tags ?? [],
+      });
+      setAgents((prev) => [...prev, agent]);
+      showToast(`已招聘新智能体「${agent.name}」`);
+      return agent;
+    } catch (e) {
+      showToast(String(e));
+      return null;
+    }
+  }
+
+  /** 任务指派后：直接把任务发给这个智能体，让它马上开始（要授权时它会停下来找你） */
+  async function dispatchTaskToAgent(agentId: string, title: string, description: string) {
+    try {
+      const conv = await ensureDmApi(agentId);
+      setConversations((prev) => (prev.some((c) => c.id === conv.id) ? prev : [conv, ...prev]));
+      const text = `【任务指派】${title}\n${description ? `${description}\n` : ''}请现在开始执行这个任务；遇到需要我授权或确认的步骤，先停下来等我。`;
+      await sendMessage(conv.id, { text }, () => { /* 后台执行，不占用当前界面 */ });
+      showToast('任务已派给智能体，开始执行');
+      void refreshTasks();
+    } catch (e) {
+      showToast(`任务已创建，但派发给智能体失败：${String(e)}`);
     }
   }
 
@@ -2239,6 +2293,73 @@ export default function App() {
     // running 标记由 handleSend 的 finally 统一清理
   }
 
+  /** 实验室：真实群聊 → 工位块分组（群里的智能体坐一起） */
+  const labGroups = useMemo(
+    () =>
+      conversations
+        .filter((c) => c.type === 'group')
+        .map((c) => ({
+          id: c.id,
+          title: c.title,
+          memberIds: c.members.filter((m) => m.memberType === 'agent').map((m) => m.memberId),
+        })),
+    [conversations],
+  );
+
+  /** 实验室右侧动态：各会话最后一条消息（新的在前） */
+  const labFeed = useMemo(
+    () =>
+      conversations
+        .filter((c) => c.lastMessage)
+        .sort((a, b) => (b.lastMessage?.at ?? 0) - (a.lastMessage?.at ?? 0))
+        .slice(0, 12)
+        .map((c) => {
+          const lm = c.lastMessage!;
+          const m = c.members.find((x) => x.name === lm.authorName);
+          return {
+            who: lm.authorName,
+            color: m?.color ?? '#ffc46b',
+            text: lm.text.replace(/\s+/g, ' ').slice(0, 64),
+            at: lm.at,
+          };
+        }),
+    [conversations],
+  );
+
+  /** 实验室里大班台后坐的就是你：优先账号名 / 本地资料名，都没有就写“我” */
+  const bossName = useMemo(() => {
+    const own = [user?.name, profile.name].find((n) => n && n !== '未知');
+    return own || '我';
+  }, [user?.name, profile.name]);
+
+  /** 实验室底栏的任务：把 assigneeId 换成名字 */
+  const labTasks = useMemo(
+    () =>
+      tasks.map((t) => ({
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        priority: t.priority,
+        assignee: t.assigneeId ? (agents.find((a) => a.id === t.assigneeId)?.name ?? '智能体') : '',
+        conversationId: t.conversationId ?? null,
+        assigneeId: t.assigneeId ?? null,
+        at: new Date(t.createdAt).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }),
+      })),
+    [tasks, agents],
+  );
+
+  /** 实验室左上「智能组织」：真实任务 / 成员统计 */
+  const labOrg = useMemo(() => {
+    const total = tasks.length;
+    const done = tasks.filter((t) => t.status === 'done').length;
+    const review = tasks.filter((t) => t.status === 'awaiting').length;
+    const doing = Math.max(0, total - done - review);
+    const pct = total ? Math.round((done / total) * 100) : 0;
+    const COL = { done: '#5fe3a1', review: '#ffb340', todo: '#6fdcff' };
+    const seg = tasks.slice(0, 18).map((t) => (t.status === 'done' ? COL.done : t.status === 'awaiting' ? COL.review : COL.todo));
+    return { pct, total, doing, review, done, agents: agents.length, groups: labGroups.length, seg };
+  }, [tasks, agents.length, labGroups.length]);
+
   if (loading) return (
     <div className="boot">
       <div className="boot-logo">
@@ -2294,6 +2415,9 @@ export default function App() {
           <button className={`rail-btn ${view === 'skills' ? 'active' : ''}`} title="技能" onClick={() => setView('skills')}>
             <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12z" /></svg>
           </button>
+          <button className={`rail-btn ${view === 'lab' ? 'active' : ''}`} title="实验室" onClick={() => setView('lab')}>
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M9.5 2.8h5" /><path d="M10.6 2.8v6.4L5.2 18.4A2 2 0 0 0 6.9 21.4h10.2a2 2 0 0 0 1.7-3L13.4 9.2V2.8" /><path d="M7.6 15.4h8.8" /></svg>
+          </button>
           <div className="spacer" />
           <button className={`rail-btn ${view === 'settings' ? 'active' : ''}`} title="设置" onClick={() => setView('settings')}>
             <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" /></svg>
@@ -2308,7 +2432,7 @@ export default function App() {
 
         <aside
           className="sidebar"
-          style={{ display: view === 'agents' || view === 'skills' || view === 'settings' ? 'none' : 'flex' }}
+          style={{ display: view === 'agents' || view === 'skills' || view === 'lab' || view === 'settings' ? 'none' : 'flex' }}
         >
           <div className="side-head">
             <h1>消息</h1>
@@ -2626,6 +2750,29 @@ export default function App() {
             />
           ) : view === 'skills' ? (
             <SkillsPage />
+          ) : view === 'lab' ? (
+            <Suspense fallback={<div className="lab-host" />}>
+              <LabPage
+                userName={bossName}
+                agents={agents}
+                groups={labGroups}
+                humans={humans}
+                onNewTask={() => setTaskDialog({ task: null })}
+                taskSignal={labTaskSignal}
+                onOpenAgent={(name) => {
+                  const a = agents.find((x) => x.name === name);
+                  if (a) void openAgentDm(a.id);
+                }}
+                feed={labFeed}
+                tasks={labTasks}
+                org={labOrg}
+                authAgent={permissionReq ? (agents.find((x) => x.id === permissionReq.agentId)?.name ?? null) : null}
+                onNewAgent={() => setLabCoachOpen(true)}
+                ragflowReady={kbs.length > 0}
+                kbAgentNames={agents.filter((x) => (x.kbIds ?? []).length > 0).map((x) => x.name)}
+                onOpenSettings={() => setView('settings')}
+              />
+            </Suspense>
           ) : view === 'settings' ? (
             <SettingsPage
               onToast={showToast}
@@ -3146,9 +3293,21 @@ export default function App() {
         <TaskDialog
           task={taskDialog.task}
           conversations={conversations}
+          agents={agents}
           defaultConversationId={active?.type === 'group' ? active.id : null}
           onCancel={() => setTaskDialog(null)}
           onSave={(input) => void saveTask(input)}
+          onHireDraft={createAgentFromDraft}
+        />
+      )}
+      {labCoachOpen && (
+        <AgentCoach
+          onClose={() => setLabCoachOpen(false)}
+          onUse={(drafts) => {
+            const d = drafts[0];
+            if (!d) { setLabCoachOpen(false); return; }
+            void createAgentFromDraft(d).then(() => setLabCoachOpen(false));
+          }}
         />
       )}
       {confirmState && (

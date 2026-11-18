@@ -190,6 +190,8 @@ export interface Task {
   creatorName: string;
   status: TaskStatus;
   priority: 'high' | 'mid' | 'low';
+  /** 指派给哪个智能体（可选） */
+  assigneeId?: string | null;
   createdAt: number;
   completedAt: number | null;
 }
