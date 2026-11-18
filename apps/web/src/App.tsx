@@ -609,6 +609,8 @@ export default function App() {
   /** 有新版本时右上角出现的更新入口 */
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateOpen, setUpdateOpen] = useState(false);
+  /** 哪个会话的执行引擎正在整理记忆（compaction） */
+  const [compactingConv, setCompactingConv] = useState<string | null>(null);
   /** 真人右键菜单（备注） */
   const [humanMenu, setHumanMenu] = useState<{ x: number; y: number; human: { id: string; name: string; remark?: string } } | null>(null);
   const [remarkTarget, setRemarkTarget] = useState<{ id: string; name: string; remark: string } | null>(null);
@@ -848,6 +850,8 @@ export default function App() {
           void refreshTasks();
         } else if (e.type === 'presence') {
           void fetchHumans().then(setHumans).catch(() => {});
+        } else if (e.type === 'agents') {
+          void fetchAgents().then(setAgents).catch(() => {});
         } else if (e.type === 'human.wait') {
           const p = e.data as { runId: string; conversationId: string; humanId: string; name: string; role: string; color: string; seconds: number };
           setHumanWait({
@@ -899,6 +903,7 @@ export default function App() {
     es.addEventListener('message', onEvent);
     es.addEventListener('task', onEvent);
     es.addEventListener('presence', onEvent);
+    es.addEventListener('agents', onEvent);
     es.addEventListener('human.wait', onEvent);
     es.addEventListener('human.resume', onEvent);
     es.addEventListener('p2p.invite', onEvent);
@@ -2117,6 +2122,10 @@ export default function App() {
             void refreshConversations();
             return;
           }
+          if (e.type === 'compacting') {
+            setCompactingConv((cur) => (e.on ? runConv : (cur === runConv ? null : cur)));
+            return;
+          }
           if (e.type === 'message.start') {
             setRetrievingAgent(null);
             setStreamingMap((m) => ({
@@ -2260,6 +2269,7 @@ export default function App() {
         markRunning(runConv, false);
         clearStreaming(runConv);
         abortMap.current.delete(runConv);
+        setCompactingConv((cur) => (cur === runConv ? null : cur));
       }
       refreshConversations();
       // 跑完也把光标放回输入框，方便连续对话
@@ -2767,6 +2777,7 @@ export default function App() {
             <Suspense fallback={<div className="lab-host" />}>
               <LabPage
                 userName={bossName}
+                meId={user?.id}
                 agents={agents}
                 groups={labGroups}
                 humans={humans}
@@ -2942,7 +2953,7 @@ export default function App() {
                     <div className="msg gap">
                       <div className="typing">
                         <span className="dots"><i /><i /><i /></span>
-                        {humanWait ? `等 ${humanWait.name} 回复…` : retrievingAgent ? '正在检索知识库…' : '正在思考…'}
+                        {compactingConv === activeId ? '正在整理记忆…' : humanWait ? `等 ${humanWait.name} 回复…` : retrievingAgent ? '正在检索知识库…' : '正在思考…'}
                       </div>
                     </div>
                   )}
@@ -2959,7 +2970,13 @@ export default function App() {
                           </div>
                           <div className="bubble">
                             <RichText text={streaming.text} />
-                            {activeTool && (
+                            {compactingConv === activeId && (
+                              <div className="streaming-step">
+                                <span className="step-dot" />
+                                <span className="step-text">正在整理记忆…</span>
+                              </div>
+                            )}
+                            {activeTool && compactingConv !== activeId && (
                               <div className="streaming-step">
                                 <span className="step-dot" />
                                 <span className="step-text">正在{toolLabel(activeTool.name, activeTool.detail)}</span>

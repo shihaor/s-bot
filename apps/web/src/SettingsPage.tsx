@@ -585,9 +585,20 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
             <p className="sub" style={{ marginBottom: 0 }}>让智能体能读写文件、跑命令。没有它也能聊天，只是没有工具。</p>
           </div>
           <b className={ocStatus?.available ? 'ok-text' : 'warn-text'}>
-            {ocStatus?.available ? `● 可用 ${ocStatus.version ?? ''}` : '● 未找到'}
+            {ocStatus?.available
+              ? `● 可用 ${ocStatus.version ?? ''}`
+              : ocStatus?.tooLowVersion
+                ? `● 版本太低（${ocStatus.tooLowVersion}）`
+                : '● 未找到'}
           </b>
         </div>
+
+        {!ocStatus?.available && ocStatus?.tooLowVersion && (
+          <p className="sub" style={{ margin: '8px 0 0', color: 'var(--warn)' }}>
+            检测到执行引擎 <b>{ocStatus.tooLowVersion}</b>，版本太低，至少需要{' '}
+            <b>{ocStatus.minVersion ?? '2.0.0'}</b>。请升级执行引擎后重新扫描（旧版本接口不兼容，强行使用会在对话时直接报错）。
+          </p>
+        )}
 
         <div className="oc-current">
           <div className="oc-current-main">
@@ -623,16 +634,20 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
 
         {ocCandidates.length > 0 && (
           <div className="oc-candidates">
-            <div className="oc-candidates-head">找到 {ocCandidates.length} 个可用程序，点一个直接切换</div>
+            <div className="oc-candidates-head">找到 {ocCandidates.length} 个执行引擎，点一个直接切换</div>
             {ocCandidates.map((c) => (
               <button
                 key={c.bin}
-                className={`oc-candidate ${ocStatus?.bin === c.bin ? 'on' : ''}`}
+                className={`oc-candidate ${ocStatus?.bin === c.bin ? 'on' : ''} ${c.tooLow ? 'toolow' : ''}`}
+                disabled={c.tooLow}
                 onClick={() => void useOpencodePath(c.bin)}
               >
-                <b>执行引擎 {c.version}</b>
+                <b>
+                  执行引擎 {c.version}
+                  {c.tooLow ? '（版本太低）' : ''}
+                </b>
                 <code>{c.bin}</code>
-                <span>{ocStatus?.bin === c.bin ? '使用中' : '使用'}</span>
+                <span>{c.tooLow ? `需 ≥ ${ocStatus?.minVersion ?? '2.0.0'}` : ocStatus?.bin === c.bin ? '使用中' : '使用'}</span>
               </button>
             ))}
           </div>

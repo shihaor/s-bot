@@ -1004,6 +1004,8 @@ export interface Human {
   simulated?: boolean;
   /** 备注：本机给这个人起的别名（留空表示用原名） */
   remark?: string;
+  /** 最后一次报在线心跳的时间（毫秒），0 表示从没登录过 */
+  lastSeen?: number;
   createdAt: number;
 }
 
@@ -1017,6 +1019,7 @@ const mapHuman = (r: any): Human => ({
   initial: r.initial ?? '人',
   simulated: !!r.simulated,
   remark: r.remark ?? '',
+  lastSeen: Number(r.last_seen ?? 0),
   createdAt: r.created_at,
 });
 
@@ -1027,6 +1030,11 @@ export function getHuman(id: string): Human | null {
 
 export function listHumans(): Human[] {
   return (db.prepare('SELECT * FROM humans ORDER BY created_at ASC').all() as any[]).map(mapHuman);
+}
+
+/** 记一次在线心跳（持久化，服务重启后仍能判断最近在线） */
+export function touchHumanSeen(id: string, ts = Date.now()): void {
+  db.prepare('UPDATE humans SET last_seen = ? WHERE id = ?').run(ts, id);
 }
 
 /** 按名字找或建一个真人（登录时调用） */export function upsertHuman(input: { name: string; role?: string }): Human {

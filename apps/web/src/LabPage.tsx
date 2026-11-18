@@ -45,6 +45,9 @@ type LabHost = HTMLDivElement & {
   __newAgent?: (() => void) | null;
   /** 真实任务映射 */
   __agentTasks?: (map: Record<string, { title: string; status: string }>) => void;
+  /** 运行时同步成员 */
+  __syncAgents?: (rows: unknown[][]) => number;
+  __syncHumans?: (list: unknown[][]) => number;
   /** 做梦：按最近记忆生成梦境（name, role, 回调） */
   __dreamAsk?: ((name: string, role: string, cb: (lines: string[]) => void) => void) | null;
 };
@@ -52,7 +55,7 @@ type LabHost = HTMLDivElement & {
 /** 一个群聊：标题 + 里面的智能体 id */
 export type LabGroup = { id: string; title: string; memberIds: string[] };
 /** 真人督办 */
-export type LabHuman = { id: string; name: string; role: string; online?: boolean };
+export type LabHuman = { id: string; name: string; role: string; online?: boolean; simulated?: boolean };
 /** 右侧动态的一条 */
 type LabFeedItem = { who: string; color: string; text: string; at: number };
 /** 底栏任务 */
@@ -64,6 +67,26 @@ const SLOT_MAX = 8;
 const HAIR = ['#2a221c', '#151515', '#5a3a22', '#3a7bd5', '#b99bff', '#3fc1a8'];
 const SKIN = ['#f6d5b8', '#eec39a', '#f3cfb0', '#d9a77c', '#f6d8be', '#f2cba6'];
 const SLOT_COLORS = ['#ffb547', '#ff7eb6', '#4fe0a6', '#5cc8ff', '#b99bff', '#c8e05a', '#e0b48a', '#ff8a5c'];
+
+/**
+ * 真正进场景的真人：只放在线的、排除自己（大班台已经有一个）和演示号。
+ * 场景里最多 10 个真人座位。
+ */
+function guestHumans(humans: LabHuman[], meId?: string, meName?: string): (string | boolean)[][] {
+  const seen = new Set<string>();
+  return humans
+    .filter((h) => h.online === true && !h.simulated)
+    .filter((h) => {
+      if (meId && h.id === meId) return false;
+      if (!meId && meName && h.name === meName) return false;
+      const name = h.name || '真人';
+      if (seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    })
+    .slice(0, 10)
+    .map((h) => [h.name || '真人', h.role || '真人督办', true]);
+}
 
 /**
  * 把 S-BOT 的群聊 + 智能体整理成工位块：
@@ -134,6 +157,8 @@ function toFeedRows(feed?: LabFeedItem[]) {
 type Props = {
   /** 当前 S-BOT 名字：任务分配区大班台后就是你 */
   userName: string;
+  /** 当前登录真人的 id：别把自己同时画在工位区（大班台已经有一个） */
+  meId?: string;
   agents: Agent[];
   /** 真实群聊：群名 + 群里的智能体，用来给工位块命名 */
   groups: LabGroup[];
@@ -167,6 +192,7 @@ type Props = {
 
 export default function LabPage({
   userName,
+  meId,
   agents,
   groups,
   humans,
@@ -219,11 +245,8 @@ export default function LabPage({
         host.__seedGroups = seed.slots;
         host.__seedRoster = seed.rows;
       }
-      // 只把在线真人坐进任务分配区
-      host.__seedHumans = humans
-        .filter((h) => h.online === true)
-        .slice(0, 10)
-        .map((h) => [h.name || '真人', h.role || '真人督办', true]);
+      // 只把在线真人坐进任务分配区（自己在大班台，不再重复画一个小人）
+      host.__seedHumans = guestHumans(humans, meId, userName);
       try {
         mountHQ(host, root);
         // 左上角 / 底部一条的留白与缩放
@@ -274,6 +297,36 @@ export default function LabPage({
       host.__tasks?.(tasks ?? []);
     } catch { /* 推不进去不影响场景 */ }
   }, [tasks]);
+
+  // 智能体增删：实时同步进场景（另外每 15 秒兜底重推一次，防止某次推送失败后场景一直是空的）
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const push = () => {
+      if (!host.shadowRoot) return;
+      try {
+        host.__syncAgents?.(buildLayout(agents, groups).rows);
+      } catch { /* 同步失败不影响场景 */ }
+    };
+    push();
+    const timer = window.setInterval(push, 15000);
+    return () => window.clearInterval(timer);
+  }, [agents, groups]);
+
+  // 真人上下线：实时同步进场景（同样每 15 秒兜底重推，防止打开页面时名单还没加载好）
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const push = () => {
+      if (!host.shadowRoot) return;
+      try {
+        host.__syncHumans?.(guestHumans(humans, meId, userName));
+      } catch { /* 同步失败不影响场景 */ }
+    };
+    push();
+    const timer = window.setInterval(push, 15000);
+    return () => window.clearInterval(timer);
+  }, [humans, meId, userName]);
 
   // 人物卡片上的任务 = S-BOT 的真实任务
   useEffect(() => {

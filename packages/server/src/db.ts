@@ -170,6 +170,8 @@ ensureColumn('humans', 'simulated', 'simulated INTEGER NOT NULL DEFAULT 0');
 ensureColumn('tasks', 'assignee_id', 'assignee_id TEXT');
 /** 备注：给真人起的别名，只在本机显示 */
 ensureColumn('humans', 'remark', "remark TEXT NOT NULL DEFAULT ''");
+/** 最后一次心跳时间：重启服务后也不会把所有人误判成离线 */
+ensureColumn('humans', 'last_seen', 'last_seen INTEGER NOT NULL DEFAULT 0');
 ensureColumn('conversations', 'workflow_done', 'workflow_done INTEGER NOT NULL DEFAULT 0');
 ensureColumn('conversations', 'discussion_mode', "discussion_mode TEXT NOT NULL DEFAULT 'workflow'");
 ensureColumn('conversation_members', 'activity', "activity TEXT NOT NULL DEFAULT 'realtime'");

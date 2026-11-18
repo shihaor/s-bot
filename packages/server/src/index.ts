@@ -47,6 +47,7 @@ import {
   listAgents,
   listConversations,
   listHumans,
+  touchHumanSeen,
   listMessages,
   listModels,
   listTasks,
@@ -443,24 +444,40 @@ app.patch('/api/kb/enabled', async (c) => {
 
 /**
  * 真人在线状态：客户端每 30 秒打一次心跳，2 分钟没心跳就算离线。
+ * 心跳时间落库（last_seen）：服务重启后不会把所有人误判成离线。
  * 模拟真人（预置的李娜/王强）始终在线，用来演示拉群和 @ 拍板。
  */
 const ONLINE_TTL = 120_000;
-const humanSeen = new Map<string, number>();
 
-function isHumanOnline(h: { id: string; simulated?: boolean }): boolean {
+function isHumanOnline(h: { id: string; simulated?: boolean; lastSeen?: number }): boolean {
   if (h.simulated) return true;
-  return (humanSeen.get(h.id) ?? 0) > Date.now() - ONLINE_TTL;
+  return Number(h.lastSeen ?? 0) > Date.now() - ONLINE_TTL;
+}
+
+/** 上一轮广播出去的状态：只在「在线 ↔ 离线」翻转时推 presence */
+const onlineMemo = new Set<string>();
+
+function sweepPresence(): void {
+  for (const h of listHumans()) {
+    const on = isHumanOnline(h);
+    const was = onlineMemo.has(h.id);
+    if (on && !was) {
+      onlineMemo.add(h.id);
+      broadcast('presence', { humanId: h.id, name: h.name, online: true });
+    } else if (!on && was) {
+      onlineMemo.delete(h.id);
+      broadcast('presence', { humanId: h.id, name: h.name, online: false });
+    }
+  }
 }
 
 function markHumanOnline(id: string): void {
-  const was = isHumanOnline({ id });
-  humanSeen.set(id, Date.now());
-  if (!was) {
-    const h = getHuman(id);
-    broadcast('presence', { humanId: id, name: h?.name ?? '', online: true });
-  }
+  touchHumanSeen(id);
+  sweepPresence();
 }
+
+// 每 20 秒扫一遍：有人超时没心跳就推一条离线，客户端不会一直挂着「在线」
+(setInterval(sweepPresence, 20_000) as unknown as { unref?: () => void }).unref?.();
 
 function humansWithPresence() {
   return listHumans().map((h) => ({ ...h, online: isHumanOnline(h) }));
@@ -1526,6 +1543,7 @@ app.post('/api/agents', async (c) => {
     group: String(b?.group ?? '').trim(),
     tags: Array.isArray(b?.tags) ? b.tags.map((s: unknown) => String(s).trim()).filter(Boolean) : [],
   });
+  broadcast('agents', { action: 'create', agentId: agent.id });
   return c.json({ data: agent }, 201);
 });
 
@@ -1548,6 +1566,7 @@ app.patch('/api/agents/:id', async (c) => {
     group: typeof b?.group === 'string' ? b.group.trim() : undefined,
     tags: Array.isArray(b?.tags) ? b.tags.map((s: unknown) => String(s).trim()).filter(Boolean) : undefined,
   });
+  broadcast('agents', { action: 'update', agentId: id });
   return c.json({ data: getAgent(id) });
 });
 
@@ -1555,6 +1574,7 @@ app.delete('/api/agents/:id', (c) => {
   const id = c.req.param('id');
   if (!getAgent(id)) return c.json({ error: 'agent not found' }, 404);
   deleteAgent(id);
+  broadcast('agents', { action: 'delete', agentId: id });
   return c.json({ ok: true });
 });
 
@@ -3984,6 +4004,12 @@ app.post('/api/conversations/:id/messages', async (c) => {
               await stream.writeSSE({
                 event: 'tool',
                 data: JSON.stringify({ id: messageId, toolId: ev.id, status: ev.ok ? 'ok' : 'failed' }),
+              });
+            } else if (ev.type === 'compacting') {
+              // 执行引擎在整理记忆：让界面显示「正在整理记忆…」
+              await stream.writeSSE({
+                event: 'compacting',
+                data: JSON.stringify({ id: messageId, agentId, on: ev.on }),
               });
             } else if (ev.type === 'permission') {
               await stream.writeSSE({

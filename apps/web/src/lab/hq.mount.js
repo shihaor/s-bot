@@ -1516,6 +1516,16 @@
         /* 真人督办：全部坐在任务分配区（大班台前的访客椅 / 会客单椅 / 东侧会议桌） */
         var HUMAN_HAIR = ["#2a221c", "#5a3a22", "#3a7bd5", "#b99bff", "#8a5a33", "#3fc1a8"];
         var HUMAN_SHIRT = ["#f4f1ea", "#9ad1c4", "#7fd3ff", "#ffd1a8", "#c9b8ff", "#e9e4da", "#a8e063", "#ff8fc0"];
+        function spawnGuest(h, i) {
+            var sp = HUMAN_SPOTS[i]; if (!sp) return null;
+            var seat = { place: sp.place, visit: sp.place, tray: [sp.x, 0.62, sp.z], trayYaw: 0, deskPt: [sp.x, 0.61, sp.z], own: null, head: false, D: -1 };
+            var p = mkPerson({ n: String(h[0] || "真人").slice(0, 8), role: String(h[1] || "真人督办").slice(0, 14), d: -1, ai: 0, head: 0, hs: (i + 2) % 5, hc: HUMAN_HAIR[i % HUMAN_HAIR.length], sc: HUMAN_SHIRT[i % HUMAN_SHIRT.length], skin: SKINS[i % SKINS.length], skills: [] });
+            p.gmGuest = true;
+            p.sn = String(h[0] || "真人");
+            takeSeat(p, seat); placeHome(p);
+            if (h[2] === false && p.nt) p.nt.el.classList.add("off");
+            return p;
+        }
         var HUMAN_SPOTS = [
             [-0.85, -6.95, Math.PI], [0.85, -6.95, Math.PI],
             [-2.3, -9.7, 0], [-2.3, -6.3, Math.PI],
@@ -1617,14 +1627,7 @@
             seatRoster(saved);
             /* S-BOT 里的真人督办：全部安排在任务分配区，不参与工位轮转 */
             var HH = (host.__seedHumans instanceof Array) ? host.__seedHumans : [];
-            HH.slice(0, HUMAN_SPOTS.length).forEach(function (h, i) {
-                var sp = HUMAN_SPOTS[i];
-                var seat = { place: sp.place, visit: sp.place, tray: [sp.x, 0.62, sp.z], trayYaw: 0, deskPt: [sp.x, 0.61, sp.z], own: null, head: false, D: -1 };
-                var p = mkPerson({ n: String(h[0] || "真人").slice(0, 8), role: String(h[1] || "真人督办").slice(0, 14), d: -1, ai: 0, head: 0, hs: (i + 2) % 5, hc: HUMAN_HAIR[i % HUMAN_HAIR.length], sc: HUMAN_SHIRT[i % HUMAN_SHIRT.length], skin: SKINS[i % SKINS.length], skills: [] });
-                p.gmGuest = true;
-                takeSeat(p, seat); placeHome(p);
-                if (h[2] === false && p.nt) p.nt.el.classList.add("off");
-            });
+            HH.slice(0, HUMAN_SPOTS.length).forEach(spawnGuest);
         })();
 
         /* =====================================================================
@@ -1957,7 +1960,14 @@
             for (i = RINGS.length - 1; i >= 0; i--) if (now - RINGS[i].t0 > 1.4) RINGS.splice(i, 1);
             for (i = FLYS.length - 1; i >= 0; i--) { var it = FLYS[i]; it.ft += dt / it.fd; if (it.ft >= 1) { FLYS.splice(i, 1); arrive(it); } }
             for (i = 0; i < PEOPLE.length; i++) updPerson(PEOPLE[i], dt);
-            for (i = PEOPLE.length - 1; i >= 0; i--) if (PEOPLE[i].dead) { var dp = PEOPLE[i]; if (dp.tag && dp.tag.el.parentNode) dp.tag.el.parentNode.removeChild(dp.tag.el); PEOPLE.splice(i, 1); rosterDirty = true; }
+            for (i = PEOPLE.length - 1; i >= 0; i--) if (PEOPLE[i].dead) {
+                var dp = PEOPLE[i];
+                if (dp.tag && dp.tag.el.parentNode) dp.tag.el.parentNode.removeChild(dp.tag.el);
+                if (dp.nt && dp.nt.el && dp.nt.el.parentNode) dp.nt.el.parentNode.removeChild(dp.nt.el);
+                if (dp.at && dp.at.occ === dp) dp.at.occ = null;
+                if (dp.home && dp.home.occ === dp) dp.home.occ = null;
+                PEOPLE.splice(i, 1); rosterDirty = true;
+            }
 
             var tr = 0; PEOPLE.forEach(function (p) { if (p.ai && p.cur && p.cur.st === "work" && p.at === p.home) tr += p.tokR; });
             ST.tokRate += (tr - ST.tokRate) * Math.min(1, dt * 2);
@@ -2022,6 +2032,8 @@
             log(hrh.n, pcol(hrh), p.n + " 离开" + (D ? D.zh : "") + (items.length ? " · " + items.length + " 项工作已移交" : ""), "w", { d: [HRD, p.d], p: [p.id, hrh.id] });
             say(p, rpick(["大家再见！", "交接完毕，再见", "有缘再会"]), p.ai ? "ai" : "", 2);
             var leave = function () { p.task = "leave"; walkTo(p, GATE, function () { p.dead = true; }); };
+            /* 兜底：走到一半被别的状态打断也要消失（不然名牌会一直挂着） */
+            setTimeoutSim(6, function () { p.dead = true; });
             if (p.mode === "walk") p.cb = leave; else leave();
             ST.left++; saveRoster(); rosterDirty = true;
             return null;
@@ -2029,7 +2041,14 @@
         function hrReset() {
             var moved = [];
             PEOPLE.forEach(function (p) { if (p === CHIEF || p.gone) return; moved = moved.concat(handover(p)); p.gone = true; p.dead = true; if (p.seat) p.seat.own = null; });
-            for (var i = PEOPLE.length - 1; i >= 0; i--) if (PEOPLE[i].dead) { if (PEOPLE[i].tag && PEOPLE[i].tag.el.parentNode) PEOPLE[i].tag.el.parentNode.removeChild(PEOPLE[i].tag.el); PEOPLE.splice(i, 1); }
+            for (var i = PEOPLE.length - 1; i >= 0; i--) if (PEOPLE[i].dead) {
+                var dp2 = PEOPLE[i];
+                if (dp2.tag && dp2.tag.el.parentNode) dp2.tag.el.parentNode.removeChild(dp2.tag.el);
+                if (dp2.nt && dp2.nt.el && dp2.nt.el.parentNode) dp2.nt.el.parentNode.removeChild(dp2.nt.el);
+                if (dp2.at && dp2.at.occ === dp2) dp2.at.occ = null;
+                if (dp2.home && dp2.home.occ === dp2) dp2.home.occ = null;
+                PEOPLE.splice(i, 1);
+            }
             if (MT) { MEETSEATS.concat(GMSEATS).forEach(function (s) { s.occ = null; }); MT = null; ST.meetT = 20; }
             LOUNGE.forEach(function (s) { s.occ = null; });
             /* 被清掉的人预约过的位置（送文件的来访站位等）一并释放 */
@@ -2989,6 +3008,7 @@
             last = ts; now += dt; FC++;
             if (raw < 1) govern(raw);
             step(dt);
+            host.__glOk = !!gl;
             if (gl) {
                 if (SPRITE) {
                     /* 静态层按需重烘（镜头/昼夜/尺寸变化），其余帧几乎不碰 GPU */
@@ -3231,8 +3251,9 @@
         host.__fc = function () { return FC; };
         /* 2.5D：人物用 2D 画布画，不再走 WebGL */
         function drawSprites() {
-            var c2 = $("p2d"); if (!c2) return;
-            var w = glc.width, h = glc.height;
+            host.__sprN = (host.__sprN || 0) + 1; host.__sprLast = "in";
+            var c2 = $("p2d"); if (!c2) { host.__sprLast = "no-el"; return; }
+            var w = glc.width, h = glc.height; host.__sprBox = [w, h, c2.width, c2.height, SPRITE ? 1 : 0];
             if (c2.width !== w || c2.height !== h) { c2.width = w; c2.height = h; }
             var g = c2.getContext("2d"); if (!g) return;
             g.setTransform(1, 0, 0, 1, 0, 0);
@@ -3306,7 +3327,7 @@
         host.__draw = function () {
             if (!gl) return false;
             camUpdate(0.016); updateSim(0.016); envUpdate();
-            buildScene(now, 0.016); shadowSetup(); drawAll(now); placeHud();
+            buildScene(now, 0.016); shadowSetup(); drawAll(now); if (SPRITE) drawSprites(); placeHud();
             return true;
         };
         host.__cpu = function (n) { if (!BAT.v) batInit(); var t0 = performance.now(), i; for (i = 0; i < n; i++) { now += 0.016; step(0.016); buildScene(now, 0.016); placeHud(); } return { ms: (performance.now() - t0) / n, bat: BAT.nv, bati: BAT.ni, fxa: FXA.n, draws: DRAWS.length }; };
@@ -3329,6 +3350,60 @@
         host.__org = function (o) { ORG = o || null; return !!ORG; };
         host.__groupPct = function (list) { GPCT = (list instanceof Array) ? list : null; return GPCT ? GPCT.length : 0; };
         host.__agentTasks = function (map) { ATASK = (map && typeof map === "object") ? map : {}; };
+        /* 运行时同步智能体：新加的走进来，删掉的离开 */
+        host.__syncAgents = function (rows) {
+            if (!(rows instanceof Array)) return 0;
+            if (!rows.length) return living().length; /* 名单是空的 = 还没加载好，别把场景清空 */
+            var want = {}, have = {}, i;
+            for (i = 0; i < rows.length; i++) { var r = rows[i]; if (r && r[0]) want[r[0]] = 1; }
+            living().forEach(function (p) {
+                if (p.isChief || p.gmGuest) return;
+                if (!want[p.n]) hrRemove(p);
+            });
+            living().forEach(function (p) { if (!p.gmGuest) have[p.n] = 1; });
+            rows.forEach(function (r) {
+                if (!r || !r[0] || have[r[0]]) return;
+                var o = rowObj(r);
+                var pl = planSeat(null, o.d, o.head);
+                if (pl.err) {
+                    /* 原来那块满了：找个还有空位的工位块 */
+                    for (var k = 0; k < ND; k++) { var pl2 = planSeat(null, k, 0); if (!pl2.err) { o.d = k; o.head = 0; pl = pl2; break; } }
+                }
+                if (pl.err) return;
+                try {
+                    var p = mkPerson(o);
+                    p.at = GATE; p.x = GATE.x; p.z = GATE.z; p.yaw = p.yawT = Math.PI; p.pose = "stand"; p.mode = "stand"; p.sk = 0;
+                    applyPlan(p, pl);
+                    p.task = "home";
+                    walkTo(p, p.home, function () { say(p, "大家好，我是" + p.n + "！", p.ai ? "ai" : "g", 2); });
+                } catch (e) { /* 某一个人加不进来不影响其他人 */ }
+            });
+            rosterDirty = true;
+            return living().length;
+        };
+        /* 运行时同步真人：只保留在线列表里的人 */
+        host.__syncHumans = function (list) {
+            if (!(list instanceof Array)) return 0;
+            var want = {}, used = {}, i;
+            for (i = 0; i < list.length; i++) { var h = list[i]; if (h && h[0]) want[h[0]] = 1; }
+            living().forEach(function (p) {
+                if (!p.gmGuest) return;
+                if (!want[p.sn || p.n]) { p.gone = true; p.dead = true; return; }
+                if (p.home) used[p.home.x + "," + p.home.z] = 1;
+            });
+            var have = {};
+            living().forEach(function (p) { if (p.gmGuest && !p.gone) have[p.sn || p.n] = 1; });
+            list.forEach(function (h) {
+                if (!h || !h[0] || have[h[0]]) return;
+                for (var k = 0; k < HUMAN_SPOTS.length; k++) {
+                    var sp = HUMAN_SPOTS[k];
+                    if (used[sp.x + "," + sp.z]) continue;
+                    spawnGuest(h, k); used[sp.x + "," + sp.z] = 1;
+                    break;
+                }
+            });
+            return living().length;
+        };
         /* 真实任务 → 卡片文案；没有就返回 null */
         function realTask(p) {
             var t = ATASK[p.n];

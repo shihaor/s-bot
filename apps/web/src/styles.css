@@ -1328,3 +1328,7 @@ html { transition: background-color 0.16s ease, color 0.16s ease; }
 /* ---------- 真人行：名字下面显示真实 IP ---------- */
 .peer-ip { color: var(--text-faint); font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 10.5px; letter-spacing: 0.2px; }
 .conv.human.active .peer-ip { color: var(--text-dim); }
+
+/* ---------- 执行引擎版本太低 ---------- */
+.oc-candidate.toolow { opacity: 0.55; cursor: not-allowed; }
+.oc-candidate.toolow b { color: var(--warn); }

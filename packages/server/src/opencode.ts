@@ -37,6 +37,10 @@ export interface OpencodeStatus {
   version?: string;
   url?: string;
   error?: string;
+  /** 扫到了引擎但版本太低时的实际版本号 */
+  tooLowVersion?: string;
+  /** 需要的最低版本 */
+  minVersion?: string;
   dataDir?: string;
   sidecarDir?: string;
   configFile?: string;
@@ -108,17 +112,35 @@ function pathCandidates(): string[] {
   return [...new Set(list)];
 }
 
-function probe(bin: string): { version: string } | null {
+/** 执行引擎最低要求版本：低于这个主版本 API 完全不兼容 */
+export const MIN_OPENCODE_VERSION = '2.0.0';
+
+interface ProbeResult {
+  version: string;
+  tooLow: boolean;
+}
+
+/** 读版本号；返回 null 表示文件本身跑不起来/读不到版本 */
+function probeVersion(bin: string): ProbeResult | null {
   try {
     const out = execFileSync(bin, ['--version'], { timeout: 8000, encoding: 'utf8' }).trim();
     const m = out.match(/(\d+)\.(\d+)\.(\d+)/);
     if (!m) return null;
-    if (Number(m[1]) < 2) return null;
-    return { version: m[0] };
+    return { version: m[0], tooLow: Number(m[1]) < 2 };
   } catch {
     return null;
   }
 }
+
+function probe(bin: string): { version: string } | null {
+  const r = probeVersion(bin);
+  if (!r || r.tooLow) return null;
+  return { version: r.version };
+}
+
+/** 最近一次扫描里发现的「版本太低」的引擎，用于给用户明确提示 */
+let lastTooLowVersion: string | null = null;
+
 
 /** 上次进程如果崩了，按 pid 文件把残留的 sidecar 收掉 */
 function killStaleSidecar() {
@@ -144,14 +166,20 @@ function forgetSidecar() {
 /** 找一个可用的 opencode v2 可执行文件 */
 export function detectBinary(force = false): { bin: string; version: string } | null {
   if (!force && binCache !== undefined) return binCache;
+  let tooLow: string | null = null;
   for (const candidate of pathCandidates()) {
     if (!existsSync(candidate)) continue;
-    const ok = probe(candidate);
-    if (ok) {
-      binCache = { bin: candidate, version: ok.version };
-      return binCache;
+    const r = probeVersion(candidate);
+    if (!r) continue;
+    if (r.tooLow) {
+      tooLow = tooLow ?? r.version;
+      continue;
     }
+    lastTooLowVersion = null;
+    binCache = { bin: candidate, version: r.version };
+    return binCache;
   }
+  lastTooLowVersion = tooLow;
   binCache = null;
   return null;
 }
@@ -202,6 +230,8 @@ function binariesUnder(dir: string): string[] {
 export interface BinaryCandidate {
   bin: string;
   version: string;
+  /** 版本低于最低要求（界面要提示「版本太低，请升级」） */
+  tooLow?: boolean;
 }
 
 /**
@@ -219,9 +249,9 @@ export function scanBinaryCandidates(extra?: string, limit = 8): BinaryCandidate
     if (seen.has(key)) continue;
     seen.add(key);
     if (!isFile(candidate)) continue;
-    const ok = probe(candidate);
-    if (!ok) continue;
-    result.push({ bin: candidate, version: ok.version });
+    const r = probeVersion(candidate);
+    if (!r) continue;
+    result.push({ bin: candidate, version: r.version, tooLow: r.tooLow });
     if (result.length >= limit) break;
   }
   return result;
@@ -239,20 +269,40 @@ export function applyBinaryPath(input: string): { ok: boolean; bin?: string; err
   let bin = value;
   if (isDirectory(value)) {
     let foundBin: string | null = null;
+    let tooLowFound: string | null = null;
     for (const candidate of binariesUnder(value)) {
-      if (isFile(candidate) && probe(candidate)) {
-        foundBin = candidate;
-        break;
-      }
+      if (!isFile(candidate)) continue;
+      const r = probeVersion(candidate);
+      if (!r) continue;
+      if (r.tooLow) { tooLowFound = tooLowFound ?? r.version; continue; }
+      foundBin = candidate;
+      break;
     }
     if (!foundBin) {
+      if (tooLowFound) {
+        return {
+          ok: false,
+          error: `这个目录里的执行引擎是 ${tooLowFound}，版本太低（需要 ${MIN_OPENCODE_VERSION} 及以上），请升级后再试`,
+          status: getStatus(),
+        };
+      }
       return { ok: false, error: '这个目录里没找到执行引擎程序', status: getStatus() };
     }
     bin = foundBin;
   } else if (!isFile(value)) {
     return { ok: false, error: '路径不存在，或者不是一个文件/目录', status: getStatus() };
-  } else if (!probe(value)) {
-    return { ok: false, error: '这个文件跑不起来 opencode --version，可能不是 v2 的 CLI', status: getStatus() };
+  } else {
+    const r = probeVersion(value);
+    if (!r) {
+      return { ok: false, error: '这个文件跑不起来 opencode --version，可能不是 v2 的 CLI', status: getStatus() };
+    }
+    if (r.tooLow) {
+      return {
+        ok: false,
+        error: `检测到执行引擎 ${r.version}，版本太低（需要 ${MIN_OPENCODE_VERSION} 及以上），请升级后再试`,
+        status: getStatus(),
+      };
+    }
   }
 
   saveSettings({ opencodeBin: bin });
@@ -448,12 +498,20 @@ async function waitHealthy(baseUrl: string, authorization: string, timeout = 300
 
 export function getStatus(): OpencodeStatus {
   const bin = detectBinary();
+  const tooLow = bin ? null : lastTooLowVersion;
   return {
     ...started,
     available: !!bin,
     bin: bin?.bin,
     version: bin?.version,
     running: !!proc && !!client,
+    tooLowVersion: tooLow ?? undefined,
+    minVersion: MIN_OPENCODE_VERSION,
+    error: bin
+      ? started.error
+      : tooLow
+        ? `检测到执行引擎 ${tooLow}，版本太低（需要 ${MIN_OPENCODE_VERSION} 及以上），请升级后重试`
+        : started.error,
     ...getOpencodePaths(),
   };
 }
@@ -614,7 +672,13 @@ export async function ensureStarted(model?: ModelInfo | null): Promise<boolean> 
   starting = (async () => {
     const bin = detectBinary(true);
     if (!bin) {
-      started = { available: false, running: false, error: '本机没有兼容的执行引擎' };
+      started = {
+        available: false,
+        running: false,
+        error: lastTooLowVersion
+          ? `检测到执行引擎 ${lastTooLowVersion}，版本太低（需要 ${MIN_OPENCODE_VERSION} 及以上），请升级后重试`
+          : '本机没有兼容的执行引擎',
+      };
       return false;
     }
 
@@ -1051,6 +1115,8 @@ export type OpencodeEvent =
   | { type: 'tool-end'; id: string; ok: boolean }
   | { type: 'permission'; requestID: string; action: string; resources: string[] }
   | { type: 'form'; formID: string; title: string; fields: any[] }
+  /** 执行引擎在整理记忆（compaction），界面要提示一下 */
+  | { type: 'compacting'; on: boolean }
   | { type: 'done'; interrupted?: boolean }
   | { type: 'error'; message: string };
 
@@ -1222,8 +1288,14 @@ export async function* runAgent(input: RunInput): AsyncGenerator<OpencodeEvent> 
           }
           break;
         }
+        case 'session.compaction.started':
+          yield { type: 'compacting', on: true };
+          break;
+        case 'session.compaction.ended':
+        case 'session.compaction.failed':
+          yield { type: 'compacting', on: false };
+          break;
         case 'session.execution.succeeded':
-          // 中途插过话：这一轮结束后模型可能还会继续跑一轮，先等一会儿
           if (takePendingSteer(sessionId)) {
             steerGrace = 10000;
             break;

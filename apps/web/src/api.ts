@@ -551,6 +551,10 @@ export interface OpencodeStatusData {
   version?: string;
   url?: string;
   error?: string;
+  /** 扫到了引擎但版本太低时的实际版本号 */
+  tooLowVersion?: string;
+  /** 需要的最低版本 */
+  minVersion?: string;
   dataDir?: string;
   sidecarDir?: string;
   configFile?: string;
@@ -564,6 +568,8 @@ export async function fetchOpencodeStatus(): Promise<OpencodeStatusData> {
 export interface OpencodeCandidate {
   bin: string;
   version: string;
+  /** 版本低于最低要求 */
+  tooLow?: boolean;
 }
 
 /** 扫描 opencode 安装位置；save=true 时把 path 保存为手动指定的可执行文件/安装目录 */
@@ -1063,6 +1069,7 @@ export type ChatEvent =
   | { type: 'retrieval.start'; agentId: string }
   | { type: 'retrieval.done'; agentId: string; count: number }
   | { type: 'permission.ask'; agentId: string; messageId: string; requestID: string; action: string; resources: string[] }
+  | { type: 'compacting'; id: string; agentId: string; on: boolean }
   | { type: 'form.ask'; agentId: string; messageId: string; formID: string; title: string; fields: FormField[] }
   | { type: 'workflow.start'; runId: string; conversationId: string; graph: GroupWorkflow }
   | { type: 'workflow.node'; runId: string; node: { id: string; type: string; label: string; agentId: string | null } }
