@@ -18,6 +18,7 @@ const mapAgent = (r: any): Agent => ({
   kbIds: JSON.parse(r.kb_ids || '[]'),
   group: r.agent_group ?? '',
   tags: JSON.parse(r.tags || '[]'),
+  shared: !!r.shared,
   createdAt: r.created_at,
 });
 
@@ -244,11 +245,12 @@ export function createAgent(input: {
   ownerId?: string | null;
   group?: string;
   tags?: string[];
+  shared?: boolean;
 }): Agent {
   const id = `ag_${Date.now().toString(36)}`;
   const createdAt = Date.now();
   db.prepare(
-    'INSERT INTO agents (id, name, role, color, initial, model_id, system_prompt, description, visibility, tools, skills, kb_ids, owner_id, agent_group, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO agents (id, name, role, color, initial, model_id, system_prompt, description, visibility, tools, skills, kb_ids, owner_id, agent_group, tags, shared, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
   ).run(
     id,
     input.name,
@@ -265,6 +267,7 @@ export function createAgent(input: {
     input.ownerId ?? null,
     input.group ?? '',
     JSON.stringify(input.tags ?? []),
+    input.shared ? 1 : 0,
     createdAt,
   );
   return getAgent(id)!;
@@ -286,6 +289,7 @@ export function updateAgent(
     kbIds?: string[];
     group?: string;
     tags?: string[];
+    shared?: boolean;
   },
 ): void {
   const map: Record<string, unknown> = {
@@ -302,6 +306,7 @@ export function updateAgent(
     kb_ids: patch.kbIds === undefined ? undefined : JSON.stringify(patch.kbIds),
     agent_group: patch.group,
     tags: patch.tags === undefined ? undefined : JSON.stringify(patch.tags),
+    shared: patch.shared === undefined ? undefined : (patch.shared ? 1 : 0),
   };
   const fields: string[] = [];
   const values: Array<string | number | null> = [];
@@ -662,6 +667,10 @@ export interface AppSettings {
   ragflowEnabledKbs: string[];
   mattermostUrl: string;
   mattermostToken: string;
+  /** 技术组件中心地址（S-BOT 终端上报用，形如 http://10.201.2.38:8090/item） */
+  sbotCenterUrl: string;
+  /** 共享到技术组件中心的技能 id 列表 */
+  sbotSharedSkills: string[];
 }
 
 export const DEFAULT_OPENCODE_URL = 'http://10.201.1.19:80/artifactory/installer/opencode/OpenCode.zip';
@@ -709,6 +718,11 @@ export function getSettings(): AppSettings {
     const parsed = JSON.parse(map.ragflow_enabled_kbs ?? '[]');
     if (Array.isArray(parsed)) enabled = parsed.map(String);
   } catch { /* ignore */ }
+  let sharedSkills: string[] = [];
+  try {
+    const parsed = JSON.parse(map.sbot_shared_skills ?? '[]');
+    if (Array.isArray(parsed)) sharedSkills = parsed.map(String);
+  } catch { /* ignore */ }
   return {
     baseUrl: map.llm_base_url ?? process.env.LLM_BASE_URL ?? '',
     apiKey: map.llm_api_key ?? process.env.LLM_API_KEY ?? '',
@@ -720,6 +734,8 @@ export function getSettings(): AppSettings {
     ragflowEnabledKbs: enabled,
     mattermostUrl: map.mattermost_url ?? process.env.MATTERMOST_URL ?? '',
     mattermostToken: map.mattermost_token ?? process.env.MATTERMOST_TOKEN ?? '',
+    sbotCenterUrl: map.sbot_center_url ?? '',
+    sbotSharedSkills: sharedSkills,
   };
 }
 
@@ -737,6 +753,8 @@ export function saveSettings(next: Partial<AppSettings>): void {
   if (next.ragflowEnabledKbs !== undefined) stmt.run('ragflow_enabled_kbs', JSON.stringify(next.ragflowEnabledKbs));
   if (next.mattermostUrl !== undefined) stmt.run('mattermost_url', next.mattermostUrl);
   if (next.mattermostToken !== undefined) stmt.run('mattermost_token', next.mattermostToken);
+  if (next.sbotCenterUrl !== undefined) stmt.run('sbot_center_url', next.sbotCenterUrl);
+  if (next.sbotSharedSkills !== undefined) stmt.run('sbot_shared_skills', JSON.stringify(next.sbotSharedSkills));
 }
 
 /* ---------- 会话维护 ---------- */

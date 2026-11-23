@@ -42,6 +42,23 @@ export async function fetchMessages(conversationId: string): Promise<Message[]> 
   return r.data;
 }
 
+/** 正在执行的那一轮的实时快照：切页面/刷新后用它把“正在执行的步骤”补回来 */
+export interface LiveRunData {
+  running: boolean;
+  agentId?: string;
+  agentName?: string;
+  agentRole?: string;
+  agentColor?: string;
+  agentInitial?: string;
+  text?: string;
+  tools?: Array<{ toolId: string; name: string; detail: string; status: 'running' | 'ok' | 'failed' }>;
+}
+
+export async function fetchLiveRun(conversationId: string): Promise<LiveRunData> {
+  const r = await getJson<{ data: LiveRunData }>(`/api/conversations/${conversationId}/live`);
+  return r.data;
+}
+
 export async function fetchRuntime(): Promise<{ mode: string; label: string }> {
   return getJson('/api/runtime');
 }
@@ -165,6 +182,7 @@ export async function createAgent(input: {
   kbIds?: string[];
   group?: string;
   tags?: string[];
+  shared?: boolean;
 }): Promise<Agent> {
   const res = await apiFetch('/api/agents', {
     method: 'POST',
@@ -918,6 +936,8 @@ export interface AppSettingsData {
   ragflowEnabledKbs: string[];
   mattermostUrl: string;
   mattermostToken: string;
+  sbotCenterUrl: string;
+  sbotSharedSkills: string[];
 }
 
 export async function fetchSettings(): Promise<AppSettingsData> {
@@ -933,6 +953,26 @@ export async function patchSettings(patch: Partial<AppSettingsData>): Promise<Ap
   });
   if (!res.ok) throw new Error('保存设置失败');
   const r = (await res.json()) as { data: AppSettingsData };
+  return r.data;
+}
+
+/* ---------- 技术组件中心上报 ---------- */
+
+export interface SbotReportStatus {
+  configured: boolean;
+  lastReportAt: number;
+  lastError: string;
+}
+
+export async function reportToCenterNow(): Promise<{ ok: boolean; error?: string } & SbotReportStatus> {
+  const res = await apiFetch('/api/sbot/report-now', { method: 'POST' });
+  const body = (await res.json().catch(() => ({}))) as { data?: { ok: boolean; error?: string } & SbotReportStatus };
+  if (!body.data) throw new Error(`上报失败 ${res.status}`);
+  return body.data;
+}
+
+export async function fetchSbotReportStatus(): Promise<SbotReportStatus> {
+  const r = await getJson<{ data: SbotReportStatus }>('/api/sbot/report-status');
   return r.data;
 }
 

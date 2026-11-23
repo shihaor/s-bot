@@ -373,6 +373,39 @@ function localSkillDirs(): string[] {
   return [...new Set(dirs)].filter((d) => existsSync(d));
 }
 
+/** 不启动引擎，直接读本地技能目录（上报技术组件中心用） */
+export function readLocalSkills(): Array<{ id: string; name: string; description: string; content: string }> {
+  const out: Array<{ id: string; name: string; description: string; content: string }> = [];
+  for (const dir of localSkillDirs()) {
+    let entries: Array<{ name: string; isDirectory: () => boolean }> = [];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const file = join(dir, entry.name, 'SKILL.md');
+      if (!existsSync(file)) continue;
+      let content = '';
+      try {
+        content = readFileSync(file, 'utf8');
+      } catch {
+        continue;
+      }
+      const nameMatch = content.match(/^name:\s*(.+)$/m);
+      const descMatch = content.match(/^description:\s*(.+)$/m);
+      out.push({
+        id: entry.name,
+        name: (nameMatch?.[1] ?? entry.name).trim(),
+        description: (descMatch?.[1] ?? '').trim(),
+        content,
+      });
+    }
+  }
+  return out;
+}
+
 /** 把 S-BOT 里的模型全部写进 sidecar 的 opencode 配置：同一个 baseUrl 一个 provider */
 function providerConfigFor(models: ModelInfo[], preferred: ModelInfo | null) {
   const buckets = new Map<string, { baseUrl: string; apiKey: string; models: Record<string, { name: string }> }>();

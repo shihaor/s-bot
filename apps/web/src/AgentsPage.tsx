@@ -18,6 +18,8 @@ export interface AgentInput {
   kbIds: string[];
   group?: string;
   tags?: string[];
+  /** 共享到技术组件中心 */
+  shared?: boolean;
 }
 
 interface FormState extends AgentInput {
@@ -41,6 +43,7 @@ const EMPTY: FormState = {
   tools: { read: true, web: false, shell: false },
   kbIds: [],
   group: '',
+  shared: false,
 };
 
 interface Props {
@@ -130,6 +133,7 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
       group: a.group ?? '',
       tags: a.tags ?? [],
       tagsText: (a.tags ?? []).join('，'),
+      shared: a.shared === true,
     });
   }
 
@@ -150,6 +154,7 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
       kbIds: form.kbIds,
       group: form.group?.trim() ?? '',
       tags: form.tagsText.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
+      shared: form.shared === true,
     };
     try {
       if (form.id) await onUpdate(form.id, payload);
@@ -280,6 +285,16 @@ export default function AgentsPage({ agents, models, kbs, userId, onOpen, onCrea
                     <option value="private">仅自己</option>
                   </select>
                 </label>
+              </div>
+              <div className="form-row">
+                <div>
+                  <div className="k">共享到技术组件中心</div>
+                  <div className="d">打开后，这个智能体会出现在服务端的「S-BOT 终端」里，供同事查看和下载</div>
+                </div>
+                <div
+                  className={`sw ${form.shared ? 'on' : ''}`}
+                  onClick={() => setForm({ ...form, shared: !form.shared })}
+                />
               </div>
               <div className="field">
                 <span>知识库（可多选，绑定的才会检索）</span>

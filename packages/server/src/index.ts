@@ -91,6 +91,7 @@ import {
 } from './opencode.js';
 import { listDatasets, ragflowStatus, retrieve } from './ragflow.js';
 import { getLanIdentity, getLanPeers, registerPeer, setLanIdentity, setLanPort } from './lan.js';
+import { reporterStatus, reportToCenter, startReporter } from './sbotCenter.js';
 import { MAX_FILE_BYTES, fileBlobPath, getFileMeta, openFileStream, saveFromResponse, saveUpload } from './files.js';
 import {
   getMattermostStatus,
@@ -410,6 +411,8 @@ app.patch('/api/settings', async (c) => {
     ragflowEnabledKbs: Array.isArray(b?.ragflowEnabledKbs) ? b.ragflowEnabledKbs.map(String) : undefined,
     mattermostUrl: typeof b?.mattermostUrl === 'string' ? b.mattermostUrl.trim() : undefined,
     mattermostToken: typeof b?.mattermostToken === 'string' ? b.mattermostToken.trim() : undefined,
+    sbotCenterUrl: typeof b?.sbotCenterUrl === 'string' ? b.sbotCenterUrl.trim() : undefined,
+    sbotSharedSkills: Array.isArray(b?.sbotSharedSkills) ? b.sbotSharedSkills.map(String) : undefined,
   });
   resetBinaryCache();
   return c.json({ data: getSettings() });
@@ -1542,6 +1545,7 @@ app.post('/api/agents', async (c) => {
     ownerId: c.req.header('x-sbot-user') || null,
     group: String(b?.group ?? '').trim(),
     tags: Array.isArray(b?.tags) ? b.tags.map((s: unknown) => String(s).trim()).filter(Boolean) : [],
+    shared: b?.shared === true,
   });
   broadcast('agents', { action: 'create', agentId: agent.id });
   return c.json({ data: agent }, 201);
@@ -1565,6 +1569,7 @@ app.patch('/api/agents/:id', async (c) => {
     kbIds: Array.isArray(b?.kbIds) ? b.kbIds.map((s: unknown) => String(s)) : undefined,
     group: typeof b?.group === 'string' ? b.group.trim() : undefined,
     tags: Array.isArray(b?.tags) ? b.tags.map((s: unknown) => String(s).trim()).filter(Boolean) : undefined,
+    shared: typeof b?.shared === 'boolean' ? b.shared : undefined,
   });
   broadcast('agents', { action: 'update', agentId: id });
   return c.json({ data: getAgent(id) });
@@ -3655,6 +3660,28 @@ const activeRuns = new Map<string, { abort: () => void; done: Promise<void> }>()
 /** 每个会话当前正在执行的 opencode session：新消息可以中途插话（steer）进去 */
 const activeAgentSessions = new Map<string, string>();
 
+/**
+ * 正在跑的这一轮「实时快照」：切页面/切会话/刷新后，客户端可以靠它把
+ * 智能体当前正在执行的步骤补回来（否则只能看到转圈或什么都没有）。
+ */
+interface LiveRun {
+  agentId: string;
+  agentName: string;
+  agentRole: string;
+  agentColor: string;
+  agentInitial: string;
+  text: string;
+  tools: Array<{ toolId: string; name: string; detail: string; status: string }>;
+  startedAt: number;
+}
+const liveRuns = new Map<string, LiveRun>();
+
+app.get('/api/conversations/:id/live', (c) => {
+  const lr = liveRuns.get(c.req.param('id'));
+  if (!lr) return c.json({ data: { running: false } });
+  return c.json({ data: { running: true, ...lr } });
+});
+
 app.post('/api/conversations/:id/messages', async (c) => {
   const id = c.req.param('id');
   const conv = getConversation(id);
@@ -3802,6 +3829,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
     const runCtl = {
       abort: () => {
         aborted = true;
+        liveRuns.delete(id);
         abortCtl.abort();
         resolveHumanWait(runId, 'skip');
       },
@@ -3969,6 +3997,16 @@ app.post('/api/conversations/:id/messages', async (c) => {
           usedOpencode = true;
           // 记下这一轮正在用哪个会话：新消息可以中途插话（steer）进来
           activeAgentSessions.set(id, sess.sessionId);
+          liveRuns.set(id, {
+            agentId,
+            agentName: agent.name,
+            agentRole: agent.role,
+            agentColor: agent.color,
+            agentInitial: agent.initial,
+            text: '',
+            tools: [],
+            startedAt: Date.now(),
+          });
           const prompt = buildOpencodePrompt(conv, agent, roundText, userMessage.createdAt, citations);
 
           for await (const ev of runAgent({ sessionId: sess.sessionId, prompt, signal: abortCtl.signal, autoApprove: agent.tools?.shell === true })) {
@@ -3976,6 +4014,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
             if (ev.type === 'delta') {
               sawEvent = true;
               full += ev.text;
+              const lr = liveRuns.get(id);
+              if (lr) lr.text = full;
               await stream.writeSSE({ event: 'message.delta', data: JSON.stringify({ id: messageId, delta: ev.text }) });
             } else if (ev.type === 'tool') {
               sawEvent = true;
@@ -3987,6 +4027,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
               } else {
                 tools.push({ type: 'tool', toolId: ev.id, name: ev.name, detail: ev.detail ?? '', file: ev.file ?? null, status: 'running' });
               }
+              const lr = liveRuns.get(id);
+              if (lr) lr.tools = tools.map((t) => ({ toolId: t.toolId, name: t.name, detail: t.detail, status: t.status }));
               await stream.writeSSE({
                 event: 'tool',
                 data: JSON.stringify({
@@ -4001,6 +4043,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
             } else if (ev.type === 'tool-end') {
               const existing = tools.find((t) => t.toolId === ev.id);
               if (existing) existing.status = ev.ok ? 'ok' : 'failed';
+              const lr = liveRuns.get(id);
+              if (lr) lr.tools = tools.map((t) => ({ toolId: t.toolId, name: t.name, detail: t.detail, status: t.status }));
               await stream.writeSSE({
                 event: 'tool',
                 data: JSON.stringify({ id: messageId, toolId: ev.id, status: ev.ok ? 'ok' : 'failed' }),
@@ -4121,6 +4165,8 @@ app.post('/api/conversations/:id/messages', async (c) => {
         parts: messageParts.length ? messageParts : undefined,
       });
       produced.push(saved);
+      // 这一轮已经落库，实时快照作废（否则客户端刷新后会看到重复的“正在执行”气泡）
+      liveRuns.delete(id);
       if (!failed) history.push({ role: 'assistant', content: full });
 
       // P2P 群：把智能体发言转发给远端真人
@@ -4204,6 +4250,7 @@ app.post('/api/conversations/:id/messages', async (c) => {
 
     await stream.writeSSE({ event: 'run.end', data: '{}' });
     activeAgentSessions.delete(id);
+    liveRuns.delete(id);
     finishRun();
     if (activeRuns.get(id) === runCtl) activeRuns.delete(id);
   });
@@ -4247,6 +4294,16 @@ app.post('/api/runs/:runId/reply', async (c) => {
 
 const port = Number(process.env.PORT ?? 8787);
 setLanPort(port);
+
+// 技术组件中心上报：配置了地址就每 60 秒报一次
+startReporter();
+
+/** 手动上报 / 查看上报状态（设置页用） */
+app.post('/api/sbot/report-now', async (c) => {
+  const r = await reportToCenter();
+  return c.json({ data: { ...r, ...reporterStatus() } }, r.ok ? 200 : 400);
+});
+app.get('/api/sbot/report-status', (c) => c.json({ data: reporterStatus() }));
 
 const staticDir = process.env.SBOT_STATIC_DIR;
 if (staticDir) {

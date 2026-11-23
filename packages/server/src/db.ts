@@ -167,6 +167,8 @@ ensureColumn('agents', 'owner_id', 'owner_id TEXT');
 ensureColumn('agents', 'agent_group', "agent_group TEXT NOT NULL DEFAULT ''");
 ensureColumn('agents', 'tags', "tags TEXT NOT NULL DEFAULT '[]'");
 ensureColumn('humans', 'simulated', 'simulated INTEGER NOT NULL DEFAULT 0');
+/** 是否共享到技术组件中心（默认不共享） */
+ensureColumn('agents', 'shared', 'shared INTEGER NOT NULL DEFAULT 0');
 ensureColumn('tasks', 'assignee_id', 'assignee_id TEXT');
 /** 备注：给真人起的别名，只在本机显示 */
 ensureColumn('humans', 'remark', "remark TEXT NOT NULL DEFAULT ''");

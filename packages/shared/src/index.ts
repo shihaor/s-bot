@@ -20,6 +20,8 @@ export interface Agent {
   group?: string;
   /** 标签（如「前端」「后端」「评审」） */
   tags?: string[];
+  /** 是否共享到技术组件中心（服务端只展示共享的） */
+  shared?: boolean;
   createdAt: number;
 }
 

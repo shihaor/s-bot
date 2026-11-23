@@ -65,6 +65,8 @@ async function startServer(): Promise<number> {
   process.env.PORT = String(port);
   process.env.SBOT_STATIC_DIR = path.join(__dirname, '../web');
   process.env.SBOT_DB = path.join(app.getPath('userData'), 'sbot.db');
+  // 上报技术组件中心时显示真实版本
+  process.env.SBOT_APP_VERSION = app.getVersion();
 
   const require = createRequire(import.meta.url);
   require('../server/index.cjs');

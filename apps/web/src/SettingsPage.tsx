@@ -14,9 +14,11 @@ import {
   fetchOpencodeModels,
   fetchOpencodeStatus,
   fetchSettings,
+  fetchSbotReportStatus,
   installOpencodeRuntime,
   openOpencodeDataDir,
   patchSettings,
+  reportToCenterNow,
   saveEnabledKbs,
   setDefaultModel,
   syncModelsToOpencode,
@@ -29,6 +31,7 @@ import {
   type OpencodeCandidate,
   type OpencodeModel,
   type OpencodeStatusData,
+  type SbotReportStatus,
 } from './api';
 
 interface Props {
@@ -112,6 +115,11 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
   const [mmToken, setMmToken] = useState('');
   const [mmStatus, setMmStatus] = useState<MattermostMeta | null>(null);
   const [mmBusy, setMmBusy] = useState(false);
+
+  /* ---- 技术组件中心 ---- */
+  const [sbotUrl, setSbotUrl] = useState('');
+  const [sbotBusy, setSbotBusy] = useState(false);
+  const [sbotStatus, setSbotStatus] = useState<SbotReportStatus | null>(null);
 
   /* ---- 软件更新（详细内容在右上角弹窗里，这里只保留版本号和手动检查） ---- */
   const [appVersion, setAppVersion] = useState('');
@@ -222,7 +230,9 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
       setRfKey(s.ragflowApiKey);
       setMmUrl(s.mattermostUrl ?? '');
       setMmToken(s.mattermostToken ?? '');
+      setSbotUrl(s.sbotCenterUrl ?? '');
       setOcStatus(oc);
+      void fetchSbotReportStatus().then(setSbotStatus).catch(() => { /* ignore */ });
     } catch (e) {
       onToast(String(e));
     }
@@ -936,6 +946,76 @@ export default function SettingsPage({ onToast, onSaved, onKbChanged, onConfirm 
         )}
         {updateInfo?.error && (
           <p className="sub" style={{ margin: '8px 0 0', color: 'var(--warn)' }}>{updateInfo.error}</p>
+        )}
+      </div>
+
+      <div className="set-card">
+        <div className="card-head">
+          <div>
+            <h3>技术组件中心</h3>
+            <p className="sub" style={{ marginBottom: 0 }}>
+              配置后本机会作为一台 S-BOT 终端接入：共享的智能体、技能和本机任务会展示在服务端的「S-BOT 使用」页面。
+            </p>
+          </div>
+          <b className={sbotStatus?.configured ? 'ok-text' : 'warn-text'}>
+            {sbotStatus?.configured ? '● 已接入' : '● 未配置'}
+          </b>
+        </div>
+        <label className="field" style={{ marginTop: 12 }}>
+          <span>服务地址（技术组件中心，不带 /sbot）</span>
+          <input
+            className="input"
+            value={sbotUrl}
+            onChange={(e) => setSbotUrl(e.target.value)}
+            placeholder="http://10.201.2.38:8090/item"
+          />
+        </label>
+        <div className="settings-actions">
+          <button
+            className="btn primary"
+            disabled={sbotBusy}
+            onClick={async () => {
+              setSbotBusy(true);
+              try {
+                await patchSettings({ sbotCenterUrl: sbotUrl.trim() });
+                const r = await reportToCenterNow();
+                setSbotStatus(r);
+                onToast(r.ok ? '已上报到技术组件中心' : `上报失败：${r.error ?? '未知错误'}`);
+              } catch (e) {
+                onToast(String(e));
+              } finally {
+                setSbotBusy(false);
+              }
+            }}
+          >
+            {sbotBusy ? '上报中…' : '保存并上报'}
+          </button>
+          <button
+            className="btn"
+            disabled={sbotBusy || !sbotUrl.trim()}
+            onClick={async () => {
+              setSbotBusy(true);
+              try {
+                const r = await reportToCenterNow();
+                setSbotStatus(r);
+                onToast(r.ok ? '已上报' : `上报失败：${r.error ?? '未知错误'}`);
+              } catch (e) {
+                onToast(String(e));
+              } finally {
+                setSbotBusy(false);
+              }
+            }}
+          >
+            立即上报
+          </button>
+          {sbotStatus?.lastReportAt ? (
+            <span className="sub" style={{ margin: 0 }}>
+              上次上报：{new Date(sbotStatus.lastReportAt).toLocaleString()}
+            </span>
+          ) : null}
+        </div>
+        {sbotStatus?.lastError && (
+          <p className="sub" style={{ margin: '8px 0 0', color: 'var(--warn)' }}>{sbotStatus.lastError}</p>
         )}
       </div>
 

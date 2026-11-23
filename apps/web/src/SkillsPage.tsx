@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { fetchOpencodeSkills, type OpencodeSkill } from './api';
+import { fetchOpencodeSkills, fetchSettings, patchSettings, type OpencodeSkill } from './api';
 import SkillCoach from './SkillCoach';
 
 const GROUP_ORDER = ['内置', '全局', 'Claude 兼容', 'Agents 兼容', '项目', '工作区'] as const;
@@ -23,6 +23,28 @@ export default function SkillsPage() {
   const [copied, setCopied] = useState(false);
   const [coachOpen, setCoachOpen] = useState(false);
   const [notice, setNotice] = useState('');
+  /** 已共享到技术组件中心的技能 id */
+  const [sharedSkills, setSharedSkills] = useState<string[]>([]);
+
+  useEffect(() => {
+    void fetchSettings()
+      .then((s) => setSharedSkills(s.sbotSharedSkills ?? []))
+      .catch(() => { /* ignore */ });
+  }, []);
+
+  async function toggleShared(id: string) {
+    const next = sharedSkills.includes(id)
+      ? sharedSkills.filter((x) => x !== id)
+      : [...sharedSkills, id];
+    setSharedSkills(next);
+    try {
+      await patchSettings({ sbotSharedSkills: next });
+      setNotice(next.includes(id) ? '已共享到技术组件中心' : '已取消共享');
+    } catch (e) {
+      setSharedSkills(sharedSkills);
+      setNotice(String(e));
+    }
+  }
 
   async function load() {
     setLoading(true);
@@ -174,7 +196,13 @@ export default function SkillsPage() {
               <button className="btn" onClick={() => void copyContent(current)}>
                 {copied ? '已复制' : '复制全文'}
               </button>
-              <button className="btn primary" onClick={() => setOpenId(null)}>关闭</button>
+              <button
+                className={`btn ${sharedSkills.includes(current.id) ? '' : 'primary'}`}
+                onClick={() => void toggleShared(current.id)}
+              >
+                {sharedSkills.includes(current.id) ? '取消共享' : '共享到技术组件中心'}
+              </button>
+              <button className="btn" onClick={() => setOpenId(null)}>关闭</button>
             </div>
           </div>
         </div>
