@@ -1,19 +1,22 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { createConnection } from 'node:net';
-import { spawn } from 'node:child_process';
+import { exec, spawn, spawnSync } from 'node:child_process';
 import { Readable } from 'node:stream';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
+import AdmZip from 'adm-zip';
 import type { ChatIntro, Conversation, GroupWorkflow, Member, Message } from '@sbot/shared';
 import {
   addMember,
   addMessage,
   clearAgentSessions,
   createAgent,
+  createServer,
   findConversationByP2PGroup,
   getP2PState,
   setP2PState,
@@ -23,6 +26,7 @@ import {
   createModel,
   createTask,
   deleteAgent,
+  deleteServer,
   deleteConversation,
   deleteModel,
   deleteTask,
@@ -34,6 +38,8 @@ import {
   agentCrossMemory,
   lastAgentMessageAt,
   getAgent,
+  getServer,
+  getServerCredentials,
   getConversation,
   getDefaultModel,
   getModel,
@@ -49,6 +55,7 @@ import {
   listHumans,
   touchHumanSeen,
   listMessages,
+  listServers,
   listModels,
   listTasks,
   removeMember,
@@ -61,6 +68,7 @@ import {
   tasksForConversation,
   touchAgentSession,
   updateAgent,
+  updateServer,
   updateConversation,
   updateMember,
   updateModel,
@@ -75,12 +83,14 @@ import {
   generateText,
   getStatus as getOpencodeStatus,
   importableModels,
+  importSkill,
   installFromZip,
   listOpencodeModels,
   listSkills,
   openDataDir,
   resetBinaryCache,
   resetSkillInventory,
+  restartSidecar,
   resolveForm,
   resolvePermission,
   runAgent,
@@ -89,9 +99,11 @@ import {
   steerSession,
   syncModelConfig,
 } from './opencode.js';
-import { listDatasets, ragflowStatus, retrieve } from './ragflow.js';
+import { deleteDocuments, listChunks, listDatasets, listDocuments, ragflowStatus, retrieve, updateChunk, uploadDocuments } from './ragflow.js';
 import { getLanIdentity, getLanPeers, registerPeer, setLanIdentity, setLanPort } from './lan.js';
 import { reporterStatus, reportToCenter, startReporter } from './sbotCenter.js';
+import { browserToolkitInfo, ensureBrowserMcpStarted, openBrowserDir } from './browserMcp.js';
+import { testSshConnection } from './sshTest.js';
 import { MAX_FILE_BYTES, fileBlobPath, getFileMeta, openFileStream, saveFromResponse, saveUpload } from './files.js';
 import {
   getMattermostStatus,
@@ -359,6 +371,22 @@ app.post('/api/skills', async (c) => {
   }
 });
 
+/** 导入外部 SKILL.md（从服务端下载的原始文件），按原样写回技能目录 */
+app.post('/api/skills/import', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  try {
+    const data = importSkill({
+      id: typeof b?.id === 'string' ? b.id : undefined,
+      content: String(b?.content ?? ''),
+      overwrite: b?.overwrite === true,
+    });
+    resetSkillInventory();
+    return c.json({ data }, 201);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 400);
+  }
+});
+
 /** opencode 当前可用的技能：内置 + 本机 ~/.config/opencode/skills + 项目 .opencode/skills */
 app.get('/api/skills', async (c) => {
   const model = getDefaultModel();
@@ -413,9 +441,288 @@ app.patch('/api/settings', async (c) => {
     mattermostToken: typeof b?.mattermostToken === 'string' ? b.mattermostToken.trim() : undefined,
     sbotCenterUrl: typeof b?.sbotCenterUrl === 'string' ? b.sbotCenterUrl.trim() : undefined,
     sbotSharedSkills: Array.isArray(b?.sbotSharedSkills) ? b.sbotSharedSkills.map(String) : undefined,
+    browserEnabled: typeof b?.browserEnabled === 'boolean' ? b.browserEnabled : undefined,
+    browserMcpCommand: typeof b?.browserMcpCommand === 'string' ? b.browserMcpCommand.trim() : undefined,
+    browserMcpDir: typeof b?.browserMcpDir === 'string' ? b.browserMcpDir.trim() : undefined,
+    browserPath: typeof b?.browserPath === 'string' ? b.browserPath.trim() : undefined,
   });
+  if (b?.browserEnabled !== undefined || b?.browserMcpCommand !== undefined || b?.browserMcpDir !== undefined || b?.browserPath !== undefined) {
+    restartSidecar();
+    ensureBrowserMcpStarted();
+  }
   resetBinaryCache();
   return c.json({ data: getSettings() });
+});
+
+/** 浏览器离线包 / 本机浏览器检测（设置页给出可选项） */
+app.get('/api/browser/info', (c) => c.json({ data: browserToolkitInfo() }));
+
+/** 在资源管理器里打开离线包目录 */
+app.post('/api/browser/open-dir', (c) => c.json({ data: { ok: openBrowserDir() } }));
+
+/* ---------- SSH 终端（Windows 上智能体做不了交互式登录，给用户开个真实终端） ---------- */
+
+app.get('/api/ssh/status', (c) => {
+  let available = false;
+  let version = '';
+  try {
+    const r = spawnSync('ssh', ['-V'], { encoding: 'utf8' });
+    version = `${r.stderr || ''}${r.stdout || ''}`.trim();
+    available = r.status === 0 || !!version;
+  } catch { /* ignore */ }
+  if (!available) {
+    try {
+      spawnSync(process.platform === 'win32' ? 'where' : 'which', ['ssh'], { stdio: 'ignore' });
+      available = true;
+    } catch { /* ignore */ }
+  }
+  let keys: string[] = [];
+  try {
+    const dir = join(homedir(), '.ssh');
+    if (existsSync(dir)) {
+      keys = readdirSync(dir)
+        .filter((n) => /^id_[^/\\]+$/.test(n) && !n.endsWith('.pub'))
+        .map((n) => join(dir, n));
+    }
+  } catch { /* ignore */ }
+  return c.json({ data: { available, version, keys } });
+});
+
+/* ---------- 服务器维护（保存的服务器 + 私钥） ---------- */
+
+const sbotDataDir = resolve(process.env.SBOT_DATA_DIR ?? dirname(process.env.SBOT_DB ?? './data/sbot.db'));
+const sshKeyDir = join(sbotDataDir, 'ssh-keys');
+
+function saveSshKey(name: string, content: string): { path: string; name: string } {
+  const text = String(content ?? '');
+  if (!text.trim()) throw new Error('私钥内容为空');
+  if (text.length > 200_000) throw new Error('私钥文件过大');
+  if (!/PRIVATE KEY/.test(text)) throw new Error('不是有效的私钥文件（缺少 PRIVATE KEY）');
+  mkdirSync(sshKeyDir, { recursive: true });
+  const safe = String(name || 'key.pem').replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'key.pem';
+  const file = join(sshKeyDir, `${Date.now().toString(36)}_${safe}`);
+  writeFileSync(file, text, { mode: 0o600 });
+  try { chmodSync(file, 0o600); } catch { /* ignore */ }
+  return { path: file, name: safe };
+}
+
+function validServerInput(b: any): { host: string; port: number; username: string } | { error: string } {
+  const host = String(b?.host ?? '').trim();
+  const username = String(b?.username ?? '').trim();
+  const port = Number(b?.port ?? 22);
+  if (!/^[A-Za-z0-9._:-]+$/.test(host)) return { error: '服务器地址不合法（只支持 IP / 域名）' };
+  if (username && !/^[A-Za-z0-9._-]+$/.test(username)) return { error: '用户名不合法' };
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return { error: '端口不合法' };
+  return { host, port, username };
+}
+
+app.get('/api/servers', (c) => c.json({ data: listServers() }));
+
+app.post('/api/servers', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const v = validServerInput(b);
+  if ('error' in v) return c.json({ error: v.error }, 400);
+  let keyPath = '';
+  let keyName = '';
+  if (typeof b?.keyContent === 'string' && b.keyContent.trim()) {
+    try {
+      const k = saveSshKey(String(b?.keyName ?? 'key.pem'), b.keyContent);
+      keyPath = k.path;
+      keyName = k.name;
+    } catch (e) {
+      return c.json({ error: String((e as Error).message ?? e) }, 400);
+    }
+  }
+  const server = createServer({
+    name: String(b?.name ?? '').trim() || v.host,
+    host: v.host,
+    port: v.port,
+    username: v.username,
+    keyPath,
+    keyName,
+    password: typeof b?.password === 'string' ? b.password : undefined,
+    passphrase: typeof b?.passphrase === 'string' ? b.passphrase : undefined,
+    note: String(b?.note ?? ''),
+  });
+  return c.json({ data: server }, 201);
+});
+
+app.patch('/api/servers/:id', async (c) => {
+  const id = c.req.param('id');
+  const old = getServer(id);
+  if (!old) return c.json({ error: '服务器不存在' }, 404);
+  const b = await c.req.json().catch(() => ({} as any));
+  const v = validServerInput({ host: b?.host ?? old.host, port: b?.port ?? old.port, username: b?.username ?? old.username });
+  if ('error' in v) return c.json({ error: v.error }, 400);
+
+  let keyPath: string | undefined;
+  let keyName: string | undefined;
+  if (typeof b?.keyContent === 'string' && b.keyContent.trim()) {
+    try {
+      const k = saveSshKey(String(b?.keyName ?? 'key.pem'), b.keyContent);
+      keyPath = k.path;
+      keyName = k.name;
+    } catch (e) {
+      return c.json({ error: String((e as Error).message ?? e) }, 400);
+    }
+  } else if (b?.clearKey === true) {
+    keyPath = '';
+    keyName = '';
+  }
+
+  updateServer(id, {
+    name: typeof b?.name === 'string' ? b.name.trim() || v.host : undefined,
+    host: v.host,
+    port: v.port,
+    username: v.username,
+    note: typeof b?.note === 'string' ? b.note : undefined,
+    keyPath,
+    keyName,
+    password: b?.clearPassword === true ? '' : typeof b?.password === 'string' && b.password ? b.password : undefined,
+    passphrase: b?.clearPassphrase === true ? '' : typeof b?.passphrase === 'string' && b.passphrase ? b.passphrase : undefined,
+  });
+  if (keyPath && old.keyPath && old.keyPath !== keyPath && old.keyPath.startsWith(sshKeyDir)) {
+    try { unlinkSync(old.keyPath); } catch { /* ignore */ }
+  }
+  return c.json({ data: getServer(id) });
+});
+
+app.delete('/api/servers/:id', (c) => {
+  const id = c.req.param('id');
+  const old = getServer(id);
+  if (!old) return c.json({ error: '服务器不存在' }, 404);
+  deleteServer(id);
+  if (old.keyPath && old.keyPath.startsWith(sshKeyDir)) {
+    try { unlinkSync(old.keyPath); } catch { /* ignore */ }
+  }
+  return c.json({ data: true });
+});
+
+/** 拉起独立的 SSH 终端进程（ssh2，不依赖 Windows 自带 ssh.exe） */
+function spawnSshTerminal(input: {
+  host: string;
+  port: number;
+  username: string;
+  keyPath: string;
+  password: string;
+  passphrase: string;
+}): void {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    SSH_HOST: input.host,
+    SSH_PORT: String(input.port),
+    SSH_USER: input.username,
+    SSH_PASSWORD: input.password,
+    SSH_KEY: input.keyPath,
+    SSH_PASSPHRASE: input.passphrase,
+  };
+  // 打包后：apps/desktop/server/ssh-term.cjs（在 asar 里，外部进程不能直接执行）；
+  // 先复制到数据目录再拉起。开发时：packages/server/src/sshTerm.ts
+  const declaredDir = typeof __dirname === 'string' ? __dirname : '';
+  const bundled = declaredDir ? join(declaredDir, 'ssh-term.cjs') : '';
+  const sbotData = resolve(process.env.SBOT_DATA_DIR ?? dirname(process.env.SBOT_DB ?? './data/sbot.db'));
+  let script: string;
+  let args: string[];
+  let cwd: string;
+  if (bundled && existsSync(bundled)) {
+    script = join(sbotData, 'ssh-term.cjs');
+    try {
+      const srcSize = statSync(bundled).size;
+      const dstSize = existsSync(script) ? statSync(script).size : -1;
+      if (dstSize !== srcSize) {
+        mkdirSync(sbotData, { recursive: true });
+        writeFileSync(script, readFileSync(bundled));
+      }
+    } catch {
+      // 复制失败就直接用 asar 里的路径，至少给个机会
+      script = bundled;
+    }
+    args = [script];
+    cwd = sbotData;
+    env.ELECTRON_RUN_AS_NODE = '1';
+  } else {
+    script = join(process.cwd(), 'src', 'sshTerm.ts');
+    if (!existsSync(script)) throw new Error('找不到 ssh 终端脚本');
+    args = ['--import', 'tsx', script];
+    cwd = process.cwd();
+  }
+  const cmd = `start "" "${process.execPath}" ${args.map((a) => `"${a}"`).join(' ')}`;
+  exec(cmd, { env, cwd, windowsHide: false }, () => { /* start 返回后不关心 */ });
+}
+
+app.post('/api/ssh/test', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const serverId = String(b?.serverId ?? '').trim();
+  let host = String(b?.host ?? '').trim();
+  let user = String(b?.user ?? '').trim();
+  let port = Number(b?.port ?? 22);
+  let password = typeof b?.password === 'string' ? b.password : '';
+  let passphrase = typeof b?.passphrase === 'string' ? b.passphrase : '';
+  let keyPath = typeof b?.keyPath === 'string' ? b.keyPath : '';
+  const keyContent = typeof b?.keyContent === 'string' ? String(b.keyContent) : '';
+
+  if (serverId) {
+    const saved = getServer(serverId);
+    if (!saved) return c.json({ error: '服务器不存在' }, 404);
+    const creds = getServerCredentials(serverId);
+    if (!host) host = saved.host;
+    if (!user) user = saved.username;
+    if (!b?.port) port = saved.port;
+    if (!password) password = creds.password;
+    if (!passphrase) passphrase = creds.passphrase;
+    if (!keyPath) keyPath = saved.keyPath;
+  }
+  if (!/^[A-Za-z0-9._:-]+$/.test(host)) return c.json({ error: '主机地址不合法（只支持 IP / 域名）' }, 400);
+  if (user && !/^[A-Za-z0-9._-]+$/.test(user)) return c.json({ error: '用户名不合法' }, 400);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return c.json({ error: '端口不合法' }, 400);
+  if (!keyContent && keyPath && !existsSync(keyPath)) return c.json({ error: '密钥文件不存在' }, 400);
+
+  const result = await testSshConnection({
+    host,
+    port,
+    username: user,
+    password,
+    privateKeyContent: keyContent || undefined,
+    privateKeyPath: keyContent ? undefined : keyPath,
+    passphrase,
+  });
+  return c.json({ data: result }, result.ok ? 200 : 400);
+});
+
+app.post('/api/ssh/open', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const serverId = String(b?.serverId ?? '').trim();
+  let host = String(b?.host ?? '').trim();
+  let user = String(b?.user ?? '').trim();
+  let keyPath = String(b?.keyPath ?? '').trim();
+  let port = Number(b?.port ?? 22);
+  let password = typeof b?.password === 'string' ? b.password : '';
+  let passphrase = typeof b?.passphrase === 'string' ? b.passphrase : '';
+
+  if (serverId) {
+    const saved = getServer(serverId);
+    if (!saved) return c.json({ error: '服务器不存在' }, 404);
+    const creds = getServerCredentials(serverId);
+    host = saved.host;
+    user = saved.username;
+    keyPath = saved.keyPath;
+    port = saved.port;
+    password = creds.password;
+    passphrase = creds.passphrase;
+  }
+  if (!/^[A-Za-z0-9._:-]+$/.test(host)) return c.json({ error: '主机地址不合法（只支持 IP / 域名）' }, 400);
+  if (user && !/^[A-Za-z0-9._-]+$/.test(user)) return c.json({ error: '用户名不合法' }, 400);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return c.json({ error: '端口不合法' }, 400);
+  if (keyPath && !existsSync(keyPath)) return c.json({ error: '密钥文件不存在' }, 400);
+  if (process.platform !== 'win32') return c.json({ error: '当前系统不支持自动打开终端' }, 400);
+  if (!keyPath && !password) return c.json({ error: '这台服务器还没有保存密码或私钥，先在页面里补上' }, 400);
+
+  try {
+    spawnSshTerminal({ host, port, username: user, keyPath, password, passphrase });
+    return c.json({ data: { ok: true, target: user ? `${user}@${host}` : host } });
+  } catch (e) {
+    return c.json({ error: '打开终端失败：' + String((e as Error).message ?? e) }, 500);
+  }
 });
 
 app.post('/api/opencode/install', async (c) => {
@@ -441,6 +748,77 @@ app.patch('/api/kb/enabled', async (c) => {
   const ids = Array.isArray(b?.ids) ? b.ids.map(String) : [];
   saveSettings({ ragflowEnabledKbs: ids });
   return c.json({ data: ids });
+});
+
+/** 某个知识库（数据集）里的文件列表 */
+app.get('/api/kb/datasets/:id/documents', async (c) => {
+  try {
+    return c.json({ data: await listDocuments(c.req.param('id')) });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e), data: [] }, 502);
+  }
+});
+
+/** 上传文件到知识库，上传后自动触发解析 */
+app.post('/api/kb/datasets/:id/documents', async (c) => {
+  try {
+    const body = await c.req.parseBody({ all: true });
+    const raw = (body as Record<string, unknown>)['file'];
+    const files = (Array.isArray(raw) ? raw : [raw]).filter(
+      (f): f is File => typeof f === 'object' && f !== null && typeof (f as File).arrayBuffer === 'function',
+    );
+    if (!files.length) return c.json({ error: '没有收到文件' }, 400);
+    const payload = await Promise.all(files.map(async (f) => ({
+      name: f.name || 'upload.bin',
+      type: f.type,
+      buffer: Buffer.from(await f.arrayBuffer()),
+    })));
+    const result = await uploadDocuments(c.req.param('id'), payload);
+    return c.json({ data: result }, 201);
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 502);
+  }
+});
+
+/** 删除知识库里的文件 */
+app.delete('/api/kb/datasets/:id/documents', async (c) => {
+  try {
+    const b = await c.req.json().catch(() => ({} as any));
+    const ids = Array.isArray(b?.ids) ? b.ids.map(String) : [];
+    if (!ids.length) return c.json({ error: '没有指定要删除的文件' }, 400);
+    await deleteDocuments(c.req.param('id'), ids);
+    return c.json({ data: ids });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 502);
+  }
+});
+
+/** 文档的分块列表 */
+app.get('/api/kb/datasets/:id/documents/:docId/chunks', async (c) => {
+  try {
+    const data = await listChunks(c.req.param('id'), c.req.param('docId'));
+    return c.json({ data });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e), data: [] }, 502);
+  }
+});
+
+/** 编辑分块内容 / 关键词 */
+app.put('/api/kb/datasets/:id/documents/:docId/chunks/:chunkId', async (c) => {
+  try {
+    const b = await c.req.json().catch(() => ({} as any));
+    const content = String(b?.content ?? '').trim();
+    if (!content) return c.json({ error: '分块内容不能为空' }, 400);
+    const keywords = Array.isArray(b?.keywords) ? b.keywords.map((k: unknown) => String(k).trim()).filter(Boolean) : [];
+    await updateChunk(c.req.param('id'), c.req.param('docId'), c.req.param('chunkId'), {
+      content,
+      keywords,
+      available: typeof b?.available === 'boolean' ? b.available : undefined,
+    });
+    return c.json({ data: true });
+  } catch (e) {
+    return c.json({ error: String((e as Error).message ?? e) }, 502);
+  }
 });
 
 /* ---------- 真人 / 推送 ---------- */
@@ -1581,6 +1959,145 @@ app.delete('/api/agents/:id', (c) => {
   deleteAgent(id);
   broadcast('agents', { action: 'delete', agentId: id });
   return c.json({ ok: true });
+});
+
+/** 导出单个智能体；withMemory=1 时把和本机用户的私聊记忆一起打成 zip */
+app.get('/api/agents/:id/export', (c) => {
+  const id = c.req.param('id');
+  const agent = getAgent(id);
+  if (!agent) return c.json({ error: '智能体不存在' }, 404);
+  const withMemory = ['1', 'true'].includes(String(c.req.query('withMemory') ?? '').toLowerCase());
+
+  const zip = new AdmZip();
+  zip.addFile('agent.json', Buffer.from(JSON.stringify({
+    kind: 's-bot-agent',
+    version: 1,
+    exportedAt: Date.now(),
+    agent,
+  }, null, 2), 'utf8'));
+
+  let memoryCount = 0;
+  let conversationId: string | null = null;
+  if (withMemory) {
+    const dm = listConversations()
+      .filter((cv) => cv.type === 'dm' && cv.members.some((m) => m.memberId === id))
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    const messages = dm
+      ? listMessages(dm.id, 2000).filter((m) => m.status === 'done' && (m.role === 'user' || m.role === 'assistant'))
+      : [];
+    memoryCount = messages.length;
+    conversationId = dm?.id ?? null;
+    zip.addFile('memory/messages.json', Buffer.from(JSON.stringify({
+      conversation: dm ? { id: dm.id, title: dm.title, createdAt: dm.createdAt, updatedAt: dm.updatedAt } : null,
+      messages: messages.map((m) => ({
+        role: m.role,
+        text: m.text,
+        createdAt: m.createdAt,
+        authorName: m.authorName ?? null,
+        modelId: m.modelId ?? null,
+        parts: m.parts ?? [],
+      })),
+    }, null, 2), 'utf8'));
+  }
+
+  zip.addFile('manifest.json', Buffer.from(JSON.stringify({
+    kind: 's-bot-agent-pack',
+    version: 1,
+    agentId: id,
+    agentName: agent.name,
+    hasMemory: withMemory,
+    memoryCount,
+    conversationId,
+    exportedAt: Date.now(),
+  }, null, 2), 'utf8'));
+
+  const buf = zip.toBuffer();
+  const body = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+  const name = `${agent.name}${withMemory ? '-智能体与记忆' : '-智能体'}.zip`;
+  const encoded = encodeURIComponent(name);
+  return c.body(body, 200, {
+    'content-type': 'application/zip',
+    'content-disposition': `attachment; filename="${encoded}"; filename*=UTF-8''${encoded}`,
+  });
+});
+
+/** 导入智能体包（zip）：新建智能体，并把包里的私聊记忆恢复成一条新的私聊 */
+app.post('/api/agents/import-pack', async (c) => {
+  const b = await c.req.json().catch(() => ({} as any));
+  const base64 = String(b?.base64 ?? '');
+  if (!base64) return c.json({ error: '缺少文件内容' }, 400);
+
+  let zip: AdmZip;
+  let agentEntry: AdmZip.IZipEntry | null = null;
+  try {
+    zip = new AdmZip(Buffer.from(base64, 'base64'));
+    agentEntry = zip.getEntry('agent.json') ?? null;
+  } catch {
+    return c.json({ error: '不是有效的 zip 文件' }, 400);
+  }
+
+  if (!agentEntry) return c.json({ error: '不是有效的智能体包（缺少 agent.json）' }, 400);
+
+  let a: any;
+  try {
+    const parsed = JSON.parse(zip.readAsText(agentEntry));
+    a = parsed?.agent ?? parsed;
+  } catch {
+    return c.json({ error: 'agent.json 解析失败' }, 400);
+  }
+
+  const name = String(a?.name ?? '').trim();
+  const role = String(a?.role ?? '').trim();
+  if (!name || !role) return c.json({ error: '智能体包缺少名称或岗位' }, 400);
+
+  const agent = createAgent({
+    name,
+    role,
+    color: typeof a.color === 'string' && a.color ? a.color : '#5B8CFF',
+    initial: typeof a.initial === 'string' && a.initial ? a.initial : name.slice(0, 1),
+    description: String(a.description ?? ''),
+    systemPrompt: String(a.systemPrompt ?? ''),
+    modelId: typeof a.modelId === 'string' && a.modelId ? a.modelId : null,
+    visibility: a.visibility === 'private' ? 'private' : 'team',
+    tools: a?.tools && typeof a.tools === 'object' ? a.tools : {},
+    skills: Array.isArray(a.skills) ? a.skills.map((s: unknown) => String(s)) : [],
+    kbIds: Array.isArray(a.kbIds) ? a.kbIds.map((s: unknown) => String(s)) : [],
+    group: String(a.group ?? ''),
+    tags: Array.isArray(a.tags) ? a.tags.map((s: unknown) => String(s)) : [],
+    shared: false,
+  });
+
+  const conv = ensureDm(agent.id);
+  let count = 0;
+  const memEntry = zip.getEntry('memory/messages.json');
+  if (memEntry) {
+    try {
+      const mem = JSON.parse(zip.readAsText(memEntry));
+      for (const m of (mem?.messages ?? []).slice(-2000)) {
+        const text = String(m?.text ?? '').trim();
+        if (!text) continue;
+        const isUser = m.role === 'user';
+        addMessage({
+          conversationId: conv.id,
+          authorType: isUser ? 'user' : 'agent',
+          authorId: isUser ? null : agent.id,
+          authorName: isUser ? '我' : agent.name,
+          authorColor: isUser ? null : agent.color,
+          authorInitial: isUser ? null : agent.initial,
+          role: isUser ? 'user' : 'assistant',
+          text,
+          modelId: isUser ? null : (typeof m.modelId === 'string' ? m.modelId : null),
+          status: 'done',
+          parts: Array.isArray(m.parts) ? m.parts : [],
+          createdAt: Number(m.createdAt) || Date.now(),
+        });
+        count++;
+      }
+    } catch { /* 记忆损坏就只导入智能体 */ }
+  }
+
+  broadcast('agents', { action: 'create', agentId: agent.id });
+  return c.json({ data: { agent, conversationId: conv.id, messages: count } }, 201);
 });
 
 /* ---------- 任务 ---------- */
@@ -3073,6 +3590,20 @@ function crossConversationMemory(agentId: string, currentConvId: string, limit =
   return `【你和用户最近的私聊记录（跨会话记忆，仅供参考，别当成当前群聊上下文）】\n${lines.join('\n')}`;
 }
 
+/** 已维护的服务器：让智能体知道有哪些机器、用什么命令非交互连接 */
+function serversContext(): string {
+  const list = listServers().filter((s) => s.keyPath && s.host);
+  if (!list.length) return '';
+  const lines = list.map((s) => {
+    const target = `${s.username ? `${s.username}@` : ''}${s.host}`;
+    return `- ${s.name || s.host}：ssh -i "${s.keyPath}" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -p ${s.port} ${target} "<要执行的命令>"`;
+  });
+  return [
+    '【可连接的服务器（用 shell 工具非交互执行；不要用需要输入密码的交互式 ssh）】',
+    ...lines,
+  ].join('\n');
+}
+
 /** 把「人设 + 群聊最近发言 + 这次要回的话」拼成给 opencode 的 prompt */
 function buildOpencodePrompt(
   conv: Conversation,
@@ -3110,10 +3641,12 @@ function buildOpencodePrompt(
   ].filter(Boolean).join('\n');
 
   const memory = crossConversationMemory(agent.id, conv.id);
+  const servers = serversContext();
 
   return [
     persona,
     ...(memory ? ['', memory] : []),
+    ...(servers ? ['', servers] : []),
     '',
     `【${conv.type === 'group' ? '群聊' : '对话'}最近的发言】`,
     context || '（还没有）',
@@ -4295,8 +4828,11 @@ app.post('/api/runs/:runId/reply', async (c) => {
 const port = Number(process.env.PORT ?? 8787);
 setLanPort(port);
 
-// 技术组件中心上报：配置了地址就每 60 秒报一次
+// 技术组件中心上报：默认每 10 秒一次
 startReporter();
+
+// 浏览器 MCP：默认开启，启动时确保离线包里的 import.ps1 已经跑过
+ensureBrowserMcpStarted();
 
 /** 手动上报 / 查看上报状态（设置页用） */
 app.post('/api/sbot/report-now', async (c) => {
