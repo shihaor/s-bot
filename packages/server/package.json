@@ -1,6 +1,6 @@
 {
   "name": "@sbot/server",
-  "version": "0.2.32",
+  "version": "0.2.33",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,12 +14,14 @@
     "@opencode/client": "^2.1.4",
     "@sbot/shared": "*",
     "adm-zip": "^0.6.1",
-    "hono": "^4.0.0"
+    "hono": "^4.0.0",
+    "ssh2": "^1.17.0"
   },
   "devDependencies": {
     "@opencode/cli": "^2.1.4",
     "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.0.0",
+    "@types/ssh2": "^1.15.6",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   }
